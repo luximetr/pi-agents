@@ -7,6 +7,12 @@ const STATE_ENTRY = "pi-agents-state";
 const DEFAULT_SELECT_SHORTCUT = "ctrl+shift+a";
 const DEFAULT_ROTATE_SHORTCUT = "alt+a";
 
+/** Normalize a config keybinding (single key or array) into a unique, lowercase key list. */
+function normalizeShortcutKeys(value: string | string[] | undefined, fallback: string): string[] {
+	const list = value === undefined ? [fallback] : Array.isArray(value) ? value : [value];
+	return [...new Set(list.map((k) => k.trim().toLowerCase()).filter(Boolean))];
+}
+
 export default function (pi: ExtensionAPI) {
 	let agents: DiscoveredAgent[] = [];
 	let config: PiAgentsConfig = {};
@@ -107,21 +113,25 @@ export default function (pi: ExtensionAPI) {
 		else applyAgent(nextName, ctx);
 	}
 
-	// --- UI registration (bindings configurable via config.json) ---
+	// --- UI registration (bindings configurable via config.json, one key or several) ---
 
-	pi.registerShortcut((config.keybindings?.select ?? DEFAULT_SELECT_SHORTCUT) as KeyId, {
-		description: "Select agent",
-		handler: async (ctx) => {
-			await showPicker(ctx);
-		},
-	});
+	for (const key of normalizeShortcutKeys(config.keybindings?.select, DEFAULT_SELECT_SHORTCUT)) {
+		pi.registerShortcut(key as KeyId, {
+			description: "Select agent",
+			handler: async (ctx) => {
+				await showPicker(ctx);
+			},
+		});
+	}
 
-	pi.registerShortcut((config.keybindings?.rotate ?? DEFAULT_ROTATE_SHORTCUT) as KeyId, {
-		description: "Rotate agent",
-		handler: async (ctx) => {
-			await rotateAgent(ctx);
-		},
-	});
+	for (const key of normalizeShortcutKeys(config.keybindings?.rotate, DEFAULT_ROTATE_SHORTCUT)) {
+		pi.registerShortcut(key as KeyId, {
+			description: "Rotate agent",
+			handler: async (ctx) => {
+				await rotateAgent(ctx);
+			},
+		});
+	}
 
 	pi.registerCommand("agent", {
 		description: "Select an agent: /agent <name>, /agent for picker, /agent none to clear",

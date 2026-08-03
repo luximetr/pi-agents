@@ -4,6 +4,28 @@ import { pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
+/** Pi's built-in tools (always available). */
+export const TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+export type BuiltinTool = (typeof TOOLS)[number];
+
+/** Enum-style accessor for built-in tools, e.g. `tools: [Tools.read, Tools.grep]`. */
+export const Tools: Record<BuiltinTool, BuiltinTool> = {
+	read: "read",
+	bash: "bash",
+	edit: "edit",
+	write: "write",
+	grep: "grep",
+	find: "find",
+	ls: "ls",
+};
+
+/**
+ * Any valid tool name: a built-in tool or one registered by an extension.
+ * The `(string & {})` fallback keeps custom tool names valid while editors
+ * still autocomplete the known built-ins.
+ */
+export type ToolName = BuiltinTool | (string & {});
+
 /**
  * Agent definition. Model and thinking level are NOT part of an agent -
  * they are selected in pi itself (/model, thinking UI).
@@ -14,7 +36,7 @@ export interface AgentConfig {
 	/** One-line description shown in the picker */
 	description: string;
 	/** Tool allowlist. Omit to keep current tools (use "default" for pi defaults). */
-	tools?: string[];
+	tools?: ToolName[];
 	/** System prompt, inline */
 	systemPrompt?: string;
 	/** System prompt loaded from a markdown file (relative to agent file/dir) */
@@ -32,8 +54,9 @@ export interface DiscoveredAgent extends AgentConfig {
 export interface PiAgentsConfig {
 	defaultAgent?: string;
 	keybindings?: {
-		select?: string;
-		rotate?: string;
+		/** One key or several (fallbacks for terminals that don't send alt/ctrl+shift distinctly). */
+		select?: string | string[];
+		rotate?: string | string[];
 	};
 }
 
@@ -76,7 +99,9 @@ function normalizeAgent(
 	return {
 		name,
 		description: cfg.description.trim(),
-		tools: Array.isArray(cfg.tools) ? cfg.tools.map((t) => String(t).trim()).filter(Boolean) : undefined,
+		tools: Array.isArray(cfg.tools)
+			? (cfg.tools.map((t) => String(t).trim()).filter(Boolean) as ToolName[])
+			: undefined,
 		systemPrompt: systemPrompt?.trim() ? systemPrompt : undefined,
 		default: cfg.default === true,
 		filePath,
@@ -137,14 +162,27 @@ export function findProjectAgentsDir(cwd: string): string | null {
 	}
 }
 
+function normalizeKeys(value: string | string[] | undefined): string[] | undefined {
+	if (value === undefined) return undefined;
+	const list = Array.isArray(value) ? value : [value];
+	const keys = [...new Set(list.map((k) => String(k).trim().toLowerCase()).filter(Boolean))];
+	return keys.length > 0 ? keys : undefined;
+}
+
 function loadConfigFrom(dir: string): PiAgentsConfig {
 	const configPath = path.join(dir, "config.json");
 	if (!fs.existsSync(configPath)) return {};
 	try {
 		const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8")) as Partial<PiAgentsConfig>;
+		const keybindings = parsed.keybindings && typeof parsed.keybindings === "object" ? parsed.keybindings : undefined;
 		return {
 			defaultAgent: typeof parsed.defaultAgent === "string" ? parsed.defaultAgent : undefined,
-			keybindings: parsed.keybindings && typeof parsed.keybindings === "object" ? parsed.keybindings : undefined,
+			keybindings: keybindings
+				? {
+						select: normalizeKeys(keybindings.select),
+						rotate: normalizeKeys(keybindings.rotate),
+				  }
+				: undefined,
 		};
 	} catch (err) {
 		console.error(`pi-agents: failed to parse ${configPath}: ${err}`);
@@ -159,7 +197,10 @@ export function loadConfig(cwd: string): PiAgentsConfig {
 	const projectConfig = projectDir ? loadConfigFrom(projectDir) : {};
 	return {
 		defaultAgent: projectConfig.defaultAgent ?? globalConfig.defaultAgent,
-		keybindings: { ...globalConfig.keybindings, ...projectConfig.keybindings },
+		keybindings: {
+			select: projectConfig.keybindings?.select ?? globalConfig.keybindings?.select,
+			rotate: projectConfig.keybindings?.rotate ?? globalConfig.keybindings?.rotate,
+		},
 	};
 }
 

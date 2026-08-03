@@ -71,6 +71,24 @@ export default {
 
 Files are TypeScript loaded with [jiti](https://github.com/unjs/jiti) — you can use imports, helpers, or an async factory (`export default async () => ({...})`). Omit `tools` to keep the current toolset.
 
+#### Typed tools
+
+`tools` accepts any registered tool name (built-ins plus extension/MCP tools) and unknown names are filtered with a warning at apply time. For type checking + autocomplete, import the types from the extension and use the enum-style accessor:
+
+```ts
+import { Tools, type AgentConfig } from "../../.pi/extensions/pi-agents/agents"; // path relative to your agent file
+
+const cfg: AgentConfig = {
+  name: "doc",
+  description: "Documentation agent.",
+  tools: [Tools.read, Tools.grep, Tools.find, Tools.ls, Tools.write, Tools.edit, Tools.bash],
+  systemPrompt: "You are the DOC agent.",
+};
+export default cfg;
+```
+
+Plain string literals work too — `"read"` and `Tools.read` are the same value. Any string is allowed at the type level (`ToolName`), so custom tools registered by other extensions type-check as well; the built-ins just get autocomplete in editors.
+
 ### config.json
 
 ```json
@@ -80,7 +98,28 @@ Files are TypeScript loaded with [jiti](https://github.com/unjs/jiti) — you ca
 }
 ```
 
-`defaultAgent` is optional — unset (or `null`) means plain pi is the default. Keybinding overrides apply from the project config.
+`defaultAgent` is optional — unset (or `null`) means plain pi is the default. Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends:
+
+```json
+{
+  "keybindings": {
+    "select": ["ctrl+shift+a", "ctrl+q"],
+    "rotate": ["alt+a", "ctrl+shift+r"]
+  }
+}
+```
+
+## Troubleshooting: shortcuts don't fire
+
+The shortcuts are plain terminal key sequences — if your terminal doesn't send them, pi never sees them and the key falls through (e.g. `alt+a` types `å`).
+
+- **`alt+a` (rotate)** requires the terminal to send `Alt` as an escape prefix. On macOS the default is *not* to send it:
+  - iTerm2: Settings → Profiles → Keys → **Option key sends:** → `ESC+`
+  - Terminal.app: Settings → Profiles → Keyboard → enable **Use Option as Meta key**
+  - kitty / WezTerm / Ghostty: works out of the box
+- **`ctrl+shift+a` (select)** requires the terminal to report `Ctrl+Shift` distinctly (Kitty keyboard protocol / CSI-u). Terminals that do: kitty, WezTerm, Ghostty, iTerm2 with **Report modifiers using CSI u** enabled. Other terminals send the same bytes as plain `ctrl+a`, which pi sees as its built-in "cursor to line start".
+- **Works regardless of terminal:** `/agent` (picker), `/agent dev` (direct), and `pi --agent dev` (startup). Commands don't depend on key encoding.
+- **Add a fallback key** that your terminal sends reliably via `keybindings` above — plain `ctrl+letter` combos work in every terminal.
 
 ## How it works
 
