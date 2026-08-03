@@ -29,6 +29,7 @@ Either way: `/reload` in pi (or restart) to pick up the extension.
 | Open agent picker | `ctrl+shift+a` |
 | Rotate to next agent | `alt+a` (cycles: plain pi → dev → doc → … → plain pi) |
 | Switch directly | `/agent dev`, `/agent none` |
+| Ask about the extension | `/agent:help <question>` (answered from the bundled guide) |
 | Picker | `/agent` |
 | Start with agent | `pi --agent dev` |
 | Active agent indicator | footer status line: `agent:dev` |
@@ -173,9 +174,14 @@ Details:
 - Text/image results are passed through to the LLM; `structuredContent` is appended as JSON; errors surface as tool failures.
 - The picker shows `mcp:playwright` in the agent description line.
 
-## On-demand guide (`pi_agents_guide` tool)
+## On-demand guide (`pi_agents_guide` tool + `/agent:help`)
 
-The extension bundles `guide.md` (next to `index.ts`) covering how to use the extension: switching agents, creating agents, adding tools, and configuring MCP servers. It is exposed as the `pi_agents_guide` tool, which is **always available** — in plain pi and under every agent — the extension adds it to the active toolset automatically. Agents call it like a CLI `--help` when they need to know how pi-agents works; no tokens are spent when it isn't called. First-time users can just ask plain pi "how does pi-agents work?".
+The extension bundles `guide.md` (next to `index.ts`) covering how to use the extension: switching agents, creating agents, adding tools, and configuring MCP servers. It's available two ways:
+
+- **`/agent:help <question>`** — the command injects the guide into the next turn's system prompt (one-shot, no per-turn token cost) and submits your question: `/agent:help how do I add an MCP server?`
+- **`pi_agents_guide` tool** — always in the active toolset, in plain pi and under every agent, so the model can pull the guide mid-conversation like a CLI `--help`.
+
+First-time users can also just ask plain pi "how does pi-agents work?" — the tool is available right after install.
 
 ## Troubleshooting: shortcuts don't fire
 

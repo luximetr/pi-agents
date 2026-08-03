@@ -9,6 +9,7 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 - The active agent's system prompt is appended every turn; its tools are restricted to its allowlist (+ its MCP tools).
 - No agent selected = plain pi, unchanged.
 - `pi_agents_guide` is always available — in plain pi and under every agent.
+- `/agent:help <question>` answers a question from this guide (e.g. `/agent:help how do I add an MCP server?`).
 
 ## Where agents live
 

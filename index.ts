@@ -45,6 +45,8 @@ export default function (pi: ExtensionAPI) {
 	let config: PiAgentsConfig = {};
 	let activeName: string | undefined;
 	let activeAgent: DiscoveredAgent | undefined;
+	/** Set by /agent:help; injects the bundled guide into the next turn only (one-shot). */
+	let helpPending = false;
 	/** Toolset before the first agent was applied; used to restore plain pi. */
 	let originalTools: string[] | undefined;
 	let persistedName: string | undefined;
@@ -212,14 +214,38 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("agent:help", {
+		description: "Ask a question about pi-agents, answered from the bundled guide: /agent:help <question>",
+		handler: async (args, ctx) => {
+			const question = args?.trim();
+			if (!question) {
+				ctx.ui.notify('Usage: /agent:help <question> — e.g. "/agent:help how do I add an MCP server?"', "info");
+				return;
+			}
+			if (!GUIDE) {
+				ctx.ui.notify("pi-agents: bundled guide.md is not available.", "error");
+				return;
+			}
+			helpPending = true;
+			pi.sendUserMessage(question, { deliverAs: "followUp" });
+		},
+	});
+
 	// --- Agent prompt injection ---
 
 	pi.on("before_agent_start", async (event) => {
-		if (activeAgent?.systemPrompt) {
-			return {
-				systemPrompt: `${event.systemPrompt}\n\n${activeAgent.systemPrompt}`,
-			};
+		const parts: string[] = [];
+		if (activeAgent?.systemPrompt) parts.push(activeAgent.systemPrompt);
+		if (helpPending && GUIDE) {
+			helpPending = false;
+			parts.push(
+				`The user asked a question about the pi-agents extension. Answer it using the bundled guide:\n\n${GUIDE}`,
+			);
 		}
+		if (parts.length === 0) return;
+		return {
+			systemPrompt: `${event.systemPrompt}\n\n${parts.join("\n\n")}`,
+		};
 	});
 
 	// --- Session lifecycle: discover, restore, persist ---
