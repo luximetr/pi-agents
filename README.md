@@ -12,6 +12,7 @@ npm install
 mkdir -p .pi/extensions/pi-agents
 ln -sf ../../index.ts .pi/extensions/pi-agents/index.ts
 ln -sf ../../agents.ts .pi/extensions/pi-agents/agents.ts
+ln -sf ../../mcp.ts .pi/extensions/pi-agents/mcp.ts
 ln -sf ../../ui.ts .pi/extensions/pi-agents/ui.ts
 ```
 
@@ -36,7 +37,7 @@ Model and reasoning level are **not** part of an agent — pick them in pi itsel
 
 ## Defining agents
 
-Agents live in `.pi-agents/` — project root (walked up to git root) and global `~/.pi/pi-agents/`. Project agents override global ones with the same name.
+Agents live in `.pi-agents/` — project root (walked up to git root) and global `~/.pi/agent/pi-agents/` (pi's agent config dir). Project agents override global ones with the same name.
 
 ### Folder per agent (recommended)
 
@@ -119,7 +120,7 @@ Plain string literals work too — `"read"` and `Tools.read` are the same value.
 
 ### MCP servers (per-agent, opt-in)
 
-`mcpServers` in `config.json` (global + project, project wins per server) defines [MCP](https://modelcontextprotocol.io) stdio servers — standard Claude Desktop-style config: `command`, `args`, `env`, `cwd`. **Nothing is connected unless an agent opts in** — add the server names to the agent's `mcp` field and only those servers are started and only their tools are activated:
+`mcpServers` in `config.json` defines [MCP](https://modelcontextprotocol.io) stdio servers — standard Claude Desktop-style config: `command`, `args`, `env`, `cwd`. **Nothing is connected unless an agent opts in** — add the server names to the agent's `mcp` field and only those servers are started and only their tools are activated:
 
 ```ts
 export default {
@@ -130,6 +131,39 @@ export default {
   systemPrompt: "You drive a browser through the playwright__* tools.",
 };
 ```
+
+#### Global vs project servers
+
+Both `config.json` files are merged per server name — **project wins on collision**:
+
+| Where | File | Scope |
+|---|---|---|
+| Global | `~/.pi/agent/pi-agents/config.json` | all projects |
+| Project | `<git-root>/.pi-agents/config.json` | this project |
+
+```jsonc
+// ~/.pi/agent/pi-agents/config.json — shared servers, once per machine
+{
+  "mcpServers": {
+    "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "ghp_..." }
+    }
+  }
+}
+
+// <project>/.pi-agents/config.json — project-specific or overrides (wins)
+{
+  "mcpServers": {
+    "playwright": { "command": "npx", "args": ["@playwright/mcp@latest", "--headed"] },
+    "local-db": { "command": "node", "args": ["mcp/db-server.mjs"] }
+  }
+}
+```
+
+Recommended layout for a reusable setup: define your shared servers **globally**, define the agents that use them **globally** too (`~/.pi/agent/pi-agents/browser/agent.ts` with `mcp: ["playwright"]`), and only put project-specific servers in the project's `config.json`. Agents and servers don't need to live in the same place — any agent can reference any merged server.
 
 MCP tools are registered as `<server>__<tool>`, e.g. `playwright__browser_navigate`, so tools from different servers never collide and the server is always identifiable in the tool name. Tool schemas come from the server (JSON Schema → TypeBox) and tool calls are forwarded with `client.callTool`. The tool allowlist and MCP tools are combined: `active = agent.tools (or current) ∪ agent.mcp tools`.
 
@@ -155,6 +189,7 @@ The shortcuts are plain terminal key sequences — if your terminal doesn't send
 
 - `session_start`: agents are discovered and loaded; the selection is restored (priority: `--agent` flag → persisted session selection → `config.defaultAgent` → `default: true` agent → plain pi)
 - Applying an agent: `pi.setActiveTools(...)` restricts tools; `before_agent_start` appends the agent's system prompt to every turn
+- MCP: servers from merged `config.json` are connected on demand when an agent with `mcp: [...]` is applied; their tools are registered as `<server>__<tool>` and activated together with the tool allowlist
 - Selection is persisted per session via `pi.appendEntry`, so it survives restarts of the same session
 - Switching to `(none)` restores the toolset from before the first agent was applied
 
