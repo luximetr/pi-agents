@@ -173,6 +173,10 @@ Details:
 - Text/image results are passed through to the LLM; `structuredContent` is appended as JSON; errors surface as tool failures.
 - The picker shows `mcp:playwright` in the agent description line.
 
+## On-demand guide (agents' `--help`)
+
+The extension bundles `guide.md` (next to `index.ts`) covering how to create agents, add tools, and configure MCP servers. It is exposed as the `pi_agents_guide` tool, which is **always available to every agent** — the extension adds it to the active toolset automatically, alongside any allowlist. Agents call it like a CLI `--help` when they need to know how pi-agents works; no tokens are spent when it isn't called.
+
 ## Troubleshooting: shortcuts don't fire
 
 The shortcuts are plain terminal key sequences — if your terminal doesn't send them, pi never sees them and the key falls through (e.g. `alt+a` types `å`).
