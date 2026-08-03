@@ -222,5 +222,5 @@ The shortcuts are plain terminal key sequences — if your terminal doesn't send
 
 ## Limitations / roadmap
 
-- MCP is stdio-only for now (no SSE/HTTP transports); server config is static (no dynamic add/remove at runtime)
+- MCP supports stdio and streamable HTTP transports (no SSE); server config is static (no dynamic add/remove at runtime)
 - Agents are discovered at session start; edits to `.pi-agents/` need `/reload` (or a new session) to take effect for shortcuts/commands — the picker always reads fresh definitions
