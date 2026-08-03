@@ -35,7 +35,7 @@ export interface AgentConfig {
 	name: string;
 	/** One-line description shown in the picker */
 	description: string;
-	/** Tool allowlist. Omit to keep current tools (use "default" for pi defaults). */
+	/** Tool allowlist. Omit to keep current tools (use "default" for pi defaults). An empty array `[]` disables all tools — the agent is left with only its MCP tools (if any). */
 	tools?: ToolName[];
 	/**
 	 * MCP server names (keys of config.json mcpServers) whose tools this agent

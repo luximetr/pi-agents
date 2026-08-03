@@ -28,7 +28,7 @@ Two layouts:
 export default {
   name: "browser",
   description: "Drives a browser via MCP.",
-  tools: ["read", "bash"],            // allowlist; omit = keep current tools
+  tools: ["read", "bash"],            // allowlist; omit = keep current, [] = no tools
   mcp: ["playwright"],                // MCP servers to connect (opt-in!)
   systemPrompt: "You are...",         // inline…
   // systemPromptFile: "./prompt.md", // …or loaded from a file

@@ -79,10 +79,11 @@ export default function (pi: ExtensionAPI) {
 			mcpToolNames = await mcpManager.activate(agent.mcp, servers, env, ctx, opts);
 		}
 
-		// Tool allowlist: the agent's list when given, otherwise keep the
-		// current toolset. MCP tools are always added on top.
+		// Tool allowlist: the agent's list when given (empty [] = no tools at
+		// all — only MCP tools are added on top), otherwise keep the current
+		// toolset. MCP tools are always added on top.
 		let base: string[];
-		if (agent.tools && agent.tools.length > 0) {
+		if (agent.tools !== undefined) {
 			const all = new Set(pi.getAllTools().map((t) => t.name));
 			const valid = agent.tools.filter((t) => all.has(t));
 			const invalid = agent.tools.filter((t) => !all.has(t));
@@ -94,7 +95,8 @@ export default function (pi: ExtensionAPI) {
 			base = pi.getActiveTools();
 		}
 		const active = [...new Set([...base, ...mcpToolNames])];
-		if (active.length > 0) pi.setActiveTools(active);
+		// Apply even when empty: an explicit [] allowlist means "no tools".
+		pi.setActiveTools(active);
 
 		activeName = agent.name;
 		activeAgent = agent;

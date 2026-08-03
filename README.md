@@ -71,7 +71,7 @@ export default {
 };
 ```
 
-Files are TypeScript loaded with [jiti](https://github.com/unjs/jiti) — you can use imports, helpers, or an async factory (`export default async () => ({...})`). Omit `tools` to keep the current toolset.
+Files are TypeScript loaded with [jiti](https://github.com/unjs/jiti) — you can use imports, helpers, or an async factory (`export default async () => ({...})`). Omit `tools` to keep the current toolset; pass `tools: []` to disable all built-in tools (the agent keeps only its MCP tools, if any).
 
 #### Typed tools
 
