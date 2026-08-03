@@ -94,7 +94,15 @@ Plain string literals work too — `"read"` and `Tools.read` are the same value.
 ```json
 {
   "defaultAgent": "dev",
-  "keybindings": { "select": "ctrl+shift+a", "rotate": "alt+a" }
+  "keybindings": { "select": "ctrl+shift+a", "rotate": "alt+a" },
+  "mcpServers": {
+    "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "ghp_..." }
+    }
+  }
 }
 ```
 
@@ -108,6 +116,28 @@ Plain string literals work too — `"read"` and `Tools.read` are the same value.
   }
 }
 ```
+
+### MCP servers (per-agent, opt-in)
+
+`mcpServers` in `config.json` (global + project, project wins per server) defines [MCP](https://modelcontextprotocol.io) stdio servers — standard Claude Desktop-style config: `command`, `args`, `env`, `cwd`. **Nothing is connected unless an agent opts in** — add the server names to the agent's `mcp` field and only those servers are started and only their tools are activated:
+
+```ts
+export default {
+  name: "browser",
+  description: "Playwright MCP agent: drives a browser via MCP tools.",
+  tools: ["read", "bash"],
+  mcp: ["playwright"],                 // connect ONLY this server
+  systemPrompt: "You drive a browser through the playwright__* tools.",
+};
+```
+
+MCP tools are registered as `<server>__<tool>`, e.g. `playwright__browser_navigate`, so tools from different servers never collide and the server is always identifiable in the tool name. Tool schemas come from the server (JSON Schema → TypeBox) and tool calls are forwarded with `client.callTool`. The tool allowlist and MCP tools are combined: `active = agent.tools (or current) ∪ agent.mcp tools`.
+
+Details:
+- Switching to an agent without the server's MCP tools deactivates them; **connections stay alive** for fast switching back. All servers are shut down on session end (`session_shutdown`).
+- Unknown server names and failed starts are reported as notifications; the rest of the agent still applies.
+- Text/image results are passed through to the LLM; `structuredContent` is appended as JSON; errors surface as tool failures.
+- The picker shows `mcp:playwright` in the agent description line.
 
 ## Troubleshooting: shortcuts don't fire
 
@@ -130,5 +160,5 @@ The shortcuts are plain terminal key sequences — if your terminal doesn't send
 
 ## Limitations / roadmap
 
-- Tool allowlists only — MCP-backed agent tools are future work (the loader is ready for a `mcp` field)
+- MCP is stdio-only for now (no SSE/HTTP transports); server config is static (no dynamic add/remove at runtime)
 - Agents are discovered at session start; edits to `.pi-agents/` need `/reload` (or a new session) to take effect for shortcuts/commands — the picker always reads fresh definitions

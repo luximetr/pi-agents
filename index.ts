@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { discoverAgents, loadConfig, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { McpManager } from "./mcp.ts";
 import { showAgentSelector, updateStatus } from "./ui.ts";
 
 const STATE_ENTRY = "pi-agents-state";
@@ -22,6 +23,8 @@ export default function (pi: ExtensionAPI) {
 	let originalTools: string[] | undefined;
 	let persistedName: string | undefined;
 
+	const mcpManager = new McpManager(pi);
+
 	// Keybindings come from config.json (global + project, project wins).
 	// Load at extension load time: cwd is the directory pi started in.
 	config = loadConfig(process.cwd());
@@ -31,7 +34,7 @@ export default function (pi: ExtensionAPI) {
 		type: "string",
 	});
 
-	function applyAgent(name: string, ctx: ExtensionContext, opts?: { silent?: boolean }): boolean {
+	async function applyAgent(name: string, ctx: ExtensionContext, opts?: { silent?: boolean }): Promise<boolean> {
 		const agent = agents.find((a) => a.name === name);
 		if (!agent) {
 			if (!opts?.silent) {
@@ -45,6 +48,17 @@ export default function (pi: ExtensionAPI) {
 			originalTools = pi.getActiveTools();
 		}
 
+		// Connect the agent's MCP servers (only the ones it asks for) and
+		// collect their prefixed tool names.
+		let mcpToolNames: string[] = [];
+		if (agent.mcp && agent.mcp.length > 0) {
+			if (!opts?.silent) ctx.ui.notify(`Connecting MCP: ${agent.mcp.join(", ")}...`, "info");
+			mcpToolNames = await mcpManager.activate(agent.mcp, config.mcpServers ?? {}, ctx, opts);
+		}
+
+		// Tool allowlist: the agent's list when given, otherwise keep the
+		// current toolset. MCP tools are always added on top.
+		let base: string[];
 		if (agent.tools && agent.tools.length > 0) {
 			const all = new Set(pi.getAllTools().map((t) => t.name));
 			const valid = agent.tools.filter((t) => all.has(t));
@@ -52,13 +66,20 @@ export default function (pi: ExtensionAPI) {
 			if (invalid.length > 0 && !opts?.silent) {
 				ctx.ui.notify(`Agent "${name}": unknown tools: ${invalid.join(", ")}`, "warning");
 			}
-			if (valid.length > 0) pi.setActiveTools(valid);
+			base = valid;
+		} else {
+			base = pi.getActiveTools();
 		}
+		const active = [...new Set([...base, ...mcpToolNames])];
+		if (active.length > 0) pi.setActiveTools(active);
 
 		activeName = agent.name;
 		activeAgent = agent;
 		updateStatus(ctx, activeName);
-		if (!opts?.silent) ctx.ui.notify(`Agent "${name}" activated`, "info");
+		if (!opts?.silent) {
+			const mcpNote = mcpToolNames.length > 0 ? ` (${mcpToolNames.length} MCP tools)` : "";
+			ctx.ui.notify(`Agent "${name}" activated${mcpNote}`, "info");
+		}
 		return true;
 	}
 
@@ -96,7 +117,7 @@ export default function (pi: ExtensionAPI) {
 		const result = await showAgentSelector(ctx, agents, activeName);
 		if (result === null) return; // cancelled
 		if (result === "(none)") clearAgent(ctx);
-		else applyAgent(result, ctx);
+		else await applyAgent(result, ctx);
 	}
 
 	/** Rotate to the next agent, wrapping through "(none)". */
@@ -110,7 +131,7 @@ export default function (pi: ExtensionAPI) {
 		const nextIndex = (currentIndex === -1 ? 0 : currentIndex + 1) % cycle.length;
 		const nextName = cycle[nextIndex];
 		if (nextName === "(none)") clearAgent(ctx);
-		else applyAgent(nextName, ctx);
+		else await applyAgent(nextName, ctx);
 	}
 
 	// --- UI registration (bindings configurable via config.json, one key or several) ---
@@ -192,9 +213,14 @@ export default function (pi: ExtensionAPI) {
 			selected = agents.find((a) => a.default)?.name;
 		}
 
-		if (selected) applyAgent(selected, ctx, { silent: true });
+		if (selected) await applyAgent(selected, ctx, { silent: true });
 		else updateStatus(ctx, undefined);
 		persistedName = activeName;
+	});
+
+	// Close MCP server processes when the session ends.
+	pi.on("session_shutdown", async () => {
+		await mcpManager.disconnectAll();
 	});
 
 	pi.on("turn_start", async () => {

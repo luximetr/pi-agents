@@ -37,6 +37,11 @@ export interface AgentConfig {
 	description: string;
 	/** Tool allowlist. Omit to keep current tools (use "default" for pi defaults). */
 	tools?: ToolName[];
+	/**
+	 * MCP server names (keys of config.json mcpServers) whose tools this agent
+	 * activates. Only these servers are connected — not all available ones.
+	 */
+	mcp?: string[];
 	/** System prompt, inline */
 	systemPrompt?: string;
 	/** System prompt loaded from a markdown file (relative to agent file/dir) */
@@ -58,6 +63,24 @@ export interface PiAgentsConfig {
 		select?: string | string[];
 		rotate?: string | string[];
 	};
+	/**
+	 * MCP stdio servers, keyed by name (Claude Desktop-style config).
+	 * Agents opt into servers via their `mcp` field — nothing is connected
+	 * unless an agent requests it.
+	 */
+	mcpServers?: Record<string, McpServerConfig>;
+}
+
+/** MCP stdio server definition. */
+export interface McpServerConfig {
+	/** Command to spawn, e.g. "npx" */
+	command: string;
+	/** Args, e.g. ["-y", "@modelcontextprotocol/server-github"] */
+	args?: string[];
+	/** Extra environment variables for the server process */
+	env?: Record<string, string>;
+	/** Working directory for the server process */
+	cwd?: string;
 }
 
 const jiti = createJiti(import.meta.url);
@@ -102,6 +125,7 @@ function normalizeAgent(
 		tools: Array.isArray(cfg.tools)
 			? (cfg.tools.map((t) => String(t).trim()).filter(Boolean) as ToolName[])
 			: undefined,
+		mcp: Array.isArray(cfg.mcp) ? cfg.mcp.map((s) => String(s).trim()).filter(Boolean) : undefined,
 		systemPrompt: systemPrompt?.trim() ? systemPrompt : undefined,
 		default: cfg.default === true,
 		filePath,
@@ -175,6 +199,22 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 	try {
 		const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8")) as Partial<PiAgentsConfig>;
 		const keybindings = parsed.keybindings && typeof parsed.keybindings === "object" ? parsed.keybindings : undefined;
+		const mcpServers: Record<string, McpServerConfig> = {};
+		if (parsed.mcpServers && typeof parsed.mcpServers === "object") {
+			for (const [name, raw] of Object.entries(parsed.mcpServers)) {
+				if (!raw || typeof raw !== "object") continue;
+				const cfg = raw as Partial<McpServerConfig>;
+				if (typeof cfg.command !== "string" || !cfg.command.trim()) continue;
+				mcpServers[name] = {
+					command: cfg.command.trim(),
+					args: Array.isArray(cfg.args) ? cfg.args.map((a) => String(a)) : undefined,
+					env: cfg.env && typeof cfg.env === "object"
+						? Object.fromEntries(Object.entries(cfg.env).map(([k, v]) => [k, String(v)]))
+						: undefined,
+					cwd: typeof cfg.cwd === "string" ? cfg.cwd : undefined,
+				};
+			}
+		}
 		return {
 			defaultAgent: typeof parsed.defaultAgent === "string" ? parsed.defaultAgent : undefined,
 			keybindings: keybindings
@@ -183,6 +223,7 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 						rotate: normalizeKeys(keybindings.rotate),
 				  }
 				: undefined,
+			mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
 		};
 	} catch (err) {
 		console.error(`pi-agents: failed to parse ${configPath}: ${err}`);
@@ -201,6 +242,7 @@ export function loadConfig(cwd: string): PiAgentsConfig {
 			select: projectConfig.keybindings?.select ?? globalConfig.keybindings?.select,
 			rotate: projectConfig.keybindings?.rotate ?? globalConfig.keybindings?.rotate,
 		},
+		mcpServers: { ...globalConfig.mcpServers, ...projectConfig.mcpServers },
 	};
 }
 
