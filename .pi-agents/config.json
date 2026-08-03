@@ -1,0 +1,7 @@
+{
+	"defaultAgent": null,
+	"keybindings": {
+		"select": "ctrl+shift+a",
+		"rotate": "alt+a"
+	}
+}
