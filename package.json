@@ -4,6 +4,9 @@
   "private": true,
   "description": "Opencode-style agents for pi: define agents in code under .pi-agents/, switch with ctrl+shift+a",
   "type": "module",
+  "bin": {
+    "pi-agents": "./bin/install.mjs"
+  },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.83.0",
     "@earendil-works/pi-tui": "^0.83.0",

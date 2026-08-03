@@ -4,7 +4,56 @@ Opencode-style agents for [pi](https://github.com/earendil-dev/pi): define agent
 
 ## Install
 
-**Project-local (recommended while developing):**
+**One line per project** — after linking the CLI once:
+
+```bash
+cd <this repo>
+npm install
+npm link            # once: makes the `pi-agents` command available on your machine
+```
+
+then, in any project on your machine:
+
+```bash
+pi-agents install            # install into the current project
+pi-agents install <dir>      # …or an explicit project dir
+pi-agents --global           # …or enable it in ALL projects (~/.pi/agent/settings.json)
+pi-agents --agents           # also copy the bundled sample agents into <dir>/.pi-agents/
+```
+
+The installer delegates to pi's package manager (`pi install <repo> [-l]`): the repo path
+is recorded in the project's `.pi/settings.json` (or `~/.pi/agent/settings.json` for
+`--global`) and the extension is loaded from the repo directly — nothing is copied and
+the target project needs **no node_modules of its own** (deps resolve from this repo).
+It also records the project trust decision (same as accepting pi's "Trust project
+folder?" prompt), so the extension loads immediately. Manage with `pi-agents status`,
+`pi-agents remove`, or pi's own `pi list` / `pi remove`. The pi one-liner works too:
+`pi install <path-to-this-repo> -l` (add `-a` to trust).
+
+`pi-agents` CLI reference:
+
+| Command | Effect |
+|---|---|
+| `pi-agents install [dir]` | install into dir (default: current dir) — the default command |
+| `pi-agents --global` | install for all projects (`~/.pi/agent/settings.json`) |
+| `pi-agents --agents` | also copy the bundled sample agents into `<dir>/.pi-agents/` (imports rewritten to point at the extension) |
+| `pi-agents --legacy` | classic layout: symlink into `<dir>/.pi/extensions/pi-agents/` |
+| `pi-agents remove [dir]` | uninstall (use the same scope flags you installed with) |
+| `pi-agents status [dir]` | show where/how it's installed and the trust state |
+| `pi-agents --yes` | pre-approve the trust decision (non-interactive setups) |
+| `pi-agents --force` | overwrite existing files (samples, legacy links) |
+| `pi-agents --repo <path>` | extension sources (default: this checkout; baked into the compiled binary) |
+
+Installs are idempotent; after installing, `/reload` in a running pi session (or restart).
+
+**Standalone binary** (no npm link / no npm needed on the target machine):
+
+```bash
+./scripts/build.sh          # requires bun; bakes the repo path in
+./dist/pi-agents install    # same CLI, single executable (drop it in ~/bin)
+```
+
+**Manual** (classic symlink layout — what `pi-agents install --legacy` does):
 
 ```bash
 cd <this repo>
@@ -76,10 +125,10 @@ Files are TypeScript loaded with [jiti](https://github.com/unjs/jiti) — you ca
 
 #### Typed tools
 
-`tools` accepts any registered tool name (built-ins plus extension/MCP tools) and unknown names are filtered with a warning at apply time. For type checking + autocomplete, import the types from the extension and use the enum-style accessor:
+`tools` accepts any registered tool name (built-ins plus extension/MCP tools) and unknown names are filtered with a warning at apply time. For type checking + autocomplete, import the types from the extension's `agents.ts` and use the enum-style accessor:
 
 ```ts
-import { Tools, type AgentConfig } from "../../.pi/extensions/pi-agents/agents"; // path relative to your agent file
+import { Tools, type AgentConfig } from "<path-to-pi-agents-repo>/agents"; // absolute path to the extension's agents.ts
 
 const cfg: AgentConfig = {
   name: "doc",
@@ -89,6 +138,8 @@ const cfg: AgentConfig = {
 };
 export default cfg;
 ```
+
+The import path depends on the install mode: with the default settings install the extension lives at the repo path (absolute path, as `pi-agents install --agents` uses when rewriting the bundled samples); with the `--legacy` symlink layout it is `../../.pi/extensions/pi-agents/agents` relative to your agent file.
 
 Plain string literals work too — `"read"` and `Tools.read` are the same value. Any string is allowed at the type level (`ToolName`), so custom tools registered by other extensions type-check as well; the built-ins just get autocomplete in editors.
 
