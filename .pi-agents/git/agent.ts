@@ -8,6 +8,7 @@ import { Tools, type AgentConfig } from "../../agents";
 const cfg: AgentConfig = {
 	name: "git",
 	description: "Git agent: inspect repository state and history via custom git tools.",
+	color: "#ff9f0a",
 	tools: [Tools.read, Tools.grep, Tools.find, Tools.ls],
 	customTools: {
 		git_status: {

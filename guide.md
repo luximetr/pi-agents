@@ -30,6 +30,7 @@ export default {
   description: "Drives a browser via MCP.",
   tools: ["read", "bash"],            // allowlist; omit = keep current, [] = no tools
   mcp: ["playwright"],                // MCP servers to connect (opt-in!)
+  // color: "#ff8800",                 // theme role or hex; auto-assigned by name when omitted
   systemPrompt: "You are...",         // inline…
   // systemPromptFile: "./prompt.md", // …or loaded from a file
   // default: true,                   // auto-select on new sessions

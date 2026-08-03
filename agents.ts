@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
-import { getAgentDir, type AgentToolResult, type ExecOptions, type ExecResult, type ExtensionContext, type ToolExecutionMode } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentToolResult, type ExecOptions, type ExecResult, type ExtensionContext, type ThemeColor, type ToolExecutionMode } from "@earendil-works/pi-coding-agent";
 
 /** Pi's built-in tools (always available). */
 export const TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
@@ -65,6 +65,11 @@ export interface AgentConfig {
 	name: string;
 	/** One-line description shown in the picker */
 	description: string;
+	/**
+	 * UI color: a theme role (e.g. "success", "warning") or a hex color
+	 * ("#ff8800"). Omit for a stable color auto-assigned from the name.
+	 */
+	color?: string;
 	/** Tool allowlist. Omit to keep current tools (use "default" for pi defaults). An empty array `[]` disables all tools — the agent is left with only its MCP tools (if any). */
 	tools?: ToolName[];
 	/**
@@ -162,6 +167,7 @@ function normalizeAgent(
 		console.error(`pi-agents: ${filePath} is missing a valid "description"`);
 		return null;
 	}
+	const color = normalizeColor(cfg.color, filePath);
 	const dir = path.dirname(filePath);
 
 	let systemPrompt: string | undefined = cfg.systemPrompt;
@@ -185,6 +191,7 @@ function normalizeAgent(
 	return {
 		name,
 		description: cfg.description.trim(),
+		color,
 		tools: Array.isArray(cfg.tools)
 			? (cfg.tools.map((t) => String(t).trim()).filter(Boolean) as ToolName[])
 			: undefined,
@@ -198,6 +205,30 @@ function normalizeAgent(
 		source,
 		dir,
 	};
+}
+
+/** Theme roles usable as an agent color (pi's ThemeColor union). */
+const THEME_ROLES: ReadonlySet<string> = new Set([
+	"accent", "border", "borderAccent", "borderMuted", "success", "error", "warning", "muted", "dim", "text",
+	"thinkingText", "userMessageText", "customMessageText", "customMessageLabel", "toolTitle", "toolOutput",
+	"mdHeading", "mdLink", "mdLinkUrl", "mdCode", "mdCodeBlock", "mdCodeBlockBorder", "mdQuote", "mdQuoteBorder",
+	"mdHr", "mdListBullet", "toolDiffAdded", "toolDiffRemoved", "toolDiffContext", "syntaxComment",
+	"syntaxKeyword", "syntaxFunction", "syntaxVariable", "syntaxString", "syntaxNumber", "syntaxType",
+	"syntaxOperator", "syntaxPunctuation", "thinkingOff", "thinkingMinimal", "thinkingLow", "thinkingMedium",
+	"thinkingHigh", "thinkingXhigh", "thinkingMax", "bashMode",
+]);
+
+/**
+ * Validate + normalize an agent `color`: a ThemeColor role or "#rrggbb" hex.
+ * Returns undefined when absent (ui.ts auto-assigns) or invalid.
+ */
+function normalizeColor(raw: unknown, filePath: string): string | undefined {
+	if (typeof raw !== "string" || !raw.trim()) return undefined;
+	const value = raw.trim();
+	if (/^#[0-9a-fA-F]{6}$/.test(value)) return value.toLowerCase();
+	if (THEME_ROLES.has(value)) return value;
+	console.error(`pi-agents: ${filePath}: invalid "color" ${JSON.stringify(value)} — use a theme role or #rrggbb`);
+	return undefined;
 }
 
 /**

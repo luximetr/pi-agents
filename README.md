@@ -32,7 +32,7 @@ Either way: `/reload` in pi (or restart) to pick up the extension.
 | Ask about the extension | `/agent:help <question>` (answered from the bundled guide) |
 | Picker | `/agent` |
 | Start with agent | `pi --agent dev` |
-| Active agent indicator | footer status line: `agent:dev` |
+| Active agent indicator | footer status line: `agent:dev`, tinted with the agent's color |
 
 Model and reasoning level are **not** part of an agent — pick them in pi itself (`/model`, thinking UI).
 
@@ -64,6 +64,7 @@ Agents live in `.pi-agents/` — project root (walked up to git root) and global
 export default {
   name: "doc",                                    // optional for single-file agents
   description: "Documentation agent: read-only, writes docs, READMEs.",
+  color: "#bf5af2",                               // theme role or "#rrggbb"; auto-assigned by name when omitted
   tools: ["read", "grep", "find", "ls", "write", "edit", "bash"],  // tool allowlist
   systemPrompt: `You are the DOC agent. ...`,     // inline prompt…
   // systemPromptFile: "./prompt.md",             // …or from a file (relative to agent)

@@ -146,7 +146,7 @@ export default function (pi: ExtensionAPI) {
 
 		activeName = agent.name;
 		activeAgent = agent;
-		updateStatus(ctx, activeName);
+		updateStatus(ctx, activeAgent);
 		if (!opts?.silent) {
 			const mcpNote = mcpToolNames.length > 0 ? ` (${mcpToolNames.length} MCP tools)` : "";
 			ctx.ui.notify(`Agent "${name}" activated${mcpNote}`, "info");
