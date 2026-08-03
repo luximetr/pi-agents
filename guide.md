@@ -1,6 +1,14 @@
 # pi-agents guide
 
-This extension defines "agents" in code — each agent is a tool allowlist + system prompt + optional MCP servers. Read this when asked to create agents, add tools, or wire up MCP.
+This extension defines "agents" in code — each agent is a tool allowlist + system prompt + optional MCP servers. Read this when asked to create agents, add tools, wire up MCP, or explain how the extension works.
+
+## Using the extension (quick start)
+
+- Switch agents: `ctrl+shift+a` (picker), `alt+a` (rotate), or `/agent <name>` (`/agent none` clears).
+- Start with an agent from the CLI: `pi --agent dev`.
+- The active agent's system prompt is appended every turn; its tools are restricted to its allowlist (+ its MCP tools).
+- No agent selected = plain pi, unchanged.
+- `pi_agents_guide` is always available — in plain pi and under every agent.
 
 ## Where agents live
 

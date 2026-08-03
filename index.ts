@@ -11,7 +11,7 @@ import { showAgentSelector, updateStatus } from "./ui.ts";
 const STATE_ENTRY = "pi-agents-state";
 const DEFAULT_SELECT_SHORTCUT = "ctrl+shift+a";
 const DEFAULT_ROTATE_SHORTCUT = "alt+a";
-/** Tool that returns the bundled guide.md — the agent-facing "--help" of this extension. */
+/** Tool that returns the bundled guide.md — the on-demand "--help" of this extension. */
 const GUIDE_TOOL = "pi_agents_guide";
 
 /** Load the bundled guide.md (resolve symlinks so relative lookup works for symlinked installs). */
@@ -24,6 +24,14 @@ function loadGuide(): string {
 		console.error(`pi-agents: cannot load guide.md: ${err}`);
 		return "";
 	}
+}
+
+/** The bundled guide ("" when unavailable). */
+const GUIDE = loadGuide();
+
+/** Ensure the guide tool is part of a toolset — always available, in plain pi and for every agent. */
+function withGuide(tools: string[]): string[] {
+	return GUIDE ? [...new Set([...tools, GUIDE_TOOL])] : tools;
 }
 
 /** Normalize a config keybinding (single key or array) into a unique, lowercase key list. */
@@ -49,17 +57,16 @@ export default function (pi: ExtensionAPI) {
 
 	// On-demand help: agents call this tool like a CLI's --help. Registered only
 	// if the bundled guide.md is available.
-	const guide = loadGuide();
-	if (guide) {
+	if (GUIDE) {
 		pi.registerTool({
 			name: GUIDE_TOOL,
 			label: "Pi-agents guide",
 			description:
-				"How to create pi-agents agents, add tools, and configure MCP servers. " +
-				"Call this tool when asked to create or modify agents, agent tools, or MCP setup.",
+				"How to use the pi-agents extension: switching agents, creating agents, adding tools, and " +
+				"configuring MCP servers. Call this tool when asked anything about pi-agents or its agents.",
 			parameters: Type.Object({}),
 			async execute() {
-				return { content: [{ type: "text", text: guide }], details: {} };
+				return { content: [{ type: "text", text: GUIDE }], details: {} };
 			},
 		});
 	}
@@ -106,7 +113,7 @@ export default function (pi: ExtensionAPI) {
 			base = pi.getActiveTools();
 		}
 		// The guide tool is always available to every agent, regardless of allowlist.
-		const active = [...new Set([...base, ...mcpToolNames, ...(guide ? [GUIDE_TOOL] : [])])];
+		const active = withGuide([...base, ...mcpToolNames]);
 		if (active.length > 0) pi.setActiveTools(active);
 
 		activeName = agent.name;
@@ -121,7 +128,7 @@ export default function (pi: ExtensionAPI) {
 
 	function clearAgent(ctx: ExtensionContext, opts?: { silent?: boolean }) {
 		if (originalTools) {
-			pi.setActiveTools(originalTools);
+			pi.setActiveTools(withGuide(originalTools));
 			originalTools = undefined;
 		}
 		activeName = undefined;
@@ -223,6 +230,10 @@ export default function (pi: ExtensionAPI) {
 		config = result.config;
 		activeName = undefined;
 		activeAgent = undefined;
+
+		// Make the guide tool available even with no agent selected: first-time
+		// users get on-demand help in plain pi right after installing.
+		pi.setActiveTools(withGuide(pi.getActiveTools()));
 
 		// Persisted selection for this session (survives restarts).
 		const entries = ctx.sessionManager.getEntries();
