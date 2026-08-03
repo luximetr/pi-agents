@@ -8,7 +8,6 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 - Start with an agent from the CLI: `pi --agent dev`.
 - The active agent's system prompt is appended every turn; its tools are restricted to its allowlist (+ its MCP tools).
 - No agent selected = plain pi, unchanged.
-- `pi_agents_guide` is always available — in plain pi and under every agent.
 - `/agent:help <question>` answers a question from this guide (e.g. `/agent:help how do I add an MCP server?`).
 
 ## Where agents live
@@ -82,7 +81,6 @@ export default cfg;
 
 - Built-ins: list in `tools` — `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` (typed: `Tools.read`).
 - Extension/MCP tools: list their registered names (`server__tool` for MCP). Unknown names are filtered with a warning at apply time.
-- The `pi_agents_guide` tool is always available to every agent automatically.
 
 ## After editing .pi-agents/
 

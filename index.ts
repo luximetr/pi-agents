@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { discoverAgents, loadConfig, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
@@ -11,8 +10,6 @@ import { showAgentSelector, updateStatus } from "./ui.ts";
 const STATE_ENTRY = "pi-agents-state";
 const DEFAULT_SELECT_SHORTCUT = "ctrl+shift+a";
 const DEFAULT_ROTATE_SHORTCUT = "alt+a";
-/** Tool that returns the bundled guide.md — the on-demand "--help" of this extension. */
-const GUIDE_TOOL = "pi_agents_guide";
 
 /** Load the bundled guide.md (resolve symlinks so relative lookup works for symlinked installs). */
 function loadGuide(): string {
@@ -28,11 +25,6 @@ function loadGuide(): string {
 
 /** The bundled guide ("" when unavailable). */
 const GUIDE = loadGuide();
-
-/** Ensure the guide tool is part of a toolset — always available, in plain pi and for every agent. */
-function withGuide(tools: string[]): string[] {
-	return GUIDE ? [...new Set([...tools, GUIDE_TOOL])] : tools;
-}
 
 /** Normalize a config keybinding (single key or array) into a unique, lowercase key list. */
 function normalizeShortcutKeys(value: string | string[] | undefined, fallback: string): string[] {
@@ -56,22 +48,6 @@ export default function (pi: ExtensionAPI) {
 	// Keybindings come from config.json (global + project, project wins).
 	// Load at extension load time: cwd is the directory pi started in.
 	config = loadConfig(process.cwd());
-
-	// On-demand help: agents call this tool like a CLI's --help. Registered only
-	// if the bundled guide.md is available.
-	if (GUIDE) {
-		pi.registerTool({
-			name: GUIDE_TOOL,
-			label: "Pi-agents guide",
-			description:
-				"How to use the pi-agents extension: switching agents, creating agents, adding tools, and " +
-				"configuring MCP servers. Call this tool when asked anything about pi-agents or its agents.",
-			parameters: Type.Object({}),
-			async execute() {
-				return { content: [{ type: "text", text: GUIDE }], details: {} };
-			},
-		});
-	}
 
 	pi.registerFlag("agent", {
 		description: "Agent to activate (name from .pi-agents)",
@@ -114,8 +90,7 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			base = pi.getActiveTools();
 		}
-		// The guide tool is always available to every agent, regardless of allowlist.
-		const active = withGuide([...base, ...mcpToolNames]);
+		const active = [...new Set([...base, ...mcpToolNames])];
 		if (active.length > 0) pi.setActiveTools(active);
 
 		activeName = agent.name;
@@ -130,7 +105,7 @@ export default function (pi: ExtensionAPI) {
 
 	function clearAgent(ctx: ExtensionContext, opts?: { silent?: boolean }) {
 		if (originalTools) {
-			pi.setActiveTools(withGuide(originalTools));
+			pi.setActiveTools(originalTools);
 			originalTools = undefined;
 		}
 		activeName = undefined;
@@ -256,10 +231,6 @@ export default function (pi: ExtensionAPI) {
 		config = result.config;
 		activeName = undefined;
 		activeAgent = undefined;
-
-		// Make the guide tool available even with no agent selected: first-time
-		// users get on-demand help in plain pi right after installing.
-		pi.setActiveTools(withGuide(pi.getActiveTools()));
 
 		// Persisted selection for this session (survives restarts).
 		const entries = ctx.sessionManager.getEntries();
