@@ -8,6 +8,10 @@ export function agentLabel(agent: DiscoveredAgent): string {
 	const parts: string[] = [];
 	if (agent.tools && agent.tools.length > 0) parts.push(`tools:${agent.tools.join(",")}`);
 	if (agent.mcp && agent.mcp.length > 0) parts.push(`mcp:${agent.mcp.join(",")}`);
+	if (agent.customTools) {
+		const names = Object.keys(agent.customTools);
+		if (names.length > 0) parts.push(`custom:${names.join(",")}`);
+	}
 	if (agent.systemPrompt) {
 		const firstLine = agent.systemPrompt.split("\n")[0];
 		const truncated = firstLine.length > 40 ? `${firstLine.slice(0, 37)}...` : firstLine;

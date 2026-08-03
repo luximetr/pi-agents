@@ -49,6 +49,34 @@ const cfg: AgentConfig = {
 export default cfg;
 ```
 
+## Custom tools (per agent)
+
+Define small agent-specific tools right in `agent.ts` under `customTools` — no MCP server or separate extension needed. Registered when the agent is applied; active only while it is.
+
+```ts
+export default {
+  name: "dev",
+  description: "Developer agent with git tools.",
+  tools: ["read", "bash", "edit", "write"],
+  customTools: {
+    git_status: {
+      description: "Show the git working tree status",
+      parameters: { type: "object", properties: { short: { type: "boolean" } } },
+      execute: async (args, _ctx, exec) => {
+        const r = await exec("git", ["status", ...(args.short ? ["--short"] : [])]);
+        return r.stdout.trim() || r.stderr.trim();
+      },
+    },
+  },
+  systemPrompt: "You are the DEV agent. Use git_status for repository state.",
+};
+```
+
+- `execute(args, ctx, exec)` — `exec(cmd, args)` runs a shell command in the session cwd (`{ stdout, stderr, code }`). Return a result object `{ content: [...] }` or a plain string.
+- `parameters` is JSON Schema, optional (omit = no arguments). Optional `label`, `promptGuidelines`, `executionMode`.
+- Active toolset = allowlist ∪ custom tools ∪ MCP tools. A custom tool overrides an existing tool with the same name (warning). Same-named tools across agents: last applied wins.
+- The picker shows them as `custom:git_status`.
+
 ## config.json (project or global, merged; project wins)
 
 ```json

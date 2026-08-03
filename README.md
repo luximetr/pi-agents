@@ -91,6 +91,50 @@ export default cfg;
 
 Plain string literals work too — `"read"` and `Tools.read` are the same value. Any string is allowed at the type level (`ToolName`), so custom tools registered by other extensions type-check as well; the built-ins just get autocomplete in editors.
 
+#### Custom tools (per agent)
+
+No MCP server or separate extension needed for small agent-specific tools — define them right in `agent.ts` under `customTools`, keyed by tool name. Each tool is a description + optional JSON-Schema parameters + an `execute` function. Tools are registered when the agent is applied and active only while it is.
+
+```ts
+export default {
+  name: "dev",
+  description: "Developer agent with git tools.",
+  tools: ["read", "bash", "edit", "write"],
+  customTools: {
+    git_status: {
+      description: "Show the git working tree status (optionally short)",
+      parameters: {
+        type: "object",
+        properties: { short: { type: "boolean" } },
+      },
+      execute: async (args, _ctx, exec) => {
+        const r = await exec("git", ["status", ...(args.short ? ["--short"] : [])]);
+        return r.stdout.trim() || r.stderr.trim(); // plain string = text result
+      },
+    },
+    git_log: {
+      description: "Show the last N commits",
+      parameters: {
+        type: "object",
+        properties: { n: { type: "integer" } },
+      },
+      execute: async (args, _ctx, exec) => {
+        const r = await exec("git", ["log", `-${args.n ?? 10}`]);
+        return { content: [{ type: "text", text: r.stdout.trim() }], details: { code: r.code } };
+      },
+    },
+  },
+  systemPrompt: "You are the DEV agent. Use git_status and git_log for repository state.",
+};
+```
+
+- `execute(args, ctx, exec)` — `ctx` is the extension context; `exec(command, args)` runs a shell command in the session cwd and returns `{ stdout, stderr, code }`. Return a result object `{ content: [...] }` or a plain string (wrapped as text content).
+- `parameters` is JSON Schema (converted to TypeBox); omit for no-argument tools.
+- Optional: `label` (UI), `promptGuidelines` (system prompt bullets), `executionMode` (`"sequential"` / `"parallel"`).
+- Active toolset = allowlist ∪ custom tools ∪ MCP tools. Custom tools are inactive while another agent or plain pi is active.
+- Name collisions: a custom tool overrides an existing registered tool with the same name (warning); same-named tools across agents — the last applied agent wins until the other is re-applied.
+- The picker shows them as `custom:git_status,git_log`.
+
 ### config.json
 
 ```json

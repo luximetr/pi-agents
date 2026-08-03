@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { discoverAgents, loadConfig, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
-import { McpManager } from "./mcp.ts";
+import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { showAgentSelector, updateStatus } from "./ui.ts";
 
 const STATE_ENTRY = "pi-agents-state";
@@ -44,6 +44,8 @@ export default function (pi: ExtensionAPI) {
 	let persistedName: string | undefined;
 
 	const mcpManager = new McpManager(pi);
+	/** Custom tool name -> agent name that registered it (for collision warnings). */
+	const customToolOwners = new Map<string, string>();
 
 	// Keybindings come from config.json (global + project, project wins).
 	// Load at extension load time: cwd is the directory pi started in.
@@ -53,6 +55,46 @@ export default function (pi: ExtensionAPI) {
 		description: "Agent to activate (name from .pi-agents)",
 		type: "string",
 	});
+
+	/**
+	 * Register the agent's custom tools with pi. Mid-session registration
+	 * auto-activates tools, so this must run right before setActiveTools in
+	 * applyAgent re-scopes the toolset. Re-applying an agent re-registers its
+	 * own tools (overwrite); same-named tools from other agents override.
+	 */
+	function registerCustomTools(agent: DiscoveredAgent, ctx: ExtensionContext, opts?: { silent?: boolean }): string[] {
+		const names: string[] = [];
+		for (const [name, tool] of Object.entries(agent.customTools ?? {})) {
+			const owner = customToolOwners.get(name);
+			if (!opts?.silent) {
+				if (owner !== undefined && owner !== agent.name) {
+					ctx.ui.notify(
+						`Agent "${agent.name}": custom tool "${name}" overrides the one defined by agent "${owner}"`,
+						"warning",
+					);
+				} else if (owner === undefined && pi.getAllTools().some((t) => t.name === name)) {
+					ctx.ui.notify(`Agent "${agent.name}": custom tool "${name}" shadows an existing registered tool`, "warning");
+				}
+			}
+			pi.registerTool({
+				name,
+				label: tool.label ?? name,
+				description: tool.description,
+				promptSnippet: `${name}: ${tool.description.split("\n")[0].slice(0, 90)}`,
+				...(tool.promptGuidelines ? { promptGuidelines: tool.promptGuidelines } : {}),
+				...(tool.executionMode ? { executionMode: tool.executionMode } : {}),
+				parameters: jsonSchemaToTypeBox(tool.parameters ?? { type: "object", additionalProperties: false }),
+				execute: async (_toolCallId, params, _signal, _onUpdate, extCtx) => {
+					const result = await tool.execute(params as Record<string, unknown>, extCtx, pi.exec);
+					if (typeof result === "string") return { content: [{ type: "text", text: result }], details: {} };
+					return result;
+				},
+			});
+			customToolOwners.set(name, agent.name);
+			names.push(name);
+		}
+		return names;
+	}
 
 	async function applyAgent(name: string, ctx: ExtensionContext, opts?: { silent?: boolean }): Promise<boolean> {
 		const agent = agents.find((a) => a.name === name);
@@ -67,6 +109,10 @@ export default function (pi: ExtensionAPI) {
 		if (activeName === undefined && originalTools === undefined) {
 			originalTools = pi.getActiveTools();
 		}
+
+		// Register the agent's custom tools (per-agent tools). Auto-activated
+		// by pi at registration; re-scoped by setActiveTools below.
+		const customToolNames = registerCustomTools(agent, ctx, opts);
 
 		// Connect the agent's MCP servers (only the ones it asks for) and
 		// collect their prefixed tool names. Agent-level servers and secrets
@@ -94,7 +140,7 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			base = pi.getActiveTools();
 		}
-		const active = [...new Set([...base, ...mcpToolNames])];
+		const active = [...new Set([...base, ...customToolNames, ...mcpToolNames])];
 		// Apply even when empty: an explicit [] allowlist means "no tools".
 		pi.setActiveTools(active);
 

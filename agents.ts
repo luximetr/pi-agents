@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentToolResult, type ExecOptions, type ExecResult, type ExtensionContext, type ToolExecutionMode } from "@earendil-works/pi-coding-agent";
 
 /** Pi's built-in tools (always available). */
 export const TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
@@ -25,6 +25,36 @@ export const Tools: Record<BuiltinTool, BuiltinTool> = {
  * still autocomplete the known built-ins.
  */
 export type ToolName = BuiltinTool | (string & {});
+
+/**
+ * Shell execution available to custom tools: `exec(command, args, options?)`
+ * resolves in the session cwd and returns `{ stdout, stderr, code }`.
+ */
+export type ExecFn = (command: string, args: string[], options?: ExecOptions) => Promise<ExecResult>;
+
+/**
+ * A custom tool defined inside an agent (per-agent tools). Registered with pi
+ * when the agent is applied; active only while that agent's allowlist is
+ * applied. Any agent can list the tool name in `tools` once it is registered.
+ */
+export interface AgentCustomTool {
+	/** One-line description for the LLM. */
+	description: string;
+	/** JSON Schema for the tool's parameters (object). Defaults to no parameters. */
+	parameters?: Record<string, unknown>;
+	/** Human-readable label shown in the UI (defaults to the tool name). */
+	label?: string;
+	/** Guideline bullets appended to the default system prompt while this tool is active. */
+	promptGuidelines?: string[];
+	/** Per-tool execution mode override (default: the session default). */
+	executionMode?: ToolExecutionMode;
+	/**
+	 * Execute the tool. Return an AgentToolResult, or a plain string (wrapped
+	 * as text content). `exec` runs a shell command in the session cwd
+	 * ({ stdout, stderr, code }); `ctx` is the extension context.
+	 */
+	execute: (args: Record<string, unknown>, ctx: ExtensionContext, exec: ExecFn) => AgentToolResult<unknown> | string | Promise<AgentToolResult<unknown> | string>;
+}
 
 /**
  * Agent definition. Model and thinking level are NOT part of an agent -
@@ -52,6 +82,11 @@ export interface AgentConfig {
 	systemPrompt?: string;
 	/** System prompt loaded from a markdown file (relative to agent file/dir) */
 	systemPromptFile?: string;
+	/**
+	 * Custom tools defined inside this agent (per-agent tools), keyed by tool
+	 * name. Registered when the agent is applied; active only while it is.
+	 */
+	customTools?: Record<string, AgentCustomTool>;
 	/** Auto-select this agent on session start (config.json defaultAgent wins over this) */
 	default?: boolean;
 }
@@ -145,6 +180,8 @@ function normalizeAgent(
 	const mcpServers = normalizeMcpServers(cfg.mcpServers);
 	const agentEnv = loadEnvFile(dir);
 
+	const customTools = normalizeCustomTools(cfg.customTools);
+
 	return {
 		name,
 		description: cfg.description.trim(),
@@ -155,11 +192,43 @@ function normalizeAgent(
 		mcpServers,
 		env: Object.keys(agentEnv).length > 0 ? agentEnv : undefined,
 		systemPrompt: systemPrompt?.trim() ? systemPrompt : undefined,
+		customTools,
 		default: cfg.default === true,
 		filePath,
 		source,
 		dir,
 	};
+}
+
+/**
+ * Validate + normalize an agent's `customTools` map. Entries need a
+ * description and an execute function; the rest is normalized. Returns
+ * undefined when empty.
+ */
+function normalizeCustomTools(raw: unknown): Record<string, AgentCustomTool> | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const tools: Record<string, AgentCustomTool> = {};
+	for (const [name, entry] of Object.entries(raw as Record<string, unknown>)) {
+		if (!entry || typeof entry !== "object") continue;
+		const t = entry as Partial<AgentCustomTool>;
+		if (typeof t.description !== "string" || !t.description.trim()) {
+			console.error(`pi-agents: custom tool "${name}" is missing a valid "description"`);
+			continue;
+		}
+		if (typeof t.execute !== "function") {
+			console.error(`pi-agents: custom tool "${name}" is missing an "execute" function`);
+			continue;
+		}
+		tools[name] = {
+			description: t.description.trim(),
+			parameters: t.parameters && typeof t.parameters === "object" ? t.parameters : undefined,
+			label: typeof t.label === "string" && t.label.trim() ? t.label.trim() : undefined,
+			promptGuidelines: Array.isArray(t.promptGuidelines) ? t.promptGuidelines.map(String) : undefined,
+			executionMode: t.executionMode === "sequential" || t.executionMode === "parallel" ? t.executionMode : undefined,
+			execute: t.execute,
+		};
+	}
+	return Object.keys(tools).length > 0 ? tools : undefined;
 }
 
 /** Load one agent definition file (TS/JS/MJS, default export = config or factory). */
