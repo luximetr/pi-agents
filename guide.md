@@ -61,6 +61,11 @@ export default cfg;
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": { "GITHUB_TOKEN": "ghp_..." }
+    },
+    "local": {
+      "url": "https://100.91.130.31:3001/mcp",
+      "insecure": true,
+      "headers": { "Authorization": "Bearer ${DOC_MCP_TOKEN}" }
     }
   }
 }
@@ -71,7 +76,15 @@ export default cfg;
 
 ## MCP servers
 
-- Defined in `config.json` `mcpServers` (stdio only: `command`, `args`, `env`, `cwd`).
+Two kinds, defined in `config.json` `mcpServers`:
+
+- **stdio** (default): spawn a local process — `command`, `args`, `env`, `cwd` (Claude Desktop-style).
+- **streamable HTTP**: reach a remote/local URL — `url`, `headers`, `insecure`. `headers` values may reference env vars as `${VAR}` (e.g. `"Bearer ${DOC_MCP_TOKEN}"`) so secrets never land in a committed config file; if the var is unset you get a warning at activation. `insecure: true` skips TLS certificate verification (self-signed certs, e.g. on Tailscale IPs).
+
+Secrets per project: put the actual values in a gitignored `.env` file — project `.pi-agents/.env` (and/or global `~/.pi/pi-agents/.env`; project wins, shell env wins over both). Template: `.pi-agents/.env.example`. No keying in per launch — the file is loaded automatically at session start.
+
+Per agent: a server can also be defined **inside the agent** (`mcpServers` in `agent.ts`, same shape) — then only that agent can ever use it, and it overrides project/global servers with the same name. Its key goes in a gitignored `<agent-dir>/.env`, e.g. `.pi-agents/agent-doc/.env`. Resolution order: shell env → agent `.env` → project `.env` → global `.env`.
+
 - **Nothing connects unless an agent opts in** via its `mcp` field.
 - Server tools register as `<server>__<tool>`, e.g. `playwright__browser_navigate` — no collisions, server always identifiable.
 - An agent's active toolset = its `tools` (or current toolset) ∪ its servers' tools.

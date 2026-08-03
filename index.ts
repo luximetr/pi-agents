@@ -69,11 +69,14 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// Connect the agent's MCP servers (only the ones it asks for) and
-		// collect their prefixed tool names.
+		// collect their prefixed tool names. Agent-level servers and secrets
+		// override project/global ones with the same name.
 		let mcpToolNames: string[] = [];
 		if (agent.mcp && agent.mcp.length > 0) {
 			if (!opts?.silent) ctx.ui.notify(`Connecting MCP: ${agent.mcp.join(", ")}...`, "info");
-			mcpToolNames = await mcpManager.activate(agent.mcp, config.mcpServers ?? {}, ctx, opts);
+			const servers = { ...config.mcpServers, ...agent.mcpServers };
+			const env = { ...config.env, ...agent.env };
+			mcpToolNames = await mcpManager.activate(agent.mcp, servers, env, ctx, opts);
 		}
 
 		// Tool allowlist: the agent's list when given, otherwise keep the

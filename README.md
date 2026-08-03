@@ -121,7 +121,18 @@ Plain string literals work too — `"read"` and `Tools.read` are the same value.
 
 ### MCP servers (per-agent, opt-in)
 
-`mcpServers` in `config.json` defines [MCP](https://modelcontextprotocol.io) stdio servers — standard Claude Desktop-style config: `command`, `args`, `env`, `cwd`. **Nothing is connected unless an agent opts in** — add the server names to the agent's `mcp` field and only those servers are started and only their tools are activated:
+`mcpServers` in `config.json` defines [MCP](https://modelcontextprotocol.io) servers. Two kinds are supported:
+
+- **stdio** — spawn a local process: `command`, `args`, `env`, `cwd` (Claude Desktop-style).
+- **streamable HTTP** — connect to a URL: `url`, `headers`, `insecure`.
+
+Header values can reference env vars as `${VAR}` so secrets never sit in a committed config: `"Authorization": "Bearer ${DOC_MCP_TOKEN}"` resolves at connect time (with a warning if unset). `insecure: true` skips TLS verification for self-signed certs (common on Tailscale IPs).
+
+For per-project secrets without shell setup: put the values in a gitignored `.pi-agents/.env` (e.g. `DOC_MCP_TOKEN=...`; template in `.pi-agents/.env.example`). It's loaded automatically — project `.env` wins over the global `~/.pi/pi-agents/.env`, and your real shell environment wins over both. Nothing to key in per launch.
+
+Servers can also be **per agent**: define `mcpServers` inside `agent.ts` (same shape) and only that agent can use them — other agents get a "server not defined" warning. The key then lives in a gitignored `.pi-agents/<name>/.env` (agent dir). Resolution order: shell env → agent `.env` → project `.env` → global `.env`. Example:
+
+**Nothing is connected unless an agent opts in** — add the server names to the agent's `mcp` field and only those servers are started and only their tools are activated:
 
 ```ts
 export default {
@@ -129,6 +140,9 @@ export default {
   description: "Playwright MCP agent: drives a browser via MCP tools.",
   tools: ["read", "bash"],
   mcp: ["playwright"],                 // connect ONLY this server
+  mcpServers: {                        // optional: agent-local server
+    playwright: { command: "npx", args: ["@playwright/mcp@latest"] }
+  },
   systemPrompt: "You drive a browser through the playwright__* tools.",
 };
 ```

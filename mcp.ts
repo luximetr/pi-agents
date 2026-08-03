@@ -1,5 +1,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import https from "node:https";
+import type { IncomingHttpHeaders, OutgoingHttpHeaders } from "node:http";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 import { Type } from "typebox";
@@ -19,11 +23,83 @@ interface McpCallToolResult {
 	isError?: boolean;
 }
 
+/**
+ * Minimal fetch() replacement that skips TLS certificate verification, for
+ * insecure HTTP MCP servers (self-signed certs, e.g. on Tailscale IPs).
+ * Buffers the whole response, which is fine for MCP tool traffic.
+ */
+async function insecureFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+	const url = typeof input === "string" ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+	const body = typeof init?.body === "string" || init?.body instanceof Uint8Array ? init.body : undefined;
+	// The SDK passes a Headers instance; https.request needs a plain object.
+	const headers: OutgoingHttpHeaders = {};
+	if (init?.headers) {
+		const h = init.headers instanceof Headers ? init.headers : new Headers(init.headers as HeadersInit);
+		h.forEach((value, key) => {
+			headers[key] = value;
+		});
+	}
+
+	const response = await new Promise<{ status: number; statusText: string; headers: IncomingHttpHeaders; data: Buffer }>(
+		(resolve, reject) => {
+			const req = https.request(
+				url,
+				{
+					method: init?.method ?? "GET",
+					headers: headers,
+					rejectUnauthorized: false,
+					signal: init?.signal ?? undefined,
+				},
+				(res) => {
+					const chunks: Buffer[] = [];
+					res.on("data", (c: Buffer) => chunks.push(c));
+					res.on("end", () =>
+						resolve({
+							status: res.statusCode ?? 0,
+							statusText: res.statusMessage ?? "",
+							headers: res.headers,
+							data: Buffer.concat(chunks),
+						}),
+					);
+				},
+			);
+			req.on("error", reject);
+			if (body !== undefined) req.write(body as Buffer | string);
+			req.end();
+		},
+	);
+
+	return new Response(new Uint8Array(response.data), {
+		status: response.status,
+		statusText: response.statusText,
+		headers: response.headers as HeadersInit,
+	});
+}
+
 interface Connection {
 	client: Client;
-	transport: StdioClientTransport;
+	transport: Transport;
 	/** Prefixed pi tool names exposed by this server. */
 	toolNames: string[];
+}
+
+/** Matches `${VAR}` env-var references in header values. */
+const ENV_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+
+/**
+ * Replace `${VAR}` references with values from the shell environment, falling
+ * back to `.env`-loaded secrets. Unresolved names are collected in `missing`
+ * (value is left untouched so the problem is visible).
+ */
+function resolveEnvRefs(value: string, missing: string[], env: Record<string, string>): string {
+	return value.replace(ENV_REF, (match, name: string) => {
+		const v = process.env[name] ?? env[name];
+		if (v === undefined) {
+			missing.push(name);
+			return match;
+		}
+		return v;
+	});
 }
 
 /**
@@ -36,6 +112,8 @@ export class McpManager {
 	/** In-flight connect promises, to dedupe concurrent activation. */
 	private pending = new Map<string, Promise<string[]>>();
 	private stderr = new Map<string, string>();
+	/** Unresolved ${VAR} env refs per server, warned once at activation. */
+	private envWarnings = new Map<string, string[]>();
 	private pi: ExtensionAPI;
 
 	constructor(pi: ExtensionAPI) {
@@ -50,6 +128,7 @@ export class McpManager {
 	async activate(
 		serverNames: string[],
 		servers: Record<string, McpServerConfig>,
+		env: Record<string, string>,
 		ctx: ExtensionContext,
 		opts?: { silent?: boolean },
 	): Promise<string[]> {
@@ -63,7 +142,17 @@ export class McpManager {
 				continue;
 			}
 			try {
-				tools.push(...(await this.connect(name, cfg)));
+				tools.push(...(await this.connect(name, cfg, env)));
+				const missing = this.envWarnings.get(name);
+				if (missing && missing.length > 0) {
+					if (!opts?.silent) {
+						ctx.ui.notify(
+							`MCP server "${name}": env var(s) not set: ${missing.join(", ")} (used in headers; set in shell or .pi-agents/.env)`,
+							"warning",
+						);
+					}
+					this.envWarnings.delete(name);
+				}
 			} catch (err) {
 				if (!opts?.silent) ctx.ui.notify(`MCP server "${name}" failed to start: ${err}`, "error");
 			}
@@ -72,13 +161,13 @@ export class McpManager {
 	}
 
 	/** Connect a server once and register its tools; returns prefixed tool names. */
-	private async connect(name: string, cfg: McpServerConfig): Promise<string[]> {
+	private async connect(name: string, cfg: McpServerConfig, env: Record<string, string>): Promise<string[]> {
 		const existing = this.connections.get(name);
 		if (existing) return existing.toolNames;
 		const inflight = this.pending.get(name);
 		if (inflight) return inflight;
 
-		const promise = this.doConnect(name, cfg);
+		const promise = this.doConnect(name, cfg, env);
 		this.pending.set(name, promise);
 		try {
 			const toolNames = await promise;
@@ -88,18 +177,9 @@ export class McpManager {
 		}
 	}
 
-	private async doConnect(name: string, cfg: McpServerConfig): Promise<string[]> {
+	private async doConnect(name: string, cfg: McpServerConfig, env: Record<string, string>): Promise<string[]> {
 		const client = new Client({ name: "pi-agents", version: "0.1.0" }, { capabilities: {} });
-		const transport = new StdioClientTransport({
-			command: cfg.command,
-			args: cfg.args,
-			env: cfg.env,
-			cwd: cfg.cwd,
-			stderr: "pipe",
-		});
-		transport.stderr?.on("data", (chunk: Buffer) => {
-			this.stderr.set(name, (this.stderr.get(name) ?? "") + chunk.toString("utf-8"));
-		});
+		const transport = cfg.url ? this.makeHttpTransport(name, cfg, env) : this.makeStdioTransport(name, cfg);
 
 		try {
 			await client.connect(transport);
@@ -124,6 +204,44 @@ export class McpManager {
 			const detail = stderrLog ? ` — stderr: ${stderrLog.slice(-500)}` : "";
 			throw new Error(`${err}${detail}`);
 		}
+	}
+
+	/** Build a stdio transport (command/args/env/cwd). */
+	private makeStdioTransport(name: string, cfg: McpServerConfig): StdioClientTransport {
+		const transport = new StdioClientTransport({
+			command: cfg.command ?? "",
+			args: cfg.args,
+			env: cfg.env,
+			cwd: cfg.cwd,
+			stderr: "pipe",
+		});
+		transport.stderr?.on("data", (chunk: Buffer) => {
+			this.stderr.set(name, (this.stderr.get(name) ?? "") + chunk.toString("utf-8"));
+		});
+		return transport;
+	}
+
+	/** Build a streamable HTTP transport (url/headers/insecure). */
+	private makeHttpTransport(name: string, cfg: McpServerConfig, env: Record<string, string>): StreamableHTTPClientTransport {
+		let url: URL;
+		try {
+			url = new URL(cfg.url!);
+		} catch {
+			throw new Error(`invalid URL "${cfg.url}"`);
+		}
+
+		const missing: string[] = [];
+		const headers: Record<string, string> = {};
+		for (const [key, value] of Object.entries(cfg.headers ?? {})) {
+			headers[key] = resolveEnvRefs(value, missing, env);
+		}
+		if (missing.length > 0) this.envWarnings.set(name, missing);
+
+		return new StreamableHTTPClientTransport(url, {
+			requestInit: { headers },
+			// Skip TLS verification for self-signed certs (insecure: true).
+			fetch: cfg.insecure ? (insecureFetch as typeof fetch) : undefined,
+		});
 	}
 
 	private registerTool(serverName: string, prefixedName: string, tool: { name: string; description?: string; inputSchema?: unknown }) {

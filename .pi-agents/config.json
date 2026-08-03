@@ -3,5 +3,11 @@
 	"keybindings": {
 		"select": "ctrl+shift+a",
 		"rotate": "alt+a"
+	},
+	"mcpServers": {
+		"filesystem": {
+			"command": "npx",
+			"args": ["-y", "@modelcontextprotocol/server-filesystem@latest", "."]
+		}
 	}
 }

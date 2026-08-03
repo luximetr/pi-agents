@@ -42,6 +42,12 @@ export interface AgentConfig {
 	 * activates. Only these servers are connected — not all available ones.
 	 */
 	mcp?: string[];
+	/**
+	 * Agent-local MCP servers, only visible to this agent (override
+	 * project/global servers with the same name). Useful for servers that
+	 * exactly one agent should use. Same shape as config.json mcpServers.
+	 */
+	mcpServers?: Record<string, McpServerConfig>;
 	/** System prompt, inline */
 	systemPrompt?: string;
 	/** System prompt loaded from a markdown file (relative to agent file/dir) */
@@ -54,6 +60,8 @@ export interface DiscoveredAgent extends AgentConfig {
 	filePath: string;
 	source: "global" | "project";
 	dir: string;
+	/** Secrets from the agent dir's `.env` (gitignored), e.g. `.pi-agents/<name>/.env`. */
+	env?: Record<string, string>;
 }
 
 export interface PiAgentsConfig {
@@ -64,23 +72,36 @@ export interface PiAgentsConfig {
 		rotate?: string | string[];
 	};
 	/**
-	 * MCP stdio servers, keyed by name (Claude Desktop-style config).
+	 * MCP servers, keyed by name. Either a stdio server (`command`+`args`,
+	 * Claude Desktop-style) or a streamable HTTP server (`url`).
 	 * Agents opt into servers via their `mcp` field — nothing is connected
 	 * unless an agent requests it.
 	 */
 	mcpServers?: Record<string, McpServerConfig>;
+	/**
+	 * Secrets loaded from `.env` files (global `~/.pi/pi-agents/.env` and
+	 * project `.pi-agents/.env`, project wins). Referenced from config as
+	 * `${VAR}` — the shell environment takes precedence over both.
+	 */
+	env?: Record<string, string>;
 }
 
-/** MCP stdio server definition. */
+/** MCP server definition: exactly one of `command` (stdio) or `url` (streamable HTTP). */
 export interface McpServerConfig {
 	/** Command to spawn, e.g. "npx" */
-	command: string;
+	command?: string;
 	/** Args, e.g. ["-y", "@modelcontextprotocol/server-github"] */
 	args?: string[];
-	/** Extra environment variables for the server process */
+	/** Extra environment variables for the server process (stdio only) */
 	env?: Record<string, string>;
-	/** Working directory for the server process */
+	/** Working directory for the server process (stdio only) */
 	cwd?: string;
+	/** Streamable HTTP endpoint, e.g. "https://host:port/mcp" */
+	url?: string;
+	/** HTTP headers (HTTP only). Values may reference env vars: "Bearer ${MY_TOKEN}". */
+	headers?: Record<string, string>;
+	/** Skip TLS certificate verification (HTTP only, for self-signed certs). */
+	insecure?: boolean;
 }
 
 const jiti = createJiti(import.meta.url);
@@ -119,6 +140,11 @@ function normalizeAgent(
 		}
 	}
 
+	// Agent-local MCP servers + secrets (`.env` in the agent dir) — only this
+	// agent can use them; project/global servers with the same name are overridden.
+	const mcpServers = normalizeMcpServers(cfg.mcpServers);
+	const agentEnv = loadEnvFile(dir);
+
 	return {
 		name,
 		description: cfg.description.trim(),
@@ -126,6 +152,8 @@ function normalizeAgent(
 			? (cfg.tools.map((t) => String(t).trim()).filter(Boolean) as ToolName[])
 			: undefined,
 		mcp: Array.isArray(cfg.mcp) ? cfg.mcp.map((s) => String(s).trim()).filter(Boolean) : undefined,
+		mcpServers,
+		env: Object.keys(agentEnv).length > 0 ? agentEnv : undefined,
 		systemPrompt: systemPrompt?.trim() ? systemPrompt : undefined,
 		default: cfg.default === true,
 		filePath,
@@ -199,22 +227,7 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 	try {
 		const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8")) as Partial<PiAgentsConfig>;
 		const keybindings = parsed.keybindings && typeof parsed.keybindings === "object" ? parsed.keybindings : undefined;
-		const mcpServers: Record<string, McpServerConfig> = {};
-		if (parsed.mcpServers && typeof parsed.mcpServers === "object") {
-			for (const [name, raw] of Object.entries(parsed.mcpServers)) {
-				if (!raw || typeof raw !== "object") continue;
-				const cfg = raw as Partial<McpServerConfig>;
-				if (typeof cfg.command !== "string" || !cfg.command.trim()) continue;
-				mcpServers[name] = {
-					command: cfg.command.trim(),
-					args: Array.isArray(cfg.args) ? cfg.args.map((a) => String(a)) : undefined,
-					env: cfg.env && typeof cfg.env === "object"
-						? Object.fromEntries(Object.entries(cfg.env).map(([k, v]) => [k, String(v)]))
-						: undefined,
-					cwd: typeof cfg.cwd === "string" ? cfg.cwd : undefined,
-				};
-			}
-		}
+		const mcpServers = normalizeMcpServers(parsed.mcpServers);
 		return {
 			defaultAgent: typeof parsed.defaultAgent === "string" ? parsed.defaultAgent : undefined,
 			keybindings: keybindings
@@ -223,12 +236,79 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 						rotate: normalizeKeys(keybindings.rotate),
 				  }
 				: undefined,
-			mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
+			mcpServers,
+			env: loadEnvFile(dir),
 		};
 	} catch (err) {
 		console.error(`pi-agents: failed to parse ${configPath}: ${err}`);
 		return {};
 	}
+}
+
+/** Parse a simple .env file: `KEY=VALUE` lines, `#` comments, optional quotes, optional `export` prefix. */
+export function parseEnvFile(content: string): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const rawLine of content.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (!line || line.startsWith("#")) continue;
+		const bare = line.startsWith("export ") ? line.slice(7).trimStart() : line;
+		const eq = bare.indexOf("=");
+		if (eq <= 0) continue;
+		const key = bare.slice(0, eq).trim();
+		let value = bare.slice(eq + 1).trim();
+		if (value.length >= 2) {
+			const first = value[0];
+			const last = value[value.length - 1];
+			if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+				value = value.slice(1, -1);
+			}
+		}
+		if (key) env[key] = value;
+	}
+	return env;
+}
+
+/** Load the `.env` file from an agents dir (empty map if absent/unreadable). */
+function loadEnvFile(dir: string): Record<string, string> {
+	const envPath = path.join(dir, ".env");
+	if (!fs.existsSync(envPath)) return {};
+	try {
+		return parseEnvFile(fs.readFileSync(envPath, "utf-8"));
+	} catch (err) {
+		console.error(`pi-agents: failed to parse ${envPath}: ${err}`);
+		return {};
+	}
+}
+
+/**
+ * Validate + normalize an `mcpServers` map (config.json or agent-level).
+ * Entries need exactly one of `command` (stdio) or `url` (HTTP); the rest is
+ * normalized to strings. Returns undefined when empty.
+ */
+function normalizeMcpServers(raw: unknown): Record<string, McpServerConfig> | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const mcpServers: Record<string, McpServerConfig> = {};
+	for (const [name, entry] of Object.entries(raw as Record<string, unknown>)) {
+		if (!entry || typeof entry !== "object") continue;
+		const cfg = entry as Partial<McpServerConfig>;
+		const command = typeof cfg.command === "string" ? cfg.command.trim() : undefined;
+		const url = typeof cfg.url === "string" ? cfg.url.trim() : undefined;
+		if (!command && !url) continue;
+		mcpServers[name] = {
+			command,
+			args: Array.isArray(cfg.args) ? cfg.args.map((a) => String(a)) : undefined,
+			env: cfg.env && typeof cfg.env === "object"
+				? Object.fromEntries(Object.entries(cfg.env).map(([k, v]) => [k, String(v)]))
+				: undefined,
+			cwd: typeof cfg.cwd === "string" ? cfg.cwd : undefined,
+			url,
+			headers: cfg.headers && typeof cfg.headers === "object"
+				? Object.fromEntries(Object.entries(cfg.headers).map(([k, v]) => [k, String(v)]))
+				: undefined,
+			insecure: cfg.insecure === true,
+		};
+	}
+	return Object.keys(mcpServers).length > 0 ? mcpServers : undefined;
 }
 
 /** Merged config.json from global + project dirs (project wins). */
@@ -243,6 +323,7 @@ export function loadConfig(cwd: string): PiAgentsConfig {
 			rotate: projectConfig.keybindings?.rotate ?? globalConfig.keybindings?.rotate,
 		},
 		mcpServers: { ...globalConfig.mcpServers, ...projectConfig.mcpServers },
+		env: { ...globalConfig.env, ...projectConfig.env },
 	};
 }
 
