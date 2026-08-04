@@ -43,6 +43,35 @@ export default function (pi: ExtensionAPI) {
 	let originalTools: string[] | undefined;
 	let persistedName: string | undefined;
 
+	/** Read the last agent selection from a session file (used by /new and /clone). */
+	function readPersistedName(sessionFile: string | undefined): string | null | undefined {
+		if (!sessionFile) return undefined;
+		try {
+			const lines = fs.readFileSync(sessionFile, "utf8").split("\n");
+			for (const line of lines.reverse()) {
+				if (!line.trim()) continue;
+				try {
+					const entry = JSON.parse(line) as { type?: string; customType?: string; data?: { name?: string | null } };
+					if (entry.type === "custom" && entry.customType === STATE_ENTRY) {
+						return entry.data?.name ?? null;
+					}
+				} catch {
+					// Ignore incomplete/corrupt trailing lines in a session file.
+				}
+			}
+		} catch {
+			// Ephemeral sessions and unavailable previous files have no selection.
+		}
+		return undefined;
+	}
+
+	function persistSelection(name: string | undefined) {
+		if (name !== persistedName) {
+			pi.appendEntry(STATE_ENTRY, { name: name ?? null });
+			persistedName = name;
+		}
+	}
+
 	const mcpManager = new McpManager(pi);
 	/** Custom tool name -> agent name that registered it (for collision warnings). */
 	const customToolOwners = new Map<string, string>();
@@ -147,6 +176,7 @@ export default function (pi: ExtensionAPI) {
 		activeName = agent.name;
 		activeAgent = agent;
 		updateStatus(ctx, activeAgent);
+		persistSelection(activeName);
 		if (!opts?.silent) {
 			const mcpNote = mcpToolNames.length > 0 ? ` (${mcpToolNames.length} MCP tools)` : "";
 			ctx.ui.notify(`Agent "${name}" activated${mcpNote}`, "info");
@@ -162,6 +192,7 @@ export default function (pi: ExtensionAPI) {
 		activeName = undefined;
 		activeAgent = undefined;
 		updateStatus(ctx, undefined);
+		persistSelection(undefined);
 		if (!opts?.silent) ctx.ui.notify("Agent cleared, plain pi restored", "info");
 	}
 
@@ -276,38 +307,41 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Session lifecycle: discover, restore, persist ---
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		const result = await discoverAgents(ctx.cwd);
 		agents = result.agents;
 		config = result.config;
 		activeName = undefined;
 		activeAgent = undefined;
 
-		// Persisted selection for this session (survives restarts).
-		const entries = ctx.sessionManager.getEntries();
-		let restored: string | undefined;
-		for (const entry of [...entries].reverse()) {
-			if (entry.type === "custom" && entry.customType === STATE_ENTRY) {
-				const name = (entry as { data?: { name?: string | null } }).data?.name ?? undefined;
-				if (name) restored = name;
-				break;
-			}
+		// Restore this session first. A newly-created session has no entries, so
+		// inherit the selection from the session it replaced (the OpenCode-style
+		// behavior expected from /new and /clone).
+		let restored = readPersistedName(ctx.sessionManager.getSessionFile());
+		if (restored === undefined && (event.reason === "new" || event.reason === "fork")) {
+			restored = readPersistedName(event.previousSessionFile);
 		}
 
-		// Priority: --agent flag > persisted > config.defaultAgent > agent.default > plain pi
+		// Priority: --agent flag > persisted > config.defaultAgent > agent.default > first agent
+
 		const flag = pi.getFlag("agent");
 		let selected: string | undefined;
 		if (typeof flag === "string" && flag.trim()) {
 			if (agents.some((a) => a.name === flag.trim())) selected = flag.trim();
 			else ctx.ui.notify(`Unknown agent "${flag}". Available: ${agents.map((a) => a.name).join(", ")}`, "warning");
-		} else if (restored && agents.some((a) => a.name === restored)) {
-			selected = restored;
+		} else if (restored !== undefined) {
+			// null is a deliberate persisted "plain pi" selection; do not replace
+			// it with the configured/default agent on the next /new.
+			if (restored && agents.some((a) => a.name === restored)) selected = restored;
 		} else if (config.defaultAgent && agents.some((a) => a.name === config.defaultAgent)) {
 			selected = config.defaultAgent;
 		} else {
-			selected = agents.find((a) => a.default)?.name;
+			selected = agents.find((a) => a.default)?.name ?? agents[0]?.name;
 		}
 
+		// Set this before applying so the initial selection is persisted too (and
+		// selecting an agent then immediately running /new cannot lose the choice).
+		persistedName = undefined;
 		if (selected) await applyAgent(selected, ctx, { silent: true });
 		else updateStatus(ctx, undefined);
 		persistedName = activeName;
@@ -319,9 +353,6 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_start", async () => {
-		if (activeName !== persistedName) {
-			pi.appendEntry(STATE_ENTRY, { name: activeName ?? null });
-			persistedName = activeName;
-		}
+		persistSelection(activeName);
 	});
 }

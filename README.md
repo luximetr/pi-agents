@@ -204,7 +204,7 @@ export default {
 }
 ```
 
-`defaultAgent` is optional — unset (or `null`) means plain pi is the default. Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends:
+`defaultAgent` is optional. If it is unset, the last agent selection is remembered for the next `/new` session; otherwise the first agent marked `default: true` (or, when none is marked, the first discovered agent) is selected. Use `/agent none` to clear the current agent and restore plain pi for that session. Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends:
 
 ```json
 {
@@ -310,10 +310,10 @@ The shortcuts are plain terminal key sequences — if your terminal doesn't send
 
 ## How it works
 
-- `session_start`: agents are discovered and loaded; the selection is restored (priority: `--agent` flag → persisted session selection → `config.defaultAgent` → `default: true` agent → plain pi)
+- `session_start`: agents are discovered and loaded; the selection is restored (priority: `--agent` flag → current session selection → selection from the session replaced by `/new` or `/clone` → `config.defaultAgent` → `default: true` agent → first agent)
 - Applying an agent: `pi.setActiveTools(...)` restricts tools; `before_agent_start` appends the agent's system prompt to every turn
 - MCP: servers from merged `config.json` are connected on demand when an agent with `mcp: [...]` is applied; their tools are registered as `<server>__<tool>` and activated together with the tool allowlist
-- Selection is persisted per session via `pi.appendEntry`, so it survives restarts of the same session
+- Selection is persisted via `pi.appendEntry`; it survives restarts and is inherited by `/new` and `/clone` sessions
 - Switching to `(none)` restores the toolset from before the first agent was applied
 
 ## Limitations / roadmap
