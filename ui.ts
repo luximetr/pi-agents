@@ -72,12 +72,12 @@ export function agentLabel(agent: DiscoveredAgent): string {
 	return parts.join(" | ");
 }
 
-/** Footer status line, e.g. "agent:dev", tinted with the agent's color. Cleared when no agent is active. */
+/** Footer status line showing the active agent, or the default pi agent when none is selected. */
 export function updateStatus(ctx: ExtensionContext, agent: DiscoveredAgent | undefined) {
 	if (agent) {
 		ctx.ui.setStatus("pi-agents", colorize(ctx.ui.theme, agent, `agent:${agent.name}`));
 	} else {
-		ctx.ui.setStatus("pi-agents", undefined);
+		ctx.ui.setStatus("pi-agents", ctx.ui.theme.fg("muted", "agent:none · default pi"));
 	}
 }
 
