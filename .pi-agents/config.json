@@ -2,7 +2,7 @@
 	"defaultAgent": null,
 	"keybindings": {
 		"select": "ctrl+shift+a",
-		"rotate": "alt+a"
+		"rotate": "ctrl+shift+q"
 	},
 	"mcpServers": {
 		"filesystem": {

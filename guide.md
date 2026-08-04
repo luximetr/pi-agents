@@ -4,7 +4,7 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 
 ## Using the extension (quick start)
 
-- Switch agents: `ctrl+shift+a` (picker), `alt+a` (rotate), or `/agent <name>` (`/agent none` clears).
+- Switch agents: `ctrl+shift+a` (picker), `ctrl+shift+q` (rotate), or `/agent <name>` (`/agent none` clears).
 - Start with an agent from the CLI: `pi --agent dev`.
 - The active agent's system prompt is appended every turn; its tools are restricted to its allowlist (+ its MCP tools).
 - No agent selected = plain pi, unchanged.
@@ -83,7 +83,7 @@ export default {
 ```json
 {
   "defaultAgent": "dev",
-  "keybindings": { "select": "ctrl+shift+a", "rotate": "alt+a" },
+  "keybindings": { "select": "ctrl+shift+a", "rotate": "ctrl+shift+q" },
   "mcpServers": {
     "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
     "github": {

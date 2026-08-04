@@ -9,7 +9,10 @@ import { showAgentSelector, updateStatus } from "./ui.ts";
 
 const STATE_ENTRY = "pi-agents-state";
 const DEFAULT_SELECT_SHORTCUT = "ctrl+shift+a";
-const DEFAULT_ROTATE_SHORTCUT = "alt+a";
+// Ctrl+Q is commonly consumed by terminal flow control and Ctrl+A by the
+// line editor. Ctrl+Shift+R uses the same modifier reporting as the working
+// picker shortcut (Ctrl+Shift+A), while avoiding those built-in bindings.
+const DEFAULT_ROTATE_SHORTCUT = "ctrl+shift+q";
 
 /** Load the bundled guide.md (resolve symlinks so relative lookup works for symlinked installs). */
 function loadGuide(): string {

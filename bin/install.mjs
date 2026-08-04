@@ -269,7 +269,7 @@ function summary(dir, opts) {
   out("Next steps:", C.bold);
   out(`  1. Start pi in ${dir} — the extension loads automatically (trust already recorded)`);
   out(`  2. /reload if pi is already running there`);
-  out(`  3. ctrl+shift+a → agent picker · alt+a → rotate · /agent dev · /agent:help <question>`);
+  out(`  3. ctrl+shift+a → agent picker · ctrl+shift+q → rotate · /agent dev · /agent:help <question>`);
   out(`  4. Agents: define project agents in ${path.join(dir, ".pi-agents")}/ or shared ones in ${path.join(userAgentDir(), "pi-agents")}/`);
   out("");
   out(`Manage: pi-agents status · pi-agents remove${opts.global ? " --global" : ""} · pi list · pi remove`, C.dim);
