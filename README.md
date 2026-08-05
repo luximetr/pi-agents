@@ -4,7 +4,20 @@ Opencode-style agents for [pi](https://github.com/earendil-dev/pi): define agent
 
 ## Install
 
-**One line per project** — after linking the CLI once:
+### From GitHub (published)
+
+Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own:
+
+```bash
+pi install git:github.com/luximetr/pi-agents@v0.1.0        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.1.0 -l     # current project only
+```
+
+Drop `@v0.1.0` to track the latest commit on `main` instead of the tagged release. The extension is loaded from the clone (`~/.pi/agent/git/` for user scope, `.pi/git/` for `-l`). After installing, `/reload` in a running pi session (or restart). Project-local installs load only in **trusted** projects — pi asks on first interactive start (or run `/trust`). Manage with `pi list` / `pi remove`.
+
+### With the `pi-agents` installer CLI
+
+For local-checkout installs, bundled sample agents (`--agents`), and non-interactive setups. **One line per project** — after linking the CLI once:
 
 ```bash
 cd <this repo>
