@@ -4,7 +4,7 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 
 ## Using the extension (quick start)
 
-- Switch agents: `ctrl+shift+a` (picker), `ctrl+shift+q` (rotate), or `/agent <name>` (`/agent none` clears). If your terminal can't report `Ctrl+Shift` (see README troubleshooting), configure the `alt` fallbacks `alt+a`/`alt+q` in `config.json` — they work in every terminal.
+- Switch agents: `f7` (picker), `f8` (rotate), or `/agent <name>` (`/agent none` clears). `f7`/`f8` work through iTerm2 and herdr without terminal setting changes. Configured shortcuts such as `ctrl+shift+a` or `alt+a` remain available as additional aliases.
 - Start with an agent from the CLI: `pi --agent dev`.
 - The active agent's system prompt is appended every turn; its tools are restricted to its allowlist (+ its MCP tools).
 - No agent selected = plain pi, unchanged.

@@ -8,11 +8,10 @@ import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { showAgentSelector, updateStatus } from "./ui.ts";
 
 const STATE_ENTRY = "pi-agents-state";
-const DEFAULT_SELECT_SHORTCUT = "ctrl+shift+a";
-// Ctrl+Q is commonly consumed by terminal flow control and Ctrl+A by the
-// line editor. Ctrl+Shift+R uses the same modifier reporting as the working
-// picker shortcut (Ctrl+Shift+A), while avoiding those built-in bindings.
-const DEFAULT_ROTATE_SHORTCUT = "ctrl+shift+q";
+// Function keys are encoded as escape sequences by iTerm2 and are passed
+// through herdr/tmux without requiring modifyOtherKeys or Option-as-Meta.
+const DEFAULT_SELECT_SHORTCUT = "f7";
+const DEFAULT_ROTATE_SHORTCUT = "f8";
 
 /** Load the bundled guide.md (resolve symlinks so relative lookup works for symlinked installs). */
 function loadGuide(): string {
@@ -29,10 +28,10 @@ function loadGuide(): string {
 /** The bundled guide ("" when unavailable). */
 const GUIDE = loadGuide();
 
-/** Normalize a config keybinding (single key or array) into a unique, lowercase key list. */
+/** Normalize a config keybinding and always retain the terminal-safe fallback. */
 function normalizeShortcutKeys(value: string | string[] | undefined, fallback: string): string[] {
-	const list = value === undefined ? [fallback] : Array.isArray(value) ? value : [value];
-	return [...new Set(list.map((k) => k.trim().toLowerCase()).filter(Boolean))];
+	const configured = value === undefined ? [] : Array.isArray(value) ? value : [value];
+	return [...new Set([...configured, fallback].map((k) => k.trim().toLowerCase()).filter(Boolean))];
 }
 
 export default function (pi: ExtensionAPI) {

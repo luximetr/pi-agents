@@ -88,8 +88,8 @@ Either way: `/reload` in pi (or restart) to pick up the extension.
 
 | Action | How |
 |---|---|
-| Open agent picker | `ctrl+shift+a` (fallback: `alt+a` if configured, see below) |
-| Rotate to next agent | `ctrl+shift+q` (cycles: plain pi → dev → doc → … → plain pi; fallback: `alt+q`) |
+| Open agent picker | `f7` (also accepts configured shortcuts) |
+| Rotate to next agent | `f8` (cycles: plain pi → dev → doc → … → plain pi; also accepts configured shortcuts) |
 | Switch directly | `/agent dev`, `/agent none` |
 | Ask about the extension | `/agent:help <question>` (answered from the bundled guide) |
 | Picker | `/agent` |
@@ -314,12 +314,11 @@ Works in plain pi or under any agent. The guide is not exposed as a tool and is 
 
 ## Troubleshooting: shortcuts don't fire
 
-The shortcuts are plain terminal key sequences — if your terminal doesn't send them, pi never sees them and the key falls through.
+The built-in shortcuts are `f7` (picker) and `f8` (rotate). Function keys are plain escape sequences, so they work through iTerm2 and herdr without changing terminal settings. Configured shortcuts are retained as additional aliases.
 
 - **`ctrl+q`** is commonly consumed by terminal flow control, and **`ctrl+a`** is commonly reserved by the line editor. They cannot reliably be used as extension shortcuts.
-- **`ctrl+shift+a` (select) and `ctrl+shift+q` (rotate)** require the terminal to report `Ctrl+Shift` distinctly (Kitty keyboard protocol / CSI-u). Terminals that do: kitty, WezTerm, Ghostty, and iTerm2 only with **Apps can change how keys are reported** (a.k.a. *Allow modifyOtherKeys*) enabled in Profile → Keys.
-- **This is all-or-nothing in iTerm2**: that one checkbox gates *both* CSI-u and xterm modifyOtherKeys. With it off — e.g. because a multiplexer like herdr/tmux leaves the terminal in CSI-u mode and "breaks" it — `ctrl+shift` is flattened to plain `ctrl` *everywhere*, inside the multiplexer and in iTerm2 directly. No app can tell `ctrl+shift+a` from `ctrl+a`.
-- **Fix that works in any terminal (no CSI-u needed): `alt` fallbacks.** `alt+letter` is just `ESC` + letter, which every terminal and multiplexer (iTerm2, Terminal.app, tmux, herdr, SSH) transmits. Configure both keys and use the `alt` one where `ctrl+shift` doesn't fire:
+- Existing `ctrl+shift` and `alt` aliases may still require terminal-specific reporting. They remain supported when configured, but `f7`/`f8` do not require those settings.
+- If you prefer custom aliases, configure both keys; the built-in `f7`/`f8` aliases are still registered automatically:
 
   ```json
   { "keybindings": { "select": ["ctrl+shift+a", "alt+a"], "rotate": ["ctrl+shift+q", "alt+q"] } }
