@@ -1,8 +1,8 @@
 {
 	"defaultAgent": null,
 	"keybindings": {
-		"select": "ctrl+shift+a",
-		"rotate": "ctrl+shift+q"
+		"select": ["ctrl+shift+a", "alt+a"],
+		"rotate": ["ctrl+shift+q", "alt+q"]
 	},
 	"mcpServers": {
 		"filesystem": {

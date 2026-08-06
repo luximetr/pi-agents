@@ -88,8 +88,8 @@ Either way: `/reload` in pi (or restart) to pick up the extension.
 
 | Action | How |
 |---|---|
-| Open agent picker | `ctrl+shift+a` |
-| Rotate to next agent | `ctrl+shift+q` (cycles: plain pi → dev → doc → … → plain pi) |
+| Open agent picker | `ctrl+shift+a` (fallback: `alt+a` if configured, see below) |
+| Rotate to next agent | `ctrl+shift+q` (cycles: plain pi → dev → doc → … → plain pi; fallback: `alt+q`) |
 | Switch directly | `/agent dev`, `/agent none` |
 | Ask about the extension | `/agent:help <question>` (answered from the bundled guide) |
 | Picker | `/agent` |
@@ -205,7 +205,10 @@ export default {
 ```json
 {
   "defaultAgent": "dev",
-  "keybindings": { "select": "ctrl+shift+a", "rotate": "ctrl+shift+q" },
+  "keybindings": {
+    "select": ["ctrl+shift+a", "alt+a"],
+    "rotate": ["ctrl+shift+q", "alt+q"]
+  },
   "mcpServers": {
     "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
     "github": {
@@ -217,13 +220,13 @@ export default {
 }
 ```
 
-`defaultAgent` is optional. If it is unset, the last agent selection is remembered for the next `/new` session; otherwise the first agent marked `default: true` (or, when none is marked, the first discovered agent) is selected. Use `/agent none` to clear the current agent and restore plain pi for that session. Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends:
+`defaultAgent` is optional. If it is unset, the last agent selection is remembered for the next `/new` session; otherwise the first agent marked `default: true` (or, when none is marked, the first discovered agent) is selected. Use `/agent none` to clear the current agent and restore plain pi for that session. Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends (e.g. `alt` keys on terminals that can't report `Ctrl+Shift`, see troubleshooting):
 
 ```json
 {
   "keybindings": {
-    "select": ["ctrl+shift+a", "ctrl+shift+s"],
-    "rotate": ["ctrl+shift+q", "ctrl+shift+t"]
+    "select": ["ctrl+shift+a", "alt+a"],
+    "rotate": ["ctrl+shift+q", "alt+q"]
   }
 }
 ```
@@ -314,9 +317,16 @@ Works in plain pi or under any agent. The guide is not exposed as a tool and is 
 The shortcuts are plain terminal key sequences — if your terminal doesn't send them, pi never sees them and the key falls through.
 
 - **`ctrl+q`** is commonly consumed by terminal flow control, and **`ctrl+a`** is commonly reserved by the line editor. They cannot reliably be used as extension shortcuts.
-- **`ctrl+shift+a` (select) and `ctrl+shift+q` (rotate)** require the terminal to report `Ctrl+Shift` distinctly (Kitty keyboard protocol / CSI-u). Terminals that do: kitty, WezTerm, Ghostty, iTerm2 with **Report modifiers using CSI u** enabled. Since `ctrl+shift+a` works in your terminal, `ctrl+shift+q` should work with the same setup.
+- **`ctrl+shift+a` (select) and `ctrl+shift+q` (rotate)** require the terminal to report `Ctrl+Shift` distinctly (Kitty keyboard protocol / CSI-u). Terminals that do: kitty, WezTerm, Ghostty, and iTerm2 only with **Apps can change how keys are reported** (a.k.a. *Allow modifyOtherKeys*) enabled in Profile → Keys.
+- **This is all-or-nothing in iTerm2**: that one checkbox gates *both* CSI-u and xterm modifyOtherKeys. With it off — e.g. because a multiplexer like herdr/tmux leaves the terminal in CSI-u mode and "breaks" it — `ctrl+shift` is flattened to plain `ctrl` *everywhere*, inside the multiplexer and in iTerm2 directly. No app can tell `ctrl+shift+a` from `ctrl+a`.
+- **Fix that works in any terminal (no CSI-u needed): `alt` fallbacks.** `alt+letter` is just `ESC` + letter, which every terminal and multiplexer (iTerm2, Terminal.app, tmux, herdr, SSH) transmits. Configure both keys and use the `alt` one where `ctrl+shift` doesn't fire:
+
+  ```json
+  { "keybindings": { "select": ["ctrl+shift+a", "alt+a"], "rotate": ["ctrl+shift+q", "alt+q"] } }
+  ```
+
+  On macOS, `alt+letter` requires the terminal to send `Option` as `Esc`: iTerm2 → Profile → Keys → **Left Option Key Sends: Esc+** (Terminal.app: *Use Option as Meta key*). This setting is independent of the key-reporting checkbox, so it won't affect herdr/tmux.
 - **Works regardless of terminal:** `/agent` (picker), `/agent dev` (direct), and `pi --agent dev` (startup). Commands don't depend on key encoding.
-- **Add a fallback key** that your terminal sends reliably via `keybindings` above. For example, use `"rotate": ["ctrl+shift+q", "ctrl+shift+t"]`.
 
 ## How it works
 
