@@ -1,10 +1,14 @@
 {
   "name": "pi-agents",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Opencode-style agents for pi: define agents in code under .pi-agents/, switch with ctrl+shift+a",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "type": "module",
   "bin": {
