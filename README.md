@@ -295,7 +295,7 @@ Recommended layout for a reusable setup: define your shared servers **globally**
 MCP tools are registered as `<server>__<tool>`, e.g. `playwright__browser_navigate`, so tools from different servers never collide and the server is always identifiable in the tool name. Tool schemas come from the server (JSON Schema → TypeBox) and tool calls are forwarded with `client.callTool`. The tool allowlist and MCP tools are combined: `active = agent.tools (or current) ∪ agent.mcp tools`.
 
 Details:
-- Switching to an agent without the server's MCP tools deactivates them; **connections stay alive** for fast switching back. All servers are shut down on session end (`session_shutdown`).
+- Switching agents deactivates MCP tools and closes their connections, so agent-specific credentials cannot be reused by another agent. Servers are also shut down on session end (`session_shutdown`).
 - Unknown server names and failed starts are reported as notifications; the rest of the agent still applies.
 - Text/image results are passed through to the LLM; `structuredContent` is appended as JSON; errors surface as tool failures.
 - The picker shows `mcp:playwright` in the agent description line.

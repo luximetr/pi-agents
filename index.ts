@@ -142,6 +142,13 @@ export default function (pi: ExtensionAPI) {
 			originalTools = pi.getActiveTools();
 		}
 
+		// MCP connections may contain agent-specific credentials. Never reuse a
+		// connection when changing agents, even when both agents use the same
+		// server name.
+		if (activeName !== undefined && activeName !== agent.name) {
+			await mcpManager.disconnectAll();
+		}
+
 		// Register the agent's custom tools (per-agent tools). Auto-activated
 		// by pi at registration; re-scoped by setActiveTools below.
 		const customToolNames = registerCustomTools(agent, ctx, opts);
@@ -187,7 +194,9 @@ export default function (pi: ExtensionAPI) {
 		return true;
 	}
 
-	function clearAgent(ctx: ExtensionContext, opts?: { silent?: boolean }) {
+	async function clearAgent(ctx: ExtensionContext, opts?: { silent?: boolean }) {
+		// Clearing an agent must also drop its credentialed MCP connections.
+		await mcpManager.disconnectAll();
 		if (originalTools) {
 			pi.setActiveTools(originalTools);
 			originalTools = undefined;
@@ -204,7 +213,7 @@ export default function (pi: ExtensionAPI) {
 		const name = rawName?.trim();
 		if (!name) return false;
 		if (name === "none" || name === "off") {
-			clearAgent(ctx, opts);
+			await clearAgent(ctx, opts);
 			return true;
 		}
 		return applyAgent(name, ctx, opts);
@@ -221,7 +230,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		const result = await showAgentSelector(ctx, agents, activeName);
 		if (result === null) return; // cancelled
-		if (result === "(none)") clearAgent(ctx);
+		if (result === "(none)") await clearAgent(ctx);
 		else await applyAgent(result, ctx);
 	}
 
@@ -235,7 +244,7 @@ export default function (pi: ExtensionAPI) {
 		const currentIndex = activeName === undefined ? 0 : cycle.indexOf(activeName);
 		const nextIndex = (currentIndex === -1 ? 0 : currentIndex + 1) % cycle.length;
 		const nextName = cycle[nextIndex];
-		if (nextName === "(none)") clearAgent(ctx);
+		if (nextName === "(none)") await clearAgent(ctx);
 		else await applyAgent(nextName, ctx);
 	}
 

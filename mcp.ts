@@ -105,7 +105,7 @@ function resolveEnvRefs(value: string, missing: string[], env: Record<string, st
 /**
  * Connects MCP stdio servers on demand (only when an agent requests them) and
  * registers their tools with pi under `<server>__<tool>` names. Connections are
- * cached across agent switches and closed on session shutdown.
+ * scoped to the currently active agent and closed when switching agents.
  */
 export class McpManager {
 	private connections = new Map<string, Connection>();
@@ -286,8 +286,13 @@ export class McpManager {
 		});
 	}
 
-	/** Close all connections (kills server processes). Called on session shutdown. */
+	/** Close all connections (kills server processes). Called on agent switch/shutdown. */
 	async disconnectAll(): Promise<void> {
+		// Wait for an in-flight connect before collecting connections. Otherwise a
+		// connection started for the previous agent could finish after this method
+		// returns and remain usable with the previous agent's credentials.
+		const pending = [...this.pending.values()];
+		await Promise.allSettled(pending);
 		const conns = [...this.connections.values()];
 		this.connections.clear();
 		await Promise.allSettled(conns.map((c) => c.client.close()));

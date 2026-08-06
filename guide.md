@@ -114,7 +114,7 @@ Secrets per project: put the actual values in a gitignored `.env` file — proje
 
 Per agent: a server can also be defined **inside the agent** (`mcpServers` in `agent.ts`, same shape) — then only that agent can ever use it, and it overrides project/global servers with the same name. Its key goes in a gitignored `<agent-dir>/.env`, e.g. `.pi-agents/agent-doc/.env`. Resolution order: shell env → agent `.env` → project `.env` → global `.env`.
 
-- **Nothing connects unless an agent opts in** via its `mcp` field.
+- **Nothing connects unless an agent opts in** via its `mcp` field. MCP connections are closed when switching agents, so credentials are never reused across agents.
 - Server tools register as `<server>__<tool>`, e.g. `playwright__browser_navigate` — no collisions, server always identifiable.
 - An agent's active toolset = its `tools` (or current toolset) ∪ its servers' tools.
 - Best practice: shared servers globally (`~/.pi/agent/pi-agents/config.json`), project-specific ones in the project config. Agents and servers can live in different places — any agent can use any merged server.
