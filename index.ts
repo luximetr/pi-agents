@@ -15,6 +15,16 @@ const DEFAULT_SELECT_SHORTCUT = "f7";
 const DEFAULT_ROTATE_SHORTCUT = "f8";
 const DELEGATE_TOOL = "delegate";
 
+function formatToolArgs(args: unknown): string {
+	if (args === undefined || args === null) return "";
+	try {
+		const text = JSON.stringify(args);
+		return text && text !== "{}" ? ` ${text}` : "";
+	} catch {
+		return " [args unavailable]";
+	}
+}
+
 /** Load the bundled guide.md (resolve symlinks so relative lookup works for symlinked installs). */
 function loadGuide(): string {
 	try {
@@ -121,10 +131,10 @@ export default function (pi: ExtensionAPI) {
 				};
 				const update = (line: string) => {
 					if (streamedText) {
-						progressLines.push(streamedText);
+						progressLines.push(...streamedText.split("\n"));
 						streamedText = "";
 					}
-					progressLines.push(line);
+					progressLines.push(...line.split("\n"));
 					if (progressLines.length > MAX_PROGRESS_LINES) progressLines.splice(0, progressLines.length - MAX_PROGRESS_LINES);
 					publish();
 				};
@@ -139,8 +149,8 @@ export default function (pi: ExtensionAPI) {
 						switch (event.type) {
 							case "started": update(`▶ ${event.agent}: running`); break;
 							case "text": stream(event.delta); break;
-							case "tool-start": update(`→ ${event.tool}`); break;
-							case "tool-update": update(event.text); break;
+							case "tool-start": update(`→ ${event.tool}${formatToolArgs(event.args)}`); break;
+							case "tool-update": update(`  ${event.text}`); break;
 							case "tool-end": update(`${event.error ? "✗" : "✓"} ${event.tool}`); break;
 							case "finished": update(`✓ ${agentName}: finished`); break;
 							case "error": update(`✗ ${event.message}`); break;
