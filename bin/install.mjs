@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const EXT = "pi-agents";
-const FILES = ["index.ts", "agents.ts", "mcp.ts", "ui.ts", "guide.md"];
+const FILES = ["index.ts", "agents.ts", "mcp.ts", "ui.ts", "subagents.ts", "guide.md"];
 const COMMANDS = ["install", "remove", "uninstall", "status", "check", "list"];
 const RESET = "\x1b[0m";
 const C = { green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", dim: "\x1b[2m", bold: "\x1b[1m", cyan: "\x1b[36m" };

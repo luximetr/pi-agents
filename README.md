@@ -83,6 +83,7 @@ ln -sf ../../index.ts .pi/extensions/pi-agents/index.ts
 ln -sf ../../agents.ts .pi/extensions/pi-agents/agents.ts
 ln -sf ../../mcp.ts .pi/extensions/pi-agents/mcp.ts
 ln -sf ../../ui.ts .pi/extensions/pi-agents/ui.ts
+ln -sf ../../subagents.ts .pi/extensions/pi-agents/subagents.ts
 ```
 
 Project-local extensions load only in **trusted** projects — pi will ask on first interactive start (or run `/trust`).

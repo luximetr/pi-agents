@@ -108,16 +108,37 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
 			try {
-				let progressText = `▶ ${agentName}: started`;
-				const update = (line: string) => {
-					progressText += `\n${line}`;
+				// Tool updates replace the previous snapshot in pi's UI. Keep a bounded
+				// local buffer so token-sized deltas update one visible block instead of
+				// growing an unbounded transcript of progress messages.
+				const MAX_PROGRESS_LINES = 15;
+				const progressLines: string[] = [`▶ ${agentName}: started`];
+				let streamedText = "";
+				const publish = () => {
+					const allLines = [...progressLines, ...streamedText.split("\n")].filter(Boolean);
+					const progressText = allLines.slice(-MAX_PROGRESS_LINES).join("\n");
 					onUpdate?.({ content: [{ type: "text", text: progressText }], details: { agent: agentName, progress: true } });
+				};
+				const update = (line: string) => {
+					if (streamedText) {
+						progressLines.push(streamedText);
+						streamedText = "";
+					}
+					progressLines.push(line);
+					if (progressLines.length > MAX_PROGRESS_LINES) progressLines.splice(0, progressLines.length - MAX_PROGRESS_LINES);
+					publish();
+				};
+				const stream = (delta: string) => {
+					streamedText += delta;
+					const lines = streamedText.split("\n");
+					if (lines.length > MAX_PROGRESS_LINES) streamedText = lines.slice(-MAX_PROGRESS_LINES).join("\n");
+					publish();
 				};
 				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
 					onProgress: (event) => {
 						switch (event.type) {
 							case "started": update(`▶ ${event.agent}: running`); break;
-							case "text": update(event.delta); break;
+							case "text": stream(event.delta); break;
 							case "tool-start": update(`→ ${event.tool}`); break;
 							case "tool-update": update(event.text); break;
 							case "tool-end": update(`${event.error ? "✗" : "✓"} ${event.tool}`); break;

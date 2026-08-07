@@ -54,6 +54,7 @@ export function runSubagent(
 		let stderr = "";
 		let finalText = "";
 		let settled = false;
+		let gracefulExit = false;
 		const decoder = new StringDecoder("utf8");
 		let buffer = "";
 
@@ -93,7 +94,12 @@ export function runSubagent(
 					progress?.({ type: "tool-end", tool: String(event.toolName ?? "unknown"), error: event.isError === true });
 					break;
 				case "agent_settled":
+					// RPC mode stays alive waiting for more commands after the run
+					// settles. This delegation is one-shot, so close it here; otherwise
+					// the parent tool remains in pi's "working" state forever.
 					progress?.({ type: "finished" });
+					gracefulExit = true;
+					child.kill("SIGTERM");
 					break;
 				case "extension_error":
 					progress?.({ type: "error", message: String(event.error ?? "child extension error") });
@@ -131,7 +137,7 @@ export function runSubagent(
 			signal.removeEventListener("abort", abort);
 			finish(() => {
 				if (signal.aborted) reject(new Error("subagent cancelled"));
-				else if (code !== 0) reject(new Error(stderr.trim() || `subagent exited with code ${code}`));
+				else if (code !== 0 && !gracefulExit) reject(new Error(stderr.trim() || `subagent exited with code ${code}`));
 				else resolve(finalText.trim() || "Subagent completed without a textual result.");
 			});
 		});
