@@ -29,6 +29,7 @@ export default {
   name: "browser",
   description: "Drives a browser via MCP.",
   tools: ["read", "bash"],            // allowlist; omit = keep current, [] = no tools
+  subagents: ["developer"],            // optional delegation allowlist
   mcp: ["playwright"],                // MCP servers to connect (opt-in!)
   // color: "#ff8800",                 // theme role or hex; auto-assigned by name when omitted
   systemPrompt: "You are...",         // inline…
@@ -49,6 +50,21 @@ const cfg: AgentConfig = {
 };
 export default cfg;
 ```
+
+## Subagents and hierarchy
+
+An agent can delegate isolated work to another agent with the built-in `delegate` tool:
+
+```ts
+export default {
+  name: "lead",
+  description: "Coordinates specialists.",
+  subagents: ["developer", "researcher"],
+  systemPrompt: "Delegate implementation and research; keep the high-level context short.",
+};
+```
+
+`subagents` is an allowlist. The child runs as a fresh ephemeral `pi --print --no-session --agent <name>` process and only its final answer is returned to the parent. Nested delegation is limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
 
 ## Custom tools (per agent)
 

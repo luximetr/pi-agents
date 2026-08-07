@@ -6,12 +6,14 @@ import type { KeyId } from "@earendil-works/pi-tui";
 import { discoverAgents, loadConfig, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { showAgentSelector, updateStatus } from "./ui.ts";
+import { runSubagent } from "./subagents.ts";
 
 const STATE_ENTRY = "pi-agents-state";
 // Function keys are encoded as escape sequences by iTerm2 and are passed
 // through herdr/tmux without requiring modifyOtherKeys or Option-as-Meta.
 const DEFAULT_SELECT_SHORTCUT = "f7";
 const DEFAULT_ROTATE_SHORTCUT = "f8";
+const DELEGATE_TOOL = "delegate";
 
 /** Load the bundled guide.md (resolve symlinks so relative lookup works for symlinked installs). */
 function loadGuide(): string {
@@ -77,6 +79,42 @@ export default function (pi: ExtensionAPI) {
 	const mcpManager = new McpManager(pi);
 	/** Custom tool name -> agent name that registered it (for collision warnings). */
 	const customToolOwners = new Map<string, string>();
+
+	// This is registered once, but is added to the active toolset only for
+	// agents that explicitly declare the target agent(s) in `subagents`.
+	pi.registerTool({
+		name: DELEGATE_TOOL,
+		label: "Delegate",
+		description: "Delegate a focused task to an allowed subagent and receive its concise result.",
+		promptSnippet: "delegate: ask a specialist agent to complete an isolated task",
+		parameters: jsonSchemaToTypeBox({
+			type: "object",
+			properties: {
+				agent: { type: "string", description: "Name of an allowed subagent" },
+				task: { type: "string", description: "Self-contained task; include relevant paths and expected output" },
+			},
+			required: ["agent", "task"],
+			additionalProperties: false,
+		}),
+		execute: async (_id, params, signal, _onUpdate, ctx) => {
+			const parent = activeAgent;
+			const agentName = String((params as { agent?: unknown }).agent ?? "").trim();
+			const task = String((params as { task?: unknown }).task ?? "").trim();
+			if (!parent?.subagents?.includes(agentName)) {
+				return { content: [{ type: "text", text: `Delegation denied: ${agentName} is not an allowed subagent of ${parent?.name ?? "the current agent"}.` }], details: {} };
+			}
+			if (!agents.some((a) => a.name === agentName)) {
+				return { content: [{ type: "text", text: `Unknown subagent: ${agentName}.` }], details: {} };
+			}
+			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
+			try {
+				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal);
+				return { content: [{ type: "text", text: `Result from ${agentName}:\n\n${result}` }], details: { agent: agentName } };
+			} catch (err) {
+				return { content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}` }], details: { agent: agentName, error: true } };
+			}
+		},
+	});
 
 	// Keybindings come from config.json (global + project, project wins).
 	// Load at extension load time: cwd is the directory pi started in.
@@ -178,7 +216,13 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			base = pi.getActiveTools();
 		}
-		const active = [...new Set([...base, ...customToolNames, ...mcpToolNames])];
+		const allowedSubagents = (agent.subagents ?? []).filter((name) => agents.some((candidate) => candidate.name === name));
+		const unknownSubagents = (agent.subagents ?? []).filter((name) => !agents.some((candidate) => candidate.name === name));
+		if (unknownSubagents.length > 0 && !opts?.silent) {
+			ctx.ui.notify(`Agent "${name}": unknown subagents: ${unknownSubagents.join(", ")}`, "warning");
+		}
+		const delegationTools = allowedSubagents.length > 0 ? [DELEGATE_TOOL] : [];
+		const active = [...new Set([...base, ...customToolNames, ...mcpToolNames, ...delegationTools])];
 		// Apply even when empty: an explicit [] allowlist means "no tools".
 		pi.setActiveTools(active);
 

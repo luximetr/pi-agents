@@ -143,6 +143,22 @@ export default {
 
 Files are TypeScript loaded with [jiti](https://github.com/unjs/jiti) — you can use imports, helpers, or an async factory (`export default async () => ({...})`). Omit `tools` to keep the current toolset; pass `tools: []` to disable all built-in tools (the agent keeps only its MCP tools, if any).
 
+#### Subagents and hierarchy
+
+An agent can delegate isolated work to another declared agent. Set `subagents` to an allowlist of agent names:
+
+```ts
+export default {
+  name: "lead",
+  description: "Plans work and coordinates specialists.",
+  tools: ["read", "grep", "find"],
+  subagents: ["developer", "researcher"],
+  systemPrompt: "Stay high-level; delegate implementation and research tasks.",
+};
+```
+
+This adds the `delegate` tool automatically. The child runs as a fresh, ephemeral `pi --print` session with the selected agent and returns its final answer to the parent, so the parent context stays small. Delegation is restricted to the declared allowlist and nested delegation is capped at four levels. Set `PI_CODING_AGENT_BIN` if the `pi` executable is not the current process executable.
+
 #### Typed tools
 
 `tools` accepts any registered tool name (built-ins plus extension/MCP tools) and unknown names are filtered with a warning at apply time. For type checking + autocomplete, import the types from the extension's `agents.ts` and use the enum-style accessor:

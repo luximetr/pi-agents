@@ -92,6 +92,8 @@ export interface AgentConfig {
 	 * name. Registered when the agent is applied; active only while it is.
 	 */
 	customTools?: Record<string, AgentCustomTool>;
+	/** Agents this agent is allowed to delegate work to. Enables the built-in `delegate` tool. */
+	subagents?: string[];
 	/** Auto-select this agent on session start (config.json defaultAgent wins over this) */
 	default?: boolean;
 }
@@ -200,6 +202,9 @@ function normalizeAgent(
 		env: Object.keys(agentEnv).length > 0 ? agentEnv : undefined,
 		systemPrompt: systemPrompt?.trim() ? systemPrompt : undefined,
 		customTools,
+		subagents: Array.isArray(cfg.subagents)
+			? cfg.subagents.map((s) => String(s).trim()).filter(Boolean)
+			: undefined,
 		default: cfg.default === true,
 		filePath,
 		source,
