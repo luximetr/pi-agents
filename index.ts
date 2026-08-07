@@ -96,7 +96,7 @@ export default function (pi: ExtensionAPI) {
 			required: ["agent", "task"],
 			additionalProperties: false,
 		}),
-		execute: async (_id, params, signal, _onUpdate, ctx) => {
+		execute: async (_id, params, signal, onUpdate, ctx) => {
 			const parent = activeAgent;
 			const agentName = String((params as { agent?: unknown }).agent ?? "").trim();
 			const task = String((params as { task?: unknown }).task ?? "").trim();
@@ -108,7 +108,24 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
 			try {
-				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal);
+				let progressText = `▶ ${agentName}: started`;
+				const update = (line: string) => {
+					progressText += `\n${line}`;
+					onUpdate?.({ content: [{ type: "text", text: progressText }], details: { agent: agentName, progress: true } });
+				};
+				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
+					onProgress: (event) => {
+						switch (event.type) {
+							case "started": update(`▶ ${event.agent}: running`); break;
+							case "text": update(event.delta); break;
+							case "tool-start": update(`→ ${event.tool}`); break;
+							case "tool-update": update(event.text); break;
+							case "tool-end": update(`${event.error ? "✗" : "✓"} ${event.tool}`); break;
+							case "finished": update(`✓ ${agentName}: finished`); break;
+							case "error": update(`✗ ${event.message}`); break;
+						}
+					},
+				});
 				return { content: [{ type: "text", text: `Result from ${agentName}:\n\n${result}` }], details: { agent: agentName } };
 			} catch (err) {
 				return { content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}` }], details: { agent: agentName, error: true } };

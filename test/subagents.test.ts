@@ -33,11 +33,27 @@ test("end to end: delegate launches an isolated child with the target agent", as
 	try {
 		await writeFile(fakePi, `#!/usr/bin/env node
 			const args = process.argv.slice(2);
-			if (args[0] !== "--print" || args[1] !== "--no-session" || args[2] !== "--agent" || args[3] !== "worker") process.exit(2);
-			process.stdout.write("worker-result:" + args[4]);
+			if (args[0] !== "--mode" || args[1] !== "rpc" || args[2] !== "--no-session" || args[3] !== "--agent" || args[4] !== "worker") process.exit(2);
+			let input = "";
+			process.stdin.on("data", chunk => {
+				input += chunk;
+				if (!input.includes("\\n")) return;
+				const prompt = JSON.parse(input.split("\\n")[0]).message;
+				process.stdout.write(JSON.stringify({type:"agent_start"}) + "\\n");
+				process.stdout.write(JSON.stringify({type:"tool_execution_start", toolName:"read", args:{}}) + "\\n");
+				process.stdout.write(JSON.stringify({type:"message_update", assistantMessageEvent:{type:"text_delta", delta:"worker-result:" + prompt}}) + "\\n");
+				process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
+				process.exit(0);
+			});
 		`);
 		await chmod(fakePi, 0o755);
-		const result = await runSubagent("worker", "inspect files", root, noAbort, fakePi);
+		const progress: string[] = [];
+		const result = await runSubagent("worker", "inspect files", root, noAbort, {
+			executable: fakePi,
+			onProgress: (event) => progress.push(event.type),
+		});
+		assert.ok(progress.includes("tool-start"));
+		assert.ok(progress.includes("text"));
 		assert.equal(result, "worker-result:inspect files");
 	} finally {
 		await rm(root, { recursive: true, force: true });
