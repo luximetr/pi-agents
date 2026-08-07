@@ -131,10 +131,18 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function subagentStatsLine(stats: SubagentStats = turnSubagentStats): string | undefined {
+	function formatElapsed(ms: number): string {
+		if (ms < 1000) return `${ms}ms`;
+		if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+		const minutes = Math.floor(ms / 60000);
+		return `${minutes}m ${Math.floor((ms % 60000) / 1000)}s`;
+	}
+
+	function subagentStatsLine(stats: SubagentStats = turnSubagentStats, elapsedMs?: number): string | undefined {
 		if (stats.calls === 0) return undefined;
 		const usage = formatSubagentUsage(stats);
-		return `stats: ${stats.calls} call${stats.calls === 1 ? "" : "s"} · ${usage}`;
+		const duration = elapsedMs === undefined ? "" : ` · took ${formatElapsed(elapsedMs)}`;
+		return `stats: ${stats.calls} call${stats.calls === 1 ? "" : "s"}${duration} · ${usage}`;
 	}
 
 	/** Read the last agent selection from a session file (used by /new and /clone). */
@@ -198,6 +206,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
 			try {
+				const startedAt = Date.now();
 				turnSubagentStats.calls++;
 				sessionSubagentStats.calls++;
 				const callSubagentStats: SubagentStats = { calls: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
@@ -224,7 +233,7 @@ export default function (pi: ExtensionAPI) {
 				const publish = () => {
 					const allLines = [...progressLines, ...streamedText.split("\n")].filter(Boolean);
 					const bounded = boundProgressLines(allLines);
-					const summary = subagentStatsLine(callSubagentStats);
+					const summary = subagentStatsLine(callSubagentStats, Date.now() - startedAt);
 					const footer = [`agent: ${agentName}`, summary].filter(Boolean).join(" · ");
 					const progressText = [...bounded.slice(-(MAX_PROGRESS_LINES - 1)), footer].join("\n");
 					onUpdate?.({ content: [{ type: "text", text: progressText }], details: { agent: agentName, progress: true } });
@@ -260,7 +269,7 @@ export default function (pi: ExtensionAPI) {
 				});
 				return {
 					content: [{ type: "text", text: `Result from ${agentName}:\n\n${result}` }],
-					details: { agent: agentName, statsLine: subagentStatsLine(callSubagentStats) } satisfies DelegateStatsDetails,
+					details: { agent: agentName, statsLine: subagentStatsLine(callSubagentStats, Date.now() - startedAt) } satisfies DelegateStatsDetails,
 				};
 			} catch (err) {
 				return { content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}` }], details: { agent: agentName, error: true } };
