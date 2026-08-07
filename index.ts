@@ -20,6 +20,16 @@ type DelegateStatsDetails = {
 	statsLine?: string;
 };
 
+type SubagentStats = {
+	calls: number;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+	models: Set<string>;
+};
+
 function formatToolArgs(args: unknown): string {
 	if (args === undefined || args === null) return "";
 	try {
@@ -61,23 +71,70 @@ export default function (pi: ExtensionAPI) {
 	/** Toolset before the first agent was applied; used to restore plain pi. */
 	let originalTools: string[] | undefined;
 	let persistedName: string | undefined;
-	let turnSubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
+	let turnSubagentStats: SubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
+	let sessionSubagentStats: SubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 
-	function recordSubagentUsage(usage: SubagentUsage) {
+	function formatSubagentUsage(stats: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }): string {
+		const formatTokens = (count: number) => {
+			if (count < 1000) return count.toString();
+			if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+			if (count < 1000000) return `${Math.round(count / 1000)}k`;
+			if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+			return `${Math.round(count / 1000000)}M`;
+		};
+		const parts: string[] = [];
+		if (stats.input) parts.push(`↑${formatTokens(stats.input)}`);
+		if (stats.output) parts.push(`↓${formatTokens(stats.output)}`);
+		if (stats.cacheRead) parts.push(`R${formatTokens(stats.cacheRead)}`);
+		if (stats.cacheWrite) parts.push(`W${formatTokens(stats.cacheWrite)}`);
+		const promptTokens = stats.input + stats.cacheRead + stats.cacheWrite;
+		if ((stats.cacheRead || stats.cacheWrite) && promptTokens > 0) {
+			parts.push(`CH${((stats.cacheRead / promptTokens) * 100).toFixed(1)}%`);
+		}
+		if (stats.cost) parts.push(`$${stats.cost.toFixed(3)}`);
+		return parts.join(" ");
+	}
+
+	function sessionSubagentStatsLine(): string | undefined {
+		if (sessionSubagentStats.calls === 0) return undefined;
+		const usage = formatSubagentUsage(sessionSubagentStats);
+		return `subagents: ${sessionSubagentStats.calls} call${sessionSubagentStats.calls === 1 ? "" : "s"} · ${usage}`;
+	}
+
+	function refreshStatus(ctx: ExtensionContext) {
+		updateStatus(ctx, activeAgent, sessionSubagentStatsLine());
+	}
+
+	function recordSubagentUsage(usage: SubagentUsage, callStats?: SubagentStats) {
 		turnSubagentStats.input += usage.input;
 		turnSubagentStats.output += usage.output;
 		turnSubagentStats.cacheRead += usage.cacheRead;
 		turnSubagentStats.cacheWrite += usage.cacheWrite;
 		turnSubagentStats.cost += usage.cost;
+		sessionSubagentStats.input += usage.input;
+		sessionSubagentStats.output += usage.output;
+		sessionSubagentStats.cacheRead += usage.cacheRead;
+		sessionSubagentStats.cacheWrite += usage.cacheWrite;
+		sessionSubagentStats.cost += usage.cost;
 		const model = [usage.provider, usage.model].filter(Boolean).join("/");
-		if (model) turnSubagentStats.models.add(model);
+		if (model) {
+			turnSubagentStats.models.add(model);
+			sessionSubagentStats.models.add(model);
+		}
+		if (callStats) {
+			callStats.input += usage.input;
+			callStats.output += usage.output;
+			callStats.cacheRead += usage.cacheRead;
+			callStats.cacheWrite += usage.cacheWrite;
+			callStats.cost += usage.cost;
+			if (model) callStats.models.add(model);
+		}
 	}
 
-	function subagentStatsLine(): string | undefined {
-		if (turnSubagentStats.calls === 0) return undefined;
-		const tokens = turnSubagentStats.input + turnSubagentStats.output + turnSubagentStats.cacheRead + turnSubagentStats.cacheWrite;
-		const models = [...turnSubagentStats.models].join(", ") || "model pending";
-		return `stats: ${turnSubagentStats.calls} call${turnSubagentStats.calls === 1 ? "" : "s"} · ${tokens.toLocaleString()} tokens · $${turnSubagentStats.cost.toFixed(4)} · ${models}`;
+	function subagentStatsLine(stats: SubagentStats = turnSubagentStats): string | undefined {
+		if (stats.calls === 0) return undefined;
+		const usage = formatSubagentUsage(stats);
+		return `stats: ${stats.calls} call${stats.calls === 1 ? "" : "s"} · ${usage}`;
 	}
 
 	/** Read the last agent selection from a session file (used by /new and /clone). */
@@ -142,6 +199,9 @@ export default function (pi: ExtensionAPI) {
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
 			try {
 				turnSubagentStats.calls++;
+				sessionSubagentStats.calls++;
+				const callSubagentStats: SubagentStats = { calls: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
+				refreshStatus(ctx);
 				// Tool updates replace the previous snapshot in pi's UI. Keep a bounded
 				// local buffer so token-sized deltas update one visible block instead of
 				// growing an unbounded transcript of progress messages.
@@ -164,7 +224,7 @@ export default function (pi: ExtensionAPI) {
 				const publish = () => {
 					const allLines = [...progressLines, ...streamedText.split("\n")].filter(Boolean);
 					const bounded = boundProgressLines(allLines);
-					const summary = subagentStatsLine();
+					const summary = subagentStatsLine(callSubagentStats);
 					const footer = [`agent: ${agentName}`, summary].filter(Boolean).join(" · ");
 					const progressText = [...bounded.slice(-(MAX_PROGRESS_LINES - 1)), footer].join("\n");
 					onUpdate?.({ content: [{ type: "text", text: progressText }], details: { agent: agentName, progress: true } });
@@ -189,7 +249,7 @@ export default function (pi: ExtensionAPI) {
 						switch (event.type) {
 							case "started": update(`▶ ${event.agent}: running`); break;
 							case "text": stream(event.delta); break;
-							case "stats": recordSubagentUsage(event.usage); publish(); break;
+							case "stats": recordSubagentUsage(event.usage, callSubagentStats); refreshStatus(ctx); publish(); break;
 							case "tool-start": update(`→ ${event.tool}${formatToolArgs(event.args)}`); break;
 							case "tool-update": update(`  ${event.text}`); break;
 							case "tool-end": update(`${event.error ? "✗" : "✓"} ${event.tool}`); break;
@@ -200,7 +260,7 @@ export default function (pi: ExtensionAPI) {
 				});
 				return {
 					content: [{ type: "text", text: `Result from ${agentName}:\n\n${result}` }],
-					details: { agent: agentName, statsLine: subagentStatsLine() } satisfies DelegateStatsDetails,
+					details: { agent: agentName, statsLine: subagentStatsLine(callSubagentStats) } satisfies DelegateStatsDetails,
 				};
 			} catch (err) {
 				return { content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}` }], details: { agent: agentName, error: true } };
@@ -329,7 +389,7 @@ export default function (pi: ExtensionAPI) {
 
 		activeName = agent.name;
 		activeAgent = agent;
-		updateStatus(ctx, activeAgent);
+		refreshStatus(ctx);
 		persistSelection(activeName);
 		if (!opts?.silent) {
 			const mcpNote = mcpToolNames.length > 0 ? ` (${mcpToolNames.length} MCP tools)` : "";
@@ -347,7 +407,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		activeName = undefined;
 		activeAgent = undefined;
-		updateStatus(ctx, undefined);
+		refreshStatus(ctx);
 		persistSelection(undefined);
 		if (!opts?.silent) ctx.ui.notify("Agent cleared, plain pi restored", "info");
 	}
@@ -464,6 +524,7 @@ export default function (pi: ExtensionAPI) {
 	// --- Session lifecycle: discover, restore, persist ---
 
 	pi.on("session_start", async (event, ctx) => {
+		sessionSubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 		const result = await discoverAgents(ctx.cwd);
 		agents = result.agents;
 		config = result.config;
@@ -499,7 +560,7 @@ export default function (pi: ExtensionAPI) {
 		// selecting an agent then immediately running /new cannot lose the choice).
 		persistedName = undefined;
 		if (selected) await applyAgent(selected, ctx, { silent: true });
-		else updateStatus(ctx, undefined);
+		else refreshStatus(ctx);
 		persistedName = activeName;
 	});
 

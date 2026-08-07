@@ -72,13 +72,13 @@ export function agentLabel(agent: DiscoveredAgent): string {
 	return parts.join(" | ");
 }
 
-/** Footer status line showing the active agent, or the default pi agent when none is selected. */
-export function updateStatus(ctx: ExtensionContext, agent: DiscoveredAgent | undefined) {
-	if (agent) {
-		ctx.ui.setStatus("pi-agents", colorize(ctx.ui.theme, agent, `agent:${agent.name}`));
-	} else {
-		ctx.ui.setStatus("pi-agents", ctx.ui.theme.fg("muted", "agent:none · default pi"));
-	}
+/** Footer status line showing the active agent and optional session subagent stats. */
+export function updateStatus(ctx: ExtensionContext, agent: DiscoveredAgent | undefined, subagentStats?: string) {
+	const agentStatus = agent
+		? colorize(ctx.ui.theme, agent, `agent:${agent.name}`)
+		: ctx.ui.theme.fg("muted", "agent:none · default pi");
+	const statsStatus = subagentStats ? ctx.ui.theme.fg("muted", ` · ${subagentStats}`) : "";
+	ctx.ui.setStatus("pi-agents", `${agentStatus}${statsStatus}`);
 }
 
 /**
