@@ -2,11 +2,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { KeyId } from "@earendil-works/pi-tui";
+import { Text, type KeyId } from "@earendil-works/pi-tui";
 import { discoverAgents, loadConfig, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { showAgentSelector, updateStatus } from "./ui.ts";
-import { runSubagent } from "./subagents.ts";
+import { runSubagent, type SubagentUsage } from "./subagents.ts";
 
 const STATE_ENTRY = "pi-agents-state";
 // Function keys are encoded as escape sequences by iTerm2 and are passed
@@ -14,6 +14,11 @@ const STATE_ENTRY = "pi-agents-state";
 const DEFAULT_SELECT_SHORTCUT = "f7";
 const DEFAULT_ROTATE_SHORTCUT = "f8";
 const DELEGATE_TOOL = "delegate";
+
+type DelegateStatsDetails = {
+	agent: string;
+	statsLine?: string;
+};
 
 function formatToolArgs(args: unknown): string {
 	if (args === undefined || args === null) return "";
@@ -56,6 +61,24 @@ export default function (pi: ExtensionAPI) {
 	/** Toolset before the first agent was applied; used to restore plain pi. */
 	let originalTools: string[] | undefined;
 	let persistedName: string | undefined;
+	let turnSubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
+
+	function recordSubagentUsage(usage: SubagentUsage) {
+		turnSubagentStats.input += usage.input;
+		turnSubagentStats.output += usage.output;
+		turnSubagentStats.cacheRead += usage.cacheRead;
+		turnSubagentStats.cacheWrite += usage.cacheWrite;
+		turnSubagentStats.cost += usage.cost;
+		const model = [usage.provider, usage.model].filter(Boolean).join("/");
+		if (model) turnSubagentStats.models.add(model);
+	}
+
+	function subagentStatsLine(): string | undefined {
+		if (turnSubagentStats.calls === 0) return undefined;
+		const tokens = turnSubagentStats.input + turnSubagentStats.output + turnSubagentStats.cacheRead + turnSubagentStats.cacheWrite;
+		const models = [...turnSubagentStats.models].join(", ") || "model pending";
+		return `stats: ${turnSubagentStats.calls} call${turnSubagentStats.calls === 1 ? "" : "s"} · ${tokens.toLocaleString()} tokens · $${turnSubagentStats.cost.toFixed(4)} · ${models}`;
+	}
 
 	/** Read the last agent selection from a session file (used by /new and /clone). */
 	function readPersistedName(sessionFile: string | undefined): string | null | undefined {
@@ -118,6 +141,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
 			try {
+				turnSubagentStats.calls++;
 				// Tool updates replace the previous snapshot in pi's UI. Keep a bounded
 				// local buffer so token-sized deltas update one visible block instead of
 				// growing an unbounded transcript of progress messages.
@@ -126,6 +150,8 @@ export default function (pi: ExtensionAPI) {
 				let streamedText = "";
 				const publish = () => {
 					const allLines = [...progressLines, ...streamedText.split("\n")].filter(Boolean);
+					const summary = subagentStatsLine();
+					if (summary) allLines.push(summary);
 					const progressText = allLines.slice(-MAX_PROGRESS_LINES).join("\n");
 					onUpdate?.({ content: [{ type: "text", text: progressText }], details: { agent: agentName, progress: true } });
 				};
@@ -149,6 +175,7 @@ export default function (pi: ExtensionAPI) {
 						switch (event.type) {
 							case "started": update(`▶ ${event.agent}: running`); break;
 							case "text": stream(event.delta); break;
+							case "stats": recordSubagentUsage(event.usage); publish(); break;
 							case "tool-start": update(`→ ${event.tool}${formatToolArgs(event.args)}`); break;
 							case "tool-update": update(`  ${event.text}`); break;
 							case "tool-end": update(`${event.error ? "✗" : "✓"} ${event.tool}`); break;
@@ -157,10 +184,22 @@ export default function (pi: ExtensionAPI) {
 						}
 					},
 				});
-				return { content: [{ type: "text", text: `Result from ${agentName}:\n\n${result}` }], details: { agent: agentName } };
+				return {
+					content: [{ type: "text", text: `Result from ${agentName}:\n\n${result}` }],
+					details: { agent: agentName, statsLine: subagentStatsLine() } satisfies DelegateStatsDetails,
+				};
 			} catch (err) {
 				return { content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}` }], details: { agent: agentName, error: true } };
 			}
+		},
+		renderResult(result, _options, theme) {
+			const text = result.content
+				.filter((part): part is { type: "text"; text: string } => part.type === "text")
+				.map((part) => part.text)
+				.join("\n");
+			const details = result.details as DelegateStatsDetails | undefined;
+			const stats = details?.statsLine ? `\n\n${theme.fg("muted", details.statsLine)}` : "";
+			return new Text(`${text}${stats}`, 0, 0);
 		},
 	});
 
@@ -456,6 +495,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_start", async () => {
+		turnSubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 		persistSelection(activeName);
 	});
 }

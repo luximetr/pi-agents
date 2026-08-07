@@ -3,8 +3,19 @@ import { StringDecoder } from "node:string_decoder";
 
 export const MAX_SUBAGENT_DEPTH = 4;
 
+export interface SubagentUsage {
+	provider?: string;
+	model?: string;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+}
+
 export type SubagentProgress =
 	| { type: "started"; agent: string }
+	| { type: "stats"; usage: SubagentUsage }
 	| { type: "text"; delta: string }
 	| { type: "tool-start"; tool: string; args: unknown }
 	| { type: "tool-update"; text: string }
@@ -78,8 +89,34 @@ export function runSubagent(
 					break;
 				}
 				case "message_end": {
+					const message = event.message as {
+						provider?: unknown;
+						model?: unknown;
+						usage?: {
+							input?: unknown;
+							output?: unknown;
+							cacheRead?: unknown;
+							cacheWrite?: unknown;
+							cost?: { total?: unknown };
+						};
+					} | undefined;
 					const text = textFromMessage(event.message);
 					if (text) finalText = text;
+					const usage = message?.usage;
+					if (usage) {
+						progress?.({
+							type: "stats",
+							usage: {
+								provider: typeof message?.provider === "string" ? message.provider : undefined,
+								model: typeof message?.model === "string" ? message.model : undefined,
+								input: Number(usage.input ?? 0),
+								output: Number(usage.output ?? 0),
+								cacheRead: Number(usage.cacheRead ?? 0),
+								cacheWrite: Number(usage.cacheWrite ?? 0),
+								cost: Number(usage.cost?.total ?? 0),
+							},
+						});
+					}
 					break;
 				}
 				case "tool_execution_start":

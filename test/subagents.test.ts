@@ -42,6 +42,7 @@ test("end to end: delegate launches an isolated child with the target agent", as
 				process.stdout.write(JSON.stringify({type:"agent_start"}) + "\\n");
 				process.stdout.write(JSON.stringify({type:"tool_execution_start", toolName:"read", args:{}}) + "\\n");
 				process.stdout.write(JSON.stringify({type:"message_update", assistantMessageEvent:{type:"text_delta", delta:"worker-result:" + prompt}}) + "\\n");
+				process.stdout.write(JSON.stringify({type:"message_end", message:{provider:"test", model:"test-model", content:[{type:"text", text:"worker-result:" + prompt}], usage:{input:10, output:5, cacheRead:2, cacheWrite:1, cost:{total:0.01}}}}) + "\\n");
 				process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
 				process.exit(0);
 			});
@@ -54,6 +55,7 @@ test("end to end: delegate launches an isolated child with the target agent", as
 		});
 		assert.ok(progress.includes("tool-start"));
 		assert.ok(progress.includes("text"));
+		assert.ok(progress.includes("stats"));
 		assert.equal(result, "worker-result:inspect files");
 	} finally {
 		await rm(root, { recursive: true, force: true });
