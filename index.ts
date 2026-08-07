@@ -146,13 +146,27 @@ export default function (pi: ExtensionAPI) {
 				// local buffer so token-sized deltas update one visible block instead of
 				// growing an unbounded transcript of progress messages.
 				const MAX_PROGRESS_LINES = 15;
-				const progressLines: string[] = [`▶ ${agentName}: started`];
+				const MAX_PROGRESS_LINE_LENGTH = 160;
+				const progressLines: string[] = [];
 				let streamedText = "";
+				const boundProgressLines = (lines: string[]) => {
+					const bounded: string[] = [];
+					for (const line of lines) {
+						if (line.length <= MAX_PROGRESS_LINE_LENGTH) bounded.push(line);
+						else {
+							for (let i = 0; i < line.length; i += MAX_PROGRESS_LINE_LENGTH) {
+								bounded.push(line.slice(i, i + MAX_PROGRESS_LINE_LENGTH));
+							}
+						}
+					}
+					return bounded.slice(-MAX_PROGRESS_LINES);
+				};
 				const publish = () => {
 					const allLines = [...progressLines, ...streamedText.split("\n")].filter(Boolean);
+					const bounded = boundProgressLines(allLines);
 					const summary = subagentStatsLine();
-					if (summary) allLines.push(summary);
-					const progressText = allLines.slice(-MAX_PROGRESS_LINES).join("\n");
+					const footer = [`agent: ${agentName}`, summary].filter(Boolean).join(" · ");
+					const progressText = [...bounded.slice(-(MAX_PROGRESS_LINES - 1)), footer].join("\n");
 					onUpdate?.({ content: [{ type: "text", text: progressText }], details: { agent: agentName, progress: true } });
 				};
 				const update = (line: string) => {
