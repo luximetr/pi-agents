@@ -1,4 +1,7 @@
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFileSync, execSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 export const MAX_SUBAGENT_DEPTH = 4;
@@ -58,11 +61,32 @@ export class SubagentStoppedError extends Error {
 	}
 }
 
+export interface SubagentWorktreeOptions {
+	/** Checkout parent directory. Relative paths are resolved from the repository root. Defaults inside the common git directory. */
+	baseDir?: string;
+	/** Copy uncommitted .env and .env.* files found beside tracked project files. Defaults to true. */
+	copyEnvFiles?: boolean;
+	/** Additional files or directories to copy from the source checkout, relative to the repository root. */
+	copyFiles?: string[];
+	/** Shell command run at the new worktree root before the child starts, e.g. `bun install --frozen-lockfile`. */
+	setupCommand?: string;
+}
+
+export interface SubagentWorktreeInfo {
+	branch: string;
+	path: string;
+	cwd: string;
+	repoRoot: string;
+}
+
 export interface RunSubagentOptions {
 	onProgress?: (event: SubagentProgress) => void;
 	onHandle?: (handle: RunningSubagentHandle | undefined) => void;
+	onWorktreeCreated?: (worktree: SubagentWorktreeInfo) => void;
 	executable?: string;
-	branch?: string;
+	/** Run the child in a separate worktree on an automatically named branch. Defaults to false. */
+	useWorktree?: boolean;
+	worktree?: SubagentWorktreeOptions;
 	/** Total child lifetime. Omit to disable the deadline at this low-level API. */
 	timeoutSeconds?: number;
 	/** Time between RPC abort and SIGTERM, and between SIGTERM and SIGKILL. */
@@ -97,6 +121,122 @@ function formatArgs(args: unknown): string {
 	}
 }
 
+function commandErrorDetail(err: unknown): string {
+	const value = err as { stderr?: unknown; stdout?: unknown };
+	for (const output of [value?.stderr, value?.stdout]) {
+		if (typeof output === "string" && output.trim()) return output.trim();
+		if (Buffer.isBuffer(output) && output.toString().trim()) return output.toString().trim();
+	}
+	return err instanceof Error ? err.message : String(err);
+}
+
+function gitOutput(cwd: string, args: string[]): string {
+	return execFileSync("git", args, { cwd, stdio: "pipe", encoding: "utf8" }).trim();
+}
+
+function safeRelativePath(value: string): string {
+	const normalized = path.normalize(value.trim());
+	if (!normalized || normalized === "." || path.isAbsolute(normalized) || normalized === ".." || normalized.startsWith(`..${path.sep}`)) {
+		throw new Error(`worktree copy path must be relative to the repository root: ${JSON.stringify(value)}`);
+	}
+	return normalized;
+}
+
+function copyIntoWorktree(sourceRoot: string, worktreeRoot: string, relativePath: string): void {
+	const relative = safeRelativePath(relativePath);
+	const source = path.join(sourceRoot, relative);
+	if (!existsSync(source)) return;
+	const destination = path.join(worktreeRoot, relative);
+	mkdirSync(path.dirname(destination), { recursive: true });
+	cpSync(source, destination, { recursive: true, force: true, preserveTimestamps: true });
+}
+
+/** Find env files without crawling ignored dependency/build trees: inspect directories containing tracked files. */
+function copyEnvironmentFiles(sourceRoot: string, worktreeRoot: string): void {
+	const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: sourceRoot, stdio: "pipe", encoding: "utf8" });
+	const directories = new Set<string>([""]);
+	for (const file of tracked.split("\0")) {
+		if (file) directories.add(path.dirname(file) === "." ? "" : path.dirname(file));
+	}
+	for (const directory of directories) {
+		const sourceDir = path.join(sourceRoot, directory);
+		if (!existsSync(sourceDir)) continue;
+		for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
+			if (!(entry.name === ".env" || entry.name.startsWith(".env.")) || (!entry.isFile() && !entry.isSymbolicLink())) continue;
+			copyIntoWorktree(sourceRoot, worktreeRoot, path.join(directory, entry.name));
+		}
+	}
+}
+
+function generatedBranchName(agentName: string): string {
+	const agent = agentName.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "agent";
+	return `pi-agents/${agent}/${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+}
+
+function rollbackWorktree(sourceRoot: string, branch: string, worktreePath: string): void {
+	try { execFileSync("git", ["worktree", "remove", "--force", worktreePath], { cwd: sourceRoot, stdio: "ignore" }); } catch { /* best effort */ }
+	try { execFileSync("git", ["branch", "-D", branch], { cwd: sourceRoot, stdio: "ignore" }); } catch { /* best effort */ }
+	try { rmSync(worktreePath, { recursive: true, force: true }); } catch { /* best effort */ }
+}
+
+function createSubagentWorktree(cwd: string, branch: string, options: SubagentWorktreeOptions = {}): SubagentWorktreeInfo {
+	let repoRoot: string;
+	try {
+		repoRoot = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
+	} catch (err) {
+		throw new Error(`cannot create worktree for branch "${branch}": ${commandErrorDetail(err)}`);
+	}
+	let relativeCwd: string;
+	try {
+		relativeCwd = gitOutput(cwd, ["rev-parse", "--show-prefix"]).replace(/[\\/]$/, "");
+	} catch (err) {
+		throw new Error(`cannot create worktree for branch "${branch}": ${commandErrorDetail(err)}`);
+	}
+
+	let commonGitDir: string;
+	try {
+		const raw = gitOutput(repoRoot, ["rev-parse", "--git-common-dir"]);
+		commonGitDir = path.resolve(repoRoot, raw);
+	} catch (err) {
+		throw new Error(`cannot create worktree for branch "${branch}": ${commandErrorDetail(err)}`);
+	}
+	const baseDir = options.baseDir?.trim()
+		? path.resolve(repoRoot, options.baseDir)
+		: path.join(commonGitDir, "pi-agents-worktrees");
+	mkdirSync(baseDir, { recursive: true });
+	const slug = branch.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "branch";
+	const worktreePath = path.join(baseDir, `${slug}-${randomUUID().slice(0, 8)}`);
+
+	try {
+		execFileSync("git", ["worktree", "add", "--quiet", "-b", branch, worktreePath, "HEAD"], { cwd: repoRoot, stdio: "pipe", encoding: "utf8" });
+	} catch (err) {
+		throw new Error(`cannot create worktree for branch "${branch}": ${commandErrorDetail(err)}`);
+	}
+
+	try {
+		if (options.copyEnvFiles !== false) copyEnvironmentFiles(repoRoot, worktreePath);
+		for (const file of options.copyFiles ?? []) copyIntoWorktree(repoRoot, worktreePath, file);
+		const childCwd = path.join(worktreePath, relativeCwd);
+		mkdirSync(childCwd, { recursive: true });
+		if (options.setupCommand?.trim()) {
+			execSync(options.setupCommand, {
+				cwd: worktreePath,
+				env: {
+					...process.env,
+					PI_AGENTS_SOURCE_ROOT: repoRoot,
+					PI_AGENTS_WORKTREE_ROOT: worktreePath,
+				},
+				stdio: "pipe",
+				encoding: "utf8",
+			});
+		}
+		return { branch, path: worktreePath, cwd: childCwd, repoRoot };
+	} catch (err) {
+		rollbackWorktree(repoRoot, branch, worktreePath);
+		throw new Error(`cannot prepare worktree for branch "${branch}": ${commandErrorDetail(err)}`);
+	}
+}
+
 /** Run an isolated child pi session, forwarding live RPC progress and exposing a controllable handle. */
 export function runSubagent(
 	agentName: string,
@@ -123,23 +263,21 @@ export function runSubagent(
 		}
 		const gracefulStopMs = Math.max(0, (options.gracefulStopSeconds ?? 5) * 1000);
 
-		const branch = typeof options.branch === "string" ? options.branch.trim() : "";
-		if (branch) {
+		let childCwd = cwd;
+		if (options.useWorktree === true) {
 			try {
-				execFileSync("git", ["checkout", "-b", branch], { cwd, stdio: "pipe", encoding: "utf8" });
+				const worktree = createSubagentWorktree(cwd, generatedBranchName(agentName), options.worktree);
+				childCwd = worktree.cwd;
+				options.onWorktreeCreated?.(worktree);
 			} catch (err) {
-				const stderr = (err as { stderr?: unknown })?.stderr;
-				const detail = typeof stderr === "string" && stderr.trim()
-					? stderr.trim()
-					: err instanceof Error ? err.message : String(err);
-				reject(new Error(`cannot create branch "${branch}" for subagent: ${detail}`));
+				reject(err);
 				return;
 			}
 		}
 
 		const executable = options.executable ?? process.env.PI_CODING_AGENT_BIN ?? process.argv[1] ?? "pi";
 		const child: ChildProcessWithoutNullStreams = spawn(executable, ["--mode", "rpc", "--no-session", "--agent", agentName], {
-			cwd,
+			cwd: childCwd,
 			env: { ...process.env, PI_AGENTS_SUBAGENT_DEPTH: String(depth + 1) },
 			stdio: ["pipe", "pipe", "pipe"],
 		});

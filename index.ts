@@ -6,7 +6,7 @@ import { Text, type KeyId } from "@earendil-works/pi-tui";
 import { discoverAgents, loadConfig, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { showAgentSelector, showSubagentInspector, updateStatus } from "./ui.ts";
-import { SubagentStoppedError, runSubagent, type RunningSubagentHandle, type SubagentUsage } from "./subagents.ts";
+import { SubagentStoppedError, runSubagent, type RunningSubagentHandle, type SubagentUsage, type SubagentWorktreeInfo } from "./subagents.ts";
 
 const STATE_ENTRY = "pi-agents-state";
 // Function keys are encoded as escape sequences by iTerm2 and are passed
@@ -24,6 +24,8 @@ type DelegateStatsDetails = {
 	statsLine?: string;
 	status?: "completed" | "interrupted" | "timed_out" | "failed";
 	error?: boolean;
+	branch?: string;
+	worktreePath?: string;
 };
 
 type SubagentStats = {
@@ -219,16 +221,16 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: DELEGATE_TOOL,
 		label: "Delegate",
-		description: "Delegate a focused task to an allowed subagent (optionally with a new git branch and execution deadline) and receive its concise result.",
+		description: "Delegate a focused task to an allowed subagent (optionally in an isolated git worktree) and receive its concise result.",
 		promptSnippet: "delegate: ask a specialist agent to complete an isolated task",
 		parameters: jsonSchemaToTypeBox({
 			type: "object",
 			properties: {
 				agent: { type: "string", description: "Name of an allowed subagent" },
 				task: { type: "string", description: "Self-contained task; include relevant paths and expected output" },
-				branch: {
-					type: "string",
-					description: "Optional: git branch to create and check out for the subagent. Its edits land on this branch and stay there after it finishes.",
+				useWorktree: {
+					type: "boolean",
+					description: "Optional, default false: run the subagent in an isolated worktree on an automatically named branch. The parent checkout stays unchanged.",
 				},
 				timeoutSeconds: {
 					type: "integer",
@@ -241,10 +243,10 @@ export default function (pi: ExtensionAPI) {
 		}),
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 			const parent = activeAgent;
-			const input = params as { agent?: unknown; task?: unknown; branch?: unknown; timeoutSeconds?: unknown };
+			const input = params as { agent?: unknown; task?: unknown; useWorktree?: unknown; timeoutSeconds?: unknown };
 			const agentName = String(input.agent ?? "").trim();
 			const task = String(input.task ?? "").trim();
-			const branch = String(input.branch ?? "").trim();
+			const useWorktree = input.useWorktree === true;
 			const requestedTimeout = input.timeoutSeconds;
 			if (requestedTimeout !== undefined && (!Number.isInteger(requestedTimeout) || Number(requestedTimeout) <= 0)) {
 				return { content: [{ type: "text", text: "Delegation timeoutSeconds must be a positive integer." }], details: { agent: agentName, error: true } };
@@ -259,6 +261,7 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `Unknown subagent: ${agentName}.` }], details: {} };
 			}
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
+			let worktreeInfo: SubagentWorktreeInfo | undefined;
 			try {
 				const startedAt = Date.now();
 				turnSubagentStats.calls++;
@@ -308,10 +311,12 @@ export default function (pi: ExtensionAPI) {
 					publish();
 				};
 				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
-					...(branch ? { branch } : {}),
+					useWorktree,
 					id: String(toolCallId),
 					timeoutSeconds,
 					gracefulStopSeconds: config.subagents?.gracefulStopSeconds ?? DEFAULT_GRACEFUL_STOP_SECONDS,
+					worktree: config.subagents?.worktree,
+					onWorktreeCreated: (worktree) => { worktreeInfo = worktree; },
 					onHandle: (handle) => {
 						if (handle) runningSubagents.set(handle.id, handle);
 						else runningSubagents.delete(String(toolCallId));
@@ -329,9 +334,16 @@ export default function (pi: ExtensionAPI) {
 						}
 					},
 				});
+				const location = worktreeInfo ? `\n\nBranch: ${worktreeInfo.branch}\nWorktree: ${worktreeInfo.path}` : "";
 				return {
-					content: [{ type: "text", text: `Result from ${agentName}:\n\n${result}` }],
-					details: { agent: agentName, status: "completed", statsLine: subagentStatsLine(callSubagentStats, Date.now() - startedAt) } satisfies DelegateStatsDetails,
+					content: [{ type: "text", text: `Result from ${agentName}:\n\n${result}${location}` }],
+					details: {
+						agent: agentName,
+						status: "completed",
+						statsLine: subagentStatsLine(callSubagentStats, Date.now() - startedAt),
+						branch: worktreeInfo?.branch,
+						worktreePath: worktreeInfo?.path,
+					} satisfies DelegateStatsDetails,
 				};
 			} catch (err) {
 				if (err instanceof SubagentStoppedError) {
@@ -344,12 +356,17 @@ export default function (pi: ExtensionAPI) {
 					const reason = err.reason === "timeout"
 						? `timed out after ${formatElapsed(Date.now() - snapshot.startedAt)}`
 						: err.reason === "user" ? "was interrupted by the user" : "was cancelled";
+					const location = worktreeInfo ? `\nWorktree preserved at: ${worktreeInfo.path}` : "";
 					return {
-						content: [{ type: "text", text: `Subagent ${agentName} ${reason}.${operation}\nLast activity: ${formatElapsed(Date.now() - snapshot.lastActivityAt)} ago.${partial}\n\nChoose a different approach rather than blindly repeating the same delegation.` }],
-						details: { agent: agentName, status, error: true } satisfies DelegateStatsDetails,
+						content: [{ type: "text", text: `Subagent ${agentName} ${reason}.${operation}\nLast activity: ${formatElapsed(Date.now() - snapshot.lastActivityAt)} ago.${partial}${location}\n\nChoose a different approach rather than blindly repeating the same delegation.` }],
+						details: { agent: agentName, status, error: true, branch: worktreeInfo?.branch, worktreePath: worktreeInfo?.path } satisfies DelegateStatsDetails,
 					};
 				}
-				return { content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}` }], details: { agent: agentName, status: "failed", error: true } satisfies DelegateStatsDetails };
+				const location = worktreeInfo ? `\nWorktree preserved at: ${worktreeInfo.path}` : "";
+				return {
+					content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}${location}` }],
+					details: { agent: agentName, status: "failed", error: true, branch: worktreeInfo?.branch, worktreePath: worktreeInfo?.path } satisfies DelegateStatsDetails,
+				};
 			}
 		},
 		renderResult(result, _options, theme) {

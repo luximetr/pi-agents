@@ -66,9 +66,18 @@ test("smoke: discovers an agent hierarchy", async () => {
 		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
 			export default { name: "worker", description: "Specialist" };
 		`);
+		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({
+			subagents: { worktree: { copyEnvFiles: false, copyFiles: ["dev.pem"], setupCommand: "bun install --frozen-lockfile" } },
+		}));
 		const result = await discoverAgents(root);
 		const lead = result.agents.find((agent) => agent.name === "lead");
 		assert.deepEqual(lead?.subagents, ["worker"]);
+		assert.deepEqual(result.config.subagents?.worktree, {
+			baseDir: undefined,
+			copyEnvFiles: false,
+			copyFiles: ["dev.pem"],
+			setupCommand: "bun install --frozen-lockfile",
+		});
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
@@ -210,9 +219,11 @@ test("subagent inspector renders live state and confirms a manual stop", async (
 	assert.equal(stopped, true);
 });
 
-test("branch option: subagent runs on a freshly created git branch", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-branch-"));
+test("useWorktree runs the subagent on an automatically named branch", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-worktree-"));
 	const fakePi = path.join(root, "fake-pi.mjs");
+	let worktreePath = "";
+	let worktreeBranch = "";
 	try {
 		execFileSync("git", ["init", "-q"], { cwd: root });
 		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
@@ -220,6 +231,7 @@ test("branch option: subagent runs on a freshly created git branch", async () =>
 		await writeFile(path.join(root, "file.txt"), "hello\n");
 		execFileSync("git", ["add", "."], { cwd: root });
 		execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: root });
+		const initialBranch = execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim();
 		await writeFile(fakePi, `#!/usr/bin/env node
 			const { execFileSync } = await import("node:child_process");
 			const branch = execFileSync("git", ["branch", "--show-current"], { encoding: "utf8" }).trim();
@@ -231,40 +243,74 @@ test("branch option: subagent runs on a freshly created git branch", async () =>
 			process.exit(0);
 		`);
 		await chmod(fakePi, 0o755);
-		const result = await runSubagent("worker", "task", root, noAbort, { executable: fakePi, branch: "feature/iso" });
-		assert.equal(result, "subagent branch: feature/iso");
-		// The branch (and its checkout) persists after the subagent finished.
-		assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim(), "feature/iso");
+		const result = await runSubagent("worker", "task", root, noAbort, {
+			executable: fakePi,
+			useWorktree: true,
+			onWorktreeCreated: (worktree) => { worktreePath = worktree.path; worktreeBranch = worktree.branch; },
+		});
+		assert.match(worktreeBranch, /^pi-agents\/worker\/[a-z0-9]+-[a-f0-9]{8}$/);
+		assert.equal(result, `subagent branch: ${worktreeBranch}`);
+		assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim(), initialBranch);
+		assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: worktreePath, encoding: "utf8" }).trim(), worktreeBranch);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
-test("branch option: rejects when the branch already exists", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-branch-exists-"));
+test("worktree provisioning copies env files and runs a setup command", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-worktree-setup-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	let worktreePath = "";
 	try {
 		execFileSync("git", ["init", "-q"], { cwd: root });
 		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
 		execFileSync("git", ["config", "user.name", "Test User"], { cwd: root });
-		await writeFile(path.join(root, "file.txt"), "hello\n");
+		await mkdir(path.join(root, "apps", "api"), { recursive: true });
+		await writeFile(path.join(root, ".gitignore"), ".env*\nsecret.json\n");
+		await writeFile(path.join(root, "apps", "api", "index.ts"), "export {};\n");
+		await writeFile(path.join(root, "setup.mjs"), `
+			const { existsSync, writeFileSync } = await import("node:fs");
+			if (!existsSync(".env") || !existsSync("apps/api/.env.local") || !existsSync("secret.json")) process.exit(9);
+			writeFileSync("setup.ok", "ready\\n");
+		`);
 		execFileSync("git", ["add", "."], { cwd: root });
 		execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: root });
-		execFileSync("git", ["checkout", "-q", "-b", "feature/exists"], { cwd: root });
-		await assert.rejects(
-			runSubagent("worker", "task", root, noAbort, { executable: process.execPath, branch: "feature/exists" }),
-			/already exists/,
-		);
+		await writeFile(path.join(root, ".env"), "ROOT_SECRET=yes\n");
+		await writeFile(path.join(root, "apps", "api", ".env.local"), "API_SECRET=yes\n");
+		await writeFile(path.join(root, "secret.json"), "{\"secret\":true}\n");
+		await writeFile(fakePi, `#!/usr/bin/env node
+			const { existsSync } = await import("node:fs");
+			const text = existsSync("setup.ok") ? "worktree ready" : "worktree missing setup";
+			process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
+			process.stdout.write(JSON.stringify({ type: "message_end", message: { content: [{ type: "text", text }] } }) + "\\n");
+			process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+			process.exit(0);
+		`);
+		await chmod(fakePi, 0o755);
+		const result = await runSubagent("worker", "task", root, noAbort, {
+			executable: fakePi,
+			useWorktree: true,
+			worktree: {
+				copyFiles: ["secret.json"],
+				setupCommand: `"${process.execPath}" setup.mjs`,
+			},
+			onWorktreeCreated: (worktree) => { worktreePath = worktree.path; },
+		});
+		assert.equal(result, "worktree ready");
+		assert.ok(existsSync(path.join(worktreePath, ".env")));
+		assert.ok(existsSync(path.join(worktreePath, "apps", "api", ".env.local")));
+		assert.ok(existsSync(path.join(worktreePath, "secret.json")));
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
-test("branch option: fails cleanly outside a git repository", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-branch-nogit-"));
+test("useWorktree fails cleanly outside a git repository", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-worktree-nogit-"));
 	try {
 		await assert.rejects(
-			runSubagent("worker", "task", root, noAbort, { executable: process.execPath, branch: "feature/x" }),
-			/cannot create branch "feature\/x" for subagent: .*not a git repository/,
+			runSubagent("worker", "task", root, noAbort, { executable: process.execPath, useWorktree: true }),
+			/cannot create worktree for branch "pi-agents\/worker\/[^"]+": .*not a git repository/,
 		);
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -297,7 +343,7 @@ test("end to end: configured default timeout returns control to the parent deleg
 	try {
 		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({
-			subagents: { defaultTimeoutSeconds: 0.5, gracefulStopSeconds: 0.01 },
+			subagents: { defaultTimeoutSeconds: 1.5, gracefulStopSeconds: 0.01 },
 		}));
 		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
 			export default { name: "lead", description: "Lead", default: true, subagents: ["worker"] };
@@ -331,8 +377,8 @@ test("end to end: configured default timeout returns control to the parent deleg
 	}
 });
 
-test("end to end: delegate with branch runs the subagent on a new git branch", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegate-branch-"));
+test("end to end: delegate with useWorktree isolates the subagent", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegate-worktree-"));
 	const fakePi = path.join(root, "fake-pi.mjs");
 	const previousBin = process.env.PI_CODING_AGENT_BIN;
 	try {
@@ -354,7 +400,7 @@ test("end to end: delegate with branch runs the subagent on a new git branch", a
 			export default { name: "dev", description: "Dev", tools: ["read", "bash"] };
 		`);
 
-		// Fake child pi: verifies it runs on the requested branch, then commits work there.
+		// Fake child pi: verifies it runs on the generated branch, then commits work there.
 		await writeFile(fakePi, `#!/usr/bin/env node
 			const { execFileSync } = await import("node:child_process");
 			const { writeFileSync } = await import("node:fs");
@@ -378,69 +424,21 @@ test("end to end: delegate with branch runs the subagent on a new git branch", a
 		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
 
 		const delegate = registered.find((t) => t.name === "delegate")!;
-		const result = await delegate.execute("call-1", { agent: "dev", task: "add work", branch: "feature/e2e" }, undefined, undefined, ctx);
+		const result = await delegate.execute("call-1", { agent: "dev", task: "add work", useWorktree: true }, undefined, undefined, ctx);
 		const text = String(result.content[0].text);
-		assert.ok(text.includes("done on feature/e2e"), text);
-		// The subagent's branch is created, checked out, and still current after the delegation.
-		assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim(), "feature/e2e");
-		// Its work is committed on the branch — and isolated from the original branch.
-		assert.ok(existsSync(path.join(root, "work.txt")));
-		execFileSync("git", ["checkout", "-q", initialBranch], { cwd: root });
+		const generatedBranch = String(result.details.branch);
+		assert.match(generatedBranch, /^pi-agents\/dev\//);
+		assert.ok(text.includes(`done on ${generatedBranch}`), text);
+		const worktreePath = String(result.details.worktreePath);
+		// The parent checkout never moves; the child worktree keeps the generated branch and files.
+		assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim(), initialBranch);
 		assert.ok(!existsSync(path.join(root, "work.txt")));
-		const log = execFileSync("git", ["log", "--oneline", "-1"], { cwd: root, encoding: "utf8" });
-		assert.ok(!log.includes("subagent commit on feature/e2e"), log);
-	} finally {
-		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
-		else process.env.PI_CODING_AGENT_BIN = previousBin;
-		await rm(root, { recursive: true, force: true });
-	}
-});
-
-test("end to end: delegate with an existing branch name fails with a readable tool result", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegate-branch-taken-"));
-	const fakePi = path.join(root, "fake-pi.mjs");
-	const previousBin = process.env.PI_CODING_AGENT_BIN;
-	try {
-		// Repo where "feature/taken" already exists before the delegation.
-		execFileSync("git", ["init", "-q"], { cwd: root });
-		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
-		execFileSync("git", ["config", "user.name", "Test User"], { cwd: root });
-		await writeFile(path.join(root, "base.txt"), "base\n");
-		execFileSync("git", ["add", "."], { cwd: root });
-		execFileSync("git", ["commit", "-q", "-m", "base"], { cwd: root });
-		execFileSync("git", ["checkout", "-q", "-b", "feature/taken"], { cwd: root });
-
-		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
-		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
-			export default { name: "lead", description: "Lead", tools: ["read", "bash"], default: true, subagents: ["dev"] };
-		`);
-		await mkdir(path.join(root, ".pi-agents", "dev"), { recursive: true });
-		await writeFile(path.join(root, ".pi-agents", "dev", "agent.ts"), `
-			export default { name: "dev", description: "Dev", tools: ["read", "bash"] };
-		`);
-
-		// Fake child pi that drops a marker file if it is ever spawned.
-		await writeFile(fakePi, `#!/usr/bin/env node
-			const { writeFileSync } = await import("node:fs");
-			writeFileSync("spawned.flag", "spawned\\n");
-			process.exit(0);
-		`);
-		await chmod(fakePi, 0o755);
-		process.env.PI_CODING_AGENT_BIN = fakePi;
-
-		const { handlers, registered, ctx } = bootExtension(root);
-		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
-
-		const delegate = registered.find((t) => t.name === "delegate")!;
-		const result = await delegate.execute("call-1", { agent: "dev", task: "task", branch: "feature/taken" }, undefined, undefined, ctx);
-		// Resolves with an error result (does not throw) so the caller agent can react.
-		const text = String(result.content[0].text);
-		assert.ok(text.includes("Subagent dev failed"), text);
-		assert.ok(text.includes('cannot create branch "feature/taken"'), text);
-		assert.ok(text.includes("already exists"), text);
-		assert.equal(result.details?.error, true);
-		// The child subagent was never spawned.
-		assert.ok(!existsSync(path.join(root, "spawned.flag")));
+		assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: worktreePath, encoding: "utf8" }).trim(), generatedBranch);
+		assert.ok(existsSync(path.join(worktreePath, "work.txt")));
+		const mainLog = execFileSync("git", ["log", "--oneline", "-1", initialBranch], { cwd: root, encoding: "utf8" });
+		assert.ok(!mainLog.includes("subagent commit on"), mainLog);
+		const branchLog = execFileSync("git", ["log", "--oneline", "-1", generatedBranch], { cwd: root, encoding: "utf8" });
+		assert.ok(branchLog.includes(`subagent commit on ${generatedBranch}`), branchLog);
 	} finally {
 		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
 		else process.env.PI_CODING_AGENT_BIN = previousBin;

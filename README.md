@@ -162,16 +162,32 @@ export default {
 
 This adds the `delegate` tool automatically. The child runs as a fresh, ephemeral `pi --mode rpc --no-session --agent <name>` session with the selected agent and returns its final answer to the parent, so the parent context stays small. Delegation is restricted to the declared allowlist and nested delegation is capped at four levels. Set `PI_CODING_AGENT_BIN` if the `pi` executable is not the current process executable.
 
-`delegate` takes `agent`, `task`, an optional `branch`, and an optional total execution limit in seconds:
+`delegate` takes `agent`, `task`, an optional `useWorktree` boolean (default `false`), and an optional total execution limit in seconds:
 
 ```
-delegate(agent: "dev", task: "Implement the parser", branch: "feature/parser", timeoutSeconds: 900)
-delegate(agent: "doc", task: "Document the parser API", branch: "feature/parser-docs")
+delegate(agent: "dev", task: "Implement the parser", useWorktree: true, timeoutSeconds: 900)
+delegate(agent: "doc", task: "Document the parser API", useWorktree: true)
 ```
 
 While the parent waits, press `f9` (or run `/subagents`) to open the live subagent inspector. It shows the current phase/tool, recent RPC activity, elapsed/remaining time, and stale warnings. Press `s` to steer the selected child or `x` to stop it. A manual interruption or deadline returns a diagnostic tool result to the parent agent so it can choose another approach. The default deadline is 1800 seconds.
 
-The extension runs `git checkout -b <branch>` in the session directory before the subagent starts, so the subagent works on that branch and its changes stay there after it finishes — ideal for parallel work streams. If git refuses (not a repository, branch already exists, invalid name), the delegation fails with a readable error to the caller agent (e.g. `Subagent dev failed: cannot create branch "feature/parser" ... already exists`). The caller can then retry with a different branch name, drop the `branch` argument to work on the current branch, or surface the issue to the user. The subagent process is never started when the branch cannot be created.
+When `useWorktree: true` is provided, the extension creates a linked Git worktree on an automatically named branch such as `pi-agents/dev/m4abc123-a1b2c3d4` and starts the child there. The worktree directory is also generated automatically. The parent checkout never switches, so multiple delegations can run in parallel without sharing files or an index. Worktrees are retained after completion (and their generated branch and path are returned in the tool result), preserving both committed and uncommitted child changes. By default they live under Git's common directory at `.git/pi-agents-worktrees/`.
+
+A worktree starts from committed `HEAD`; unrelated dirty source changes in the parent are not copied. The extension does copy `.env` and `.env.*` files found beside tracked project files by default. Configure extra files and a setup command for dependencies:
+
+```json
+{
+  "subagents": {
+    "worktree": {
+      "copyEnvFiles": true,
+      "copyFiles": ["certs/dev.pem"],
+      "setupCommand": "bun install --frozen-lockfile"
+    }
+  }
+}
+```
+
+`copyFiles` paths are relative to the repository root. `setupCommand` runs at the new worktree root with `PI_AGENTS_SOURCE_ROOT` and `PI_AGENTS_WORKTREE_ROOT` available. Set `baseDir` to choose another worktree parent directory, or `copyEnvFiles: false` to disable automatic env-file copying. If worktree creation or setup fails, the child is not started and the partially created worktree/branch is rolled back.
 
 #### Typed tools
 
@@ -250,7 +266,12 @@ export default {
   "subagents": {
     "defaultTimeoutSeconds": 1800,
     "staleWarningMinutes": 5,
-    "gracefulStopSeconds": 5
+    "gracefulStopSeconds": 5,
+    "worktree": {
+      "copyEnvFiles": true,
+      "copyFiles": [],
+      "setupCommand": "bun install --frozen-lockfile"
+    }
   },
   "mcpServers": {
     "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
@@ -263,7 +284,7 @@ export default {
 }
 ```
 
-`defaultAgent` is optional. If it is unset, the last agent selection is remembered for the next `/new` session; otherwise the first agent marked `default: true` (or, when none is marked, the first discovered agent) is selected. Use `/agent none` to clear the current agent and restore plain pi for that session. `subagents.defaultTimeoutSeconds` is the total deadline used when `delegate` omits `timeoutSeconds`; `staleWarningMinutes` only changes the inspector warning, and `gracefulStopSeconds` controls stop escalation. Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends (e.g. `alt` keys on terminals that can't report `Ctrl+Shift`, see troubleshooting):
+`defaultAgent` is optional. If it is unset, the last agent selection is remembered for the next `/new` session; otherwise the first agent marked `default: true` (or, when none is marked, the first discovered agent) is selected. Use `/agent none` to clear the current agent and restore plain pi for that session. `subagents.defaultTimeoutSeconds` is the total deadline used when `delegate` omits `timeoutSeconds`; `staleWarningMinutes` only changes the inspector warning, and `gracefulStopSeconds` controls stop escalation. `subagents.worktree` configures worktree provisioning (`baseDir`, `copyEnvFiles`, `copyFiles`, and `setupCommand`). Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends (e.g. `alt` keys on terminals that can't report `Ctrl+Shift`, see troubleshooting):
 
 ```json
 {

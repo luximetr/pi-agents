@@ -66,16 +66,18 @@ export default {
 
 `subagents` is an allowlist. The child runs as a fresh ephemeral `pi --mode rpc --no-session --agent <name>` process and only its final answer is returned to the parent. Nested delegation is limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
 
-`delegate` takes `agent`, `task`, an optional `branch`, and an optional total execution limit:
+`delegate` takes `agent`, `task`, an optional `useWorktree` boolean (default `false`), and an optional total execution limit:
 
 ```
-delegate(agent: "dev", task: "Implement the parser", branch: "feature/parser", timeoutSeconds: 900)
-delegate(agent: "doc", task: "Document the parser API", branch: "feature/parser-docs")
+delegate(agent: "dev", task: "Implement the parser", useWorktree: true, timeoutSeconds: 900)
+delegate(agent: "doc", task: "Document the parser API", useWorktree: true)
 ```
 
 When `timeoutSeconds` is omitted, `subagents.defaultTimeoutSeconds` is used (1800 seconds by default). While the parent waits, `f9` or `/subagents` opens a live inspector with the child's current tool, recent activity, deadline, steering (`s`), and stop (`x`) controls. Manual interruption and timeout return diagnostic context to the parent so it can change approach.
 
-The extension runs `git checkout -b <branch>` in the session directory before the subagent starts: the subagent works on that branch and its changes stay there after it finishes — ideal for parallel work streams. When git refuses (not a repository, branch already exists, invalid name), the delegation fails with a readable tool result to the caller agent (e.g. `Subagent dev failed: cannot create branch "feature/parser" ... already exists`) so it can react — retry with a different branch name, drop the `branch` argument to work on the current branch, or report the problem. The subagent process is never spawned when the branch cannot be created.
+When `useWorktree: true` is provided, the extension creates a linked Git worktree on an automatically named branch such as `pi-agents/dev/m4abc123-a1b2c3d4` and starts the child there. Its directory name is generated too. The parent checkout never switches, so delegations can run in parallel with separate files and indexes. Worktrees are retained after completion and their generated branches and paths are returned, preserving uncommitted as well as committed child changes. They default to `.git/pi-agents-worktrees/` in Git's common directory.
+
+Worktrees start from committed `HEAD`; dirty parent source changes are not copied automatically. `.env` and `.env.*` files found beside tracked files are copied by default. Use `subagents.worktree.copyFiles` for other ignored assets and `subagents.worktree.setupCommand` (for example `bun install --frozen-lockfile`) to provision dependencies. Setup runs at the worktree root with `PI_AGENTS_SOURCE_ROOT` and `PI_AGENTS_WORKTREE_ROOT` set. Creation/setup failures roll back the new worktree and branch before returning an error.
 
 ## Custom tools (per agent)
 
@@ -118,7 +120,12 @@ export default {
   "subagents": {
     "defaultTimeoutSeconds": 1800,
     "staleWarningMinutes": 5,
-    "gracefulStopSeconds": 5
+    "gracefulStopSeconds": 5,
+    "worktree": {
+      "copyEnvFiles": true,
+      "copyFiles": [],
+      "setupCommand": "bun install --frozen-lockfile"
+    }
   },
   "mcpServers": {
     "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
@@ -141,6 +148,10 @@ export default {
 - `subagents.defaultTimeoutSeconds`: total deadline when the tool omits `timeoutSeconds`.
 - `subagents.staleWarningMinutes`: inactivity threshold shown by the inspector; it does not stop the child.
 - `subagents.gracefulStopSeconds`: delay before escalating RPC abort to process signals.
+- `subagents.worktree.baseDir`: optional checkout parent, relative to the repository root when not absolute.
+- `subagents.worktree.copyEnvFiles`: copy `.env` variants into generated worktrees (default `true`).
+- `subagents.worktree.copyFiles`: additional repository-relative files/directories to copy.
+- `subagents.worktree.setupCommand`: shell command run before the child starts, such as `bun install --frozen-lockfile`.
 
 ## MCP servers
 
