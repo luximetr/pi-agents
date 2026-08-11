@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 
 export const MAX_SUBAGENT_DEPTH = 4;
@@ -26,6 +26,13 @@ export type SubagentProgress =
 export interface RunSubagentOptions {
 	onProgress?: (event: SubagentProgress) => void;
 	executable?: string;
+	/**
+	 * Git branch to create (and check out) in `cwd` before the subagent
+	 * starts. The subagent works on this branch and its changes stay there
+	 * after it finishes. Delegation fails when git refuses (not a repository,
+	 * branch already exists, invalid name).
+	 */
+	branch?: string;
 }
 
 function textFromMessage(message: unknown): string {
@@ -53,6 +60,27 @@ export function runSubagent(
 		if (depth >= MAX_SUBAGENT_DEPTH) {
 			reject(new Error(`maximum subagent depth (${MAX_SUBAGENT_DEPTH}) reached`));
 			return;
+		}
+		if (signal.aborted) {
+			reject(new Error("subagent cancelled"));
+			return;
+		}
+
+		// Optional git branch: create it in the subagent's cwd before spawning,
+		// so the child (and everything it writes) starts on that branch. The
+		// branch and its changes remain after the subagent finishes.
+		const branch = typeof options.branch === "string" ? options.branch.trim() : "";
+		if (branch) {
+			try {
+				execFileSync("git", ["checkout", "-b", branch], { cwd, stdio: "pipe", encoding: "utf8" });
+			} catch (err) {
+				const stderr = (err as { stderr?: unknown })?.stderr;
+				const detail = typeof stderr === "string" && stderr.trim()
+					? stderr.trim()
+					: err instanceof Error ? err.message : String(err);
+				reject(new Error(`cannot create branch "${branch}" for subagent: ${detail}`));
+				return;
+			}
 		}
 
 		const executable = options.executable ?? process.env.PI_CODING_AGENT_BIN ?? process.argv[1] ?? "pi";

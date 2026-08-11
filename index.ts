@@ -40,6 +40,34 @@ function formatToolArgs(args: unknown): string {
 	}
 }
 
+/** Match a denied path glob against both the cwd-relative path and basename. */
+export function matchesDeniedPath(target: string, cwd: string, patterns: string[]): boolean {
+	const normalize = (value: string) => value.replaceAll(path.sep, "/").replace(/^\.\//, "");
+	const absolute = path.resolve(cwd, target);
+	const candidates = [normalize(path.relative(cwd, absolute)), normalize(absolute), path.basename(absolute)];
+	const globRegex = (raw: string): RegExp => {
+		const pattern = normalize(raw.trim());
+		let source = "";
+		for (let i = 0; i < pattern.length; i++) {
+			const ch = pattern[i];
+			if (ch === "*" && pattern[i + 1] === "*") {
+				i++;
+				if (pattern[i + 1] === "/") {
+					i++;
+					source += "(?:.*/)?";
+				} else source += ".*";
+			} else if (ch === "*") source += "[^/]*";
+			else if (ch === "?") source += "[^/]";
+			else source += /[\\^$+.|()[\]{}]/.test(ch) ? `\\${ch}` : ch;
+		}
+		return new RegExp(`^${source}$`);
+	};
+	return patterns.some((pattern) => {
+		const regex = globRegex(pattern);
+		return pattern.includes("/") ? candidates.slice(0, 2).some((candidate) => regex.test(candidate)) : regex.test(candidates[2]);
+	});
+}
+
 /** Load the bundled guide.md (resolve symlinks so relative lookup works for symlinked installs). */
 function loadGuide(): string {
 	try {
@@ -66,6 +94,7 @@ export default function (pi: ExtensionAPI) {
 	let config: PiAgentsConfig = {};
 	let activeName: string | undefined;
 	let activeAgent: DiscoveredAgent | undefined;
+	let sessionCwd = process.cwd();
 	/** Set by /agent:help; injects the bundled guide into the next turn only (one-shot). */
 	let helpPending = false;
 	/** Toolset before the first agent was applied; used to restore plain pi. */
@@ -183,13 +212,17 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: DELEGATE_TOOL,
 		label: "Delegate",
-		description: "Delegate a focused task to an allowed subagent and receive its concise result.",
+		description: "Delegate a focused task to an allowed subagent (optionally on a new git branch) and receive its concise result.",
 		promptSnippet: "delegate: ask a specialist agent to complete an isolated task",
 		parameters: jsonSchemaToTypeBox({
 			type: "object",
 			properties: {
 				agent: { type: "string", description: "Name of an allowed subagent" },
 				task: { type: "string", description: "Self-contained task; include relevant paths and expected output" },
+				branch: {
+					type: "string",
+					description: "Optional: git branch to create and check out for the subagent. Its edits land on this branch and stay there after it finishes.",
+				},
 			},
 			required: ["agent", "task"],
 			additionalProperties: false,
@@ -198,6 +231,7 @@ export default function (pi: ExtensionAPI) {
 			const parent = activeAgent;
 			const agentName = String((params as { agent?: unknown }).agent ?? "").trim();
 			const task = String((params as { task?: unknown }).task ?? "").trim();
+			const branch = String((params as { branch?: unknown }).branch ?? "").trim();
 			if (!parent?.subagents?.includes(agentName)) {
 				return { content: [{ type: "text", text: `Delegation denied: ${agentName} is not an allowed subagent of ${parent?.name ?? "the current agent"}.` }], details: {} };
 			}
@@ -254,6 +288,7 @@ export default function (pi: ExtensionAPI) {
 					publish();
 				};
 				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
+					...(branch ? { branch } : {}),
 					onProgress: (event) => {
 						switch (event.type) {
 							case "started": update(`▶ ${event.agent}: running`); break;
@@ -289,6 +324,22 @@ export default function (pi: ExtensionAPI) {
 	// Keybindings come from config.json (global + project, project wins).
 	// Load at extension load time: cwd is the directory pi started in.
 	config = loadConfig(process.cwd());
+
+	// Deny direct file access for the active agent. Bash is intentionally not
+	// intercepted here; shell sandboxing is a separate, stronger concern.
+	pi.on("tool_call", (event) => {
+		const denied = activeAgent?.deniedPaths;
+		if (!denied?.length || event.toolName === "bash") return;
+		const input = event.input as Record<string, unknown>;
+		const target = typeof input.path === "string" ? input.path : undefined;
+		if (!target) return;
+		if (matchesDeniedPath(target, sessionCwd, denied)) {
+			return {
+				block: true,
+				reason: `Access denied by agent policy: ${target}`,
+			};
+		}
+	});
 
 	pi.registerFlag("agent", {
 		description: "Agent to activate (name from .pi-agents)",
@@ -533,6 +584,7 @@ export default function (pi: ExtensionAPI) {
 	// --- Session lifecycle: discover, restore, persist ---
 
 	pi.on("session_start", async (event, ctx) => {
+		sessionCwd = ctx.cwd;
 		sessionSubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 		const result = await discoverAgents(ctx.cwd);
 		agents = result.agents;

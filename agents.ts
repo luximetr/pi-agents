@@ -72,6 +72,8 @@ export interface AgentConfig {
 	color?: string;
 	/** Tool allowlist. Omit to keep current tools (use "default" for pi defaults). An empty array `[]` disables all tools — the agent is left with only its MCP tools (if any). */
 	tools?: ToolName[];
+	/** Glob patterns for files the built-in file tools must not access. Paths are relative to the session cwd unless absolute. */
+	deniedPaths?: string[];
 	/**
 	 * MCP server names (keys of config.json mcpServers) whose tools this agent
 	 * activates. Only these servers are connected — not all available ones.
@@ -196,6 +198,9 @@ function normalizeAgent(
 		color,
 		tools: Array.isArray(cfg.tools)
 			? (cfg.tools.map((t) => String(t).trim()).filter(Boolean) as ToolName[])
+			: undefined,
+		deniedPaths: Array.isArray(cfg.deniedPaths)
+			? cfg.deniedPaths.map(String).map((p) => p.trim()).filter(Boolean)
 			: undefined,
 		mcp: Array.isArray(cfg.mcp) ? cfg.mcp.map((s) => String(s).trim()).filter(Boolean) : undefined,
 		mcpServers,

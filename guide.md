@@ -64,7 +64,16 @@ export default {
 };
 ```
 
-`subagents` is an allowlist. The child runs as a fresh ephemeral `pi --print --no-session --agent <name>` process and only its final answer is returned to the parent. Nested delegation is limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
+`subagents` is an allowlist. The child runs as a fresh ephemeral `pi --mode rpc --no-session --agent <name>` process and only its final answer is returned to the parent. Nested delegation is limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
+
+`delegate` takes `agent`, `task`, and an optional `branch` to isolate the subagent's work on a new git branch:
+
+```
+delegate(agent: "dev", task: "Implement the parser", branch: "feature/parser")
+delegate(agent: "doc", task: "Document the parser API", branch: "feature/parser-docs")
+```
+
+The extension runs `git checkout -b <branch>` in the session directory before the subagent starts: the subagent works on that branch and its changes stay there after it finishes — ideal for parallel work streams. When git refuses (not a repository, branch already exists, invalid name), the delegation fails with a readable tool result to the caller agent (e.g. `Subagent dev failed: cannot create branch "feature/parser" ... already exists`) so it can react — retry with a different branch name, drop the `branch` argument to work on the current branch, or report the problem. The subagent process is never spawned when the branch cannot be created.
 
 ## Custom tools (per agent)
 

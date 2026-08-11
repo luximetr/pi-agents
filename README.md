@@ -136,13 +136,14 @@ export default {
   description: "Documentation agent: read-only, writes docs, READMEs.",
   color: "#bf5af2",                               // theme role or "#rrggbb"; auto-assigned by name when omitted
   tools: ["read", "grep", "find", "ls", "write", "edit", "bash"],  // tool allowlist
+  deniedPaths: ["**/.env", "**/*.fig", "**/*.pen", "**/*.md"], // file-tool denylist
   systemPrompt: `You are the DOC agent. ...`,     // inline prompt…
   // systemPromptFile: "./prompt.md",             // …or from a file (relative to agent)
   // default: true,                               // auto-select on fresh sessions
 };
 ```
 
-Files are TypeScript loaded with [jiti](https://github.com/unjs/jiti) — you can use imports, helpers, or an async factory (`export default async () => ({...})`). Omit `tools` to keep the current toolset; pass `tools: []` to disable all built-in tools (the agent keeps only its MCP tools, if any).
+Files are TypeScript loaded with [jiti](https://github.com/unjs/jiti) — you can use imports, helpers, or an async factory (`export default async () => ({...})`). Omit `tools` to keep the current toolset; pass `tools: []` to disable all built-in tools (the agent keeps only its MCP tools, if any). `deniedPaths` blocks matching paths for the built-in `read`, `write`, `edit`, `grep`, `find`, and `ls` tools. Patterns without `/` match any basename; other patterns are relative to the session cwd unless absolute. Bash is not restricted by this setting.
 
 #### Subagents and hierarchy
 
@@ -158,7 +159,16 @@ export default {
 };
 ```
 
-This adds the `delegate` tool automatically. The child runs as a fresh, ephemeral `pi --print` session with the selected agent and returns its final answer to the parent, so the parent context stays small. Delegation is restricted to the declared allowlist and nested delegation is capped at four levels. Set `PI_CODING_AGENT_BIN` if the `pi` executable is not the current process executable.
+This adds the `delegate` tool automatically. The child runs as a fresh, ephemeral `pi --mode rpc --no-session --agent <name>` session with the selected agent and returns its final answer to the parent, so the parent context stays small. Delegation is restricted to the declared allowlist and nested delegation is capped at four levels. Set `PI_CODING_AGENT_BIN` if the `pi` executable is not the current process executable.
+
+`delegate` takes `agent`, `task`, and an optional `branch` to isolate the subagent's work on a new git branch:
+
+```
+delegate(agent: "dev", task: "Implement the parser", branch: "feature/parser")
+delegate(agent: "doc", task: "Document the parser API", branch: "feature/parser-docs")
+```
+
+The extension runs `git checkout -b <branch>` in the session directory before the subagent starts, so the subagent works on that branch and its changes stay there after it finishes — ideal for parallel work streams. If git refuses (not a repository, branch already exists, invalid name), the delegation fails with a readable error to the caller agent (e.g. `Subagent dev failed: cannot create branch "feature/parser" ... already exists`). The caller can then retry with a different branch name, drop the `branch` argument to work on the current branch, or surface the issue to the user. The subagent process is never started when the branch cannot be created.
 
 #### Typed tools
 
