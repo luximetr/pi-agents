@@ -1,7 +1,8 @@
 import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, Text, type SelectItem } from "@earendil-works/pi-tui";
+import { Container, Input, Key, SelectList, Text, matchesKey, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import type { DiscoveredAgent } from "./agents.ts";
+import type { RunningSubagentHandle, SubagentSnapshot } from "./subagents.ts";
 
 /**
  * Auto-assigned colors for agents without an explicit `color` (stable per
@@ -79,6 +80,125 @@ export function updateStatus(ctx: ExtensionContext, agent: DiscoveredAgent | und
 		: ctx.ui.theme.fg("muted", "agent:none · default pi");
 	const statsStatus = subagentStats ? ctx.ui.theme.fg("muted", ` · ${subagentStats}`) : "";
 	ctx.ui.setStatus("pi-agents", `${agentStatus}${statsStatus}`);
+}
+
+/** Live, controllable view over running delegated RPC children. */
+export function showSubagentInspector(
+	ctx: ExtensionContext,
+	getHandles: () => RunningSubagentHandle[],
+	staleWarningMinutes: number,
+): Promise<void> {
+	const initial = getHandles();
+	if (initial.length === 0) {
+		ctx.ui.notify("No subagents are currently running.", "info");
+		return Promise.resolve();
+	}
+
+	return ctx.ui.custom<void>((tui, theme, _kb, done) => {
+		let selectedId = initial[0].id;
+		let lastHandle = initial[0];
+		let mode: "normal" | "confirm-stop" | "steer" = "normal";
+		const steerInput = new Input();
+		const timer = setInterval(() => tui.requestRender(), 1000);
+		timer.unref?.();
+
+		const selected = (): RunningSubagentHandle => {
+			const handles = getHandles();
+			const match = handles.find((handle) => handle.id === selectedId) ?? handles[0];
+			if (match) {
+				selectedId = match.id;
+				lastHandle = match;
+			}
+			return lastHandle;
+		};
+		const elapsed = (ms: number) => {
+			const total = Math.max(0, Math.floor(ms / 1000));
+			const minutes = Math.floor(total / 60);
+			return minutes ? `${minutes}m ${total % 60}s` : `${total}s`;
+		};
+		const argsText = (snapshot: SubagentSnapshot) => {
+			if (snapshot.currentToolArgs === undefined) return "";
+			try { return JSON.stringify(snapshot.currentToolArgs); } catch { return "[unavailable]"; }
+		};
+
+		return {
+			get focused() { return steerInput.focused; },
+			set focused(value: boolean) { steerInput.focused = value; },
+			render(width: number) {
+				const handle = selected();
+				const snapshot = handle.snapshot();
+				const now = Date.now();
+				const idleMs = now - snapshot.lastActivityAt;
+				const stale = snapshot.status === "running" && idleMs >= staleWarningMinutes * 60_000;
+				const remaining = snapshot.deadlineAt === undefined ? "no deadline" : `${elapsed(snapshot.deadlineAt - now)} remaining`;
+				const handles = getHandles();
+				const title = handles.length > 1
+					? `Subagent Inspector (${handles.findIndex((item) => item.id === snapshot.id) + 1}/${handles.length})`
+					: "Subagent Inspector";
+				const lines: string[] = [
+					theme.fg("accent", theme.bold(title)),
+					`${theme.fg("accent", snapshot.agent)} ${theme.fg("muted", `· ${snapshot.id}`)}`,
+					`Status: ${snapshot.status} · ${snapshot.phase} · elapsed ${elapsed(now - snapshot.startedAt)} · ${remaining}`,
+					stale
+						? theme.fg("warning", `Possibly stalled: no RPC activity for ${elapsed(idleMs)}`)
+						: theme.fg("muted", `Last activity ${elapsed(idleMs)} ago`),
+				];
+				if (snapshot.currentTool) lines.push(`Tool: ${snapshot.currentTool}${argsText(snapshot) ? ` ${argsText(snapshot)}` : ""}`);
+				lines.push(theme.fg("muted", `Task: ${snapshot.task}`), "", theme.fg("accent", "Recent activity"));
+				for (const event of snapshot.recentEvents.slice(-12)) lines.push(...wrapTextWithAnsi(event, Math.max(1, width - 2)).map((line) => ` ${line}`));
+				if (snapshot.partialText.trim()) {
+					lines.push("", theme.fg("accent", "Latest response"));
+					for (const line of wrapTextWithAnsi(snapshot.partialText.trim().split("\n").slice(-5).join("\n"), Math.max(1, width - 2))) lines.push(` ${line}`);
+				}
+				lines.push("");
+				if (mode === "confirm-stop") lines.push(theme.fg("warning", "Stop this subagent? y confirm · n/esc cancel"));
+				else if (mode === "steer") {
+					steerInput.focused = true;
+					const [inputLine = ""] = steerInput.render(Math.max(1, width - 7));
+					lines.push(`${theme.fg("accent", "Steer: ")}${inputLine}`, theme.fg("dim", "enter send · esc cancel"));
+				} else lines.push(theme.fg("dim", `${handles.length > 1 ? "↑↓ select · " : ""}s steer · x stop · esc close`));
+				return lines.map((line) => truncateToWidth(line, width));
+			},
+			invalidate() { steerInput.invalidate(); },
+			dispose() { clearInterval(timer); },
+			handleInput(data: string) {
+				if (mode === "confirm-stop") {
+					if (data.toLowerCase() === "y") {
+						selected().stop("user");
+						clearInterval(timer);
+						done(undefined);
+					} else if (data.toLowerCase() === "n" || matchesKey(data, Key.escape)) mode = "normal";
+					tui.requestRender();
+					return;
+				}
+				if (mode === "steer") {
+					if (matchesKey(data, Key.escape)) {
+						mode = "normal";
+						steerInput.setValue("");
+					} else if (matchesKey(data, Key.enter)) {
+						if (selected().steer(steerInput.getValue())) {
+							mode = "normal";
+							steerInput.setValue("");
+						}
+					} else steerInput.handleInput(data);
+					tui.requestRender();
+					return;
+				}
+				if (matchesKey(data, Key.escape)) {
+					clearInterval(timer);
+					done(undefined);
+				} else if (data.toLowerCase() === "x") mode = "confirm-stop";
+				else if (data.toLowerCase() === "s") mode = "steer";
+				else if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
+					const handles = getHandles();
+					const index = Math.max(0, handles.findIndex((handle) => handle.id === selectedId));
+					const offset = matchesKey(data, Key.up) ? -1 : 1;
+					if (handles.length > 0) selectedId = handles[(index + offset + handles.length) % handles.length].id;
+				}
+				tui.requestRender();
+			},
+		};
+	}, { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%", anchor: "center", margin: 1 } });
 }
 
 /**

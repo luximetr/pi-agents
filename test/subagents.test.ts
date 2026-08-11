@@ -7,7 +7,8 @@ import path from "node:path";
 import test from "node:test";
 import { discoverAgents } from "../agents.ts";
 import extension, { matchesDeniedPath } from "../index.ts";
-import { MAX_SUBAGENT_DEPTH, runSubagent } from "../subagents.ts";
+import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
+import { showSubagentInspector } from "../ui.ts";
 
 const noAbort = new AbortController().signal;
 
@@ -108,6 +109,107 @@ test("end to end: delegate launches an isolated child with the target agent", as
 	}
 });
 
+test("execution timeout stops a stalled subagent and preserves diagnostic state", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-timeout-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	try {
+		await writeFile(fakePi, `#!/usr/bin/env node
+			process.stdin.on("data", chunk => {
+				const command = JSON.parse(String(chunk).trim());
+				if (command.type === "prompt") {
+					process.stdout.write(JSON.stringify({type:"agent_start"}) + "\\n");
+					process.stdout.write(JSON.stringify({type:"tool_execution_start", toolName:"bash", args:{command:"sleep forever"}}) + "\\n");
+				}
+			});
+		`);
+		await chmod(fakePi, 0o755);
+		await assert.rejects(
+			runSubagent("worker", "stall", root, noAbort, { executable: fakePi, timeoutSeconds: 0.5, gracefulStopSeconds: 0.01 }),
+			(error: unknown) => {
+				assert.ok(error instanceof SubagentStoppedError);
+				assert.equal(error.reason, "timeout");
+				assert.equal(error.snapshot.currentTool, "bash");
+				assert.equal(error.snapshot.stopReason, "timeout");
+				return true;
+			},
+		);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("running handle can steer and manually stop a subagent", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-control-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	let handle: RunningSubagentHandle | undefined;
+	try {
+		await writeFile(fakePi, `#!/usr/bin/env node
+			let buffer = "";
+			process.stdin.on("data", chunk => {
+				buffer += chunk;
+				let newline;
+				while ((newline = buffer.indexOf("\\n")) !== -1) {
+					const command = JSON.parse(buffer.slice(0, newline));
+					buffer = buffer.slice(newline + 1);
+					if (command.type === "prompt") process.stdout.write(JSON.stringify({type:"agent_start"}) + "\\n");
+					if (command.type === "steer") process.stdout.write(JSON.stringify({type:"message_update", assistantMessageEvent:{type:"text_delta", delta:"steered"}}) + "\\n");
+					if (command.type === "abort") {
+						process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
+					}
+				}
+			});
+		`);
+		await chmod(fakePi, 0o755);
+		const running = runSubagent("worker", "wait", root, noAbort, {
+			executable: fakePi,
+			gracefulStopSeconds: 0.1,
+			onHandle: (value) => { if (value) handle = value; },
+		});
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		assert.ok(handle);
+		assert.equal(handle.steer("try another way"), true);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		assert.ok(handle.snapshot().recentEvents.some((event) => event.includes("user steering")));
+		handle.stop("user");
+		await assert.rejects(running, (error: unknown) => error instanceof SubagentStoppedError && error.reason === "user");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("subagent inspector renders live state and confirms a manual stop", async () => {
+	let stopped = false;
+	const now = Date.now();
+	const handle: RunningSubagentHandle = {
+		id: "call-inspect",
+		snapshot: () => ({
+			id: "call-inspect", agent: "worker", task: "run tests", startedAt: now - 10_000,
+			lastActivityAt: now - 1_000, deadlineAt: now + 20_000, status: "running", phase: "tool execution",
+			currentTool: "bash", currentToolArgs: { command: "npm test" }, partialText: "testing...", recentEvents: ["→ bash"],
+		}),
+		stop: (reason) => { stopped = reason === "user"; },
+		steer: () => true,
+	};
+	let component: any;
+	const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
+	const ctx: any = {
+		ui: {
+			theme,
+			notify: () => {},
+			custom: (factory: any) => new Promise<void>((resolve) => {
+				component = factory({ requestRender: () => {} }, theme, {}, resolve);
+			}),
+		},
+	};
+	const inspector = showSubagentInspector(ctx, () => [handle], 5);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.ok(component.render(100).join("\n").includes("Tool: bash"));
+	component.handleInput("x");
+	component.handleInput("y");
+	await inspector;
+	assert.equal(stopped, true);
+});
+
 test("branch option: subagent runs on a freshly created git branch", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-branch-"));
 	const fakePi = path.join(root, "fake-pi.mjs");
@@ -187,6 +289,47 @@ function bootExtension(root: string) {
 	const ctx: any = { cwd: root, sessionManager: { getSessionFile: () => undefined }, ui: { theme, setStatus: () => {}, notify: () => {} } };
 	return { handlers, registered, ctx };
 }
+
+test("end to end: configured default timeout returns control to the parent delegate", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegate-timeout-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	const previousBin = process.env.PI_CODING_AGENT_BIN;
+	try {
+		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
+		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({
+			subagents: { defaultTimeoutSeconds: 0.5, gracefulStopSeconds: 0.01 },
+		}));
+		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
+			export default { name: "lead", description: "Lead", default: true, subagents: ["worker"] };
+		`);
+		await mkdir(path.join(root, ".pi-agents", "worker"), { recursive: true });
+		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
+			export default { name: "worker", description: "Worker" };
+		`);
+		await writeFile(fakePi, `#!/usr/bin/env node
+			process.stdin.on("data", chunk => {
+				const command = JSON.parse(String(chunk).trim());
+				if (command.type === "prompt") {
+					process.stdout.write(JSON.stringify({type:"agent_start"}) + "\\n");
+					process.stdout.write(JSON.stringify({type:"tool_execution_start", toolName:"bash", args:{command:"hang"}}) + "\\n");
+				}
+			});
+		`);
+		await chmod(fakePi, 0o755);
+		process.env.PI_CODING_AGENT_BIN = fakePi;
+		const { handlers, registered, ctx } = bootExtension(root);
+		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+		const delegate = registered.find((tool) => tool.name === "delegate")!;
+		const result = await delegate.execute("timeout-call", { agent: "worker", task: "hang" }, undefined, undefined, ctx);
+		assert.equal(result.details.status, "timed_out");
+		assert.match(String(result.content[0].text), /timed out/);
+		assert.match(String(result.content[0].text), /Current operation: bash/);
+	} finally {
+		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
+		else process.env.PI_CODING_AGENT_BIN = previousBin;
+		await rm(root, { recursive: true, force: true });
+	}
+});
 
 test("end to end: delegate with branch runs the subagent on a new git branch", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegate-branch-"));

@@ -4,7 +4,7 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 
 ## Using the extension (quick start)
 
-- Switch agents: `f7` (picker), `f8` (rotate), or `/agent <name>` (`/agent none` clears). `f7`/`f8` work through iTerm2 and herdr without terminal setting changes. Configured shortcuts such as `ctrl+shift+a` or `alt+a` remain available as additional aliases.
+- Switch agents: `f7` (picker), `f8` (rotate), or `/agent <name>` (`/agent none` clears). Inspect a running delegated subagent with `f9` or `/subagents`. Function-key shortcuts work through iTerm2 and herdr without terminal setting changes; configured aliases remain available too.
 - Start with an agent from the CLI: `pi --agent dev`.
 - The active agent's system prompt is appended every turn; its tools are restricted to its allowlist (+ its MCP tools).
 - No agent selected = plain pi, unchanged.
@@ -66,12 +66,14 @@ export default {
 
 `subagents` is an allowlist. The child runs as a fresh ephemeral `pi --mode rpc --no-session --agent <name>` process and only its final answer is returned to the parent. Nested delegation is limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
 
-`delegate` takes `agent`, `task`, and an optional `branch` to isolate the subagent's work on a new git branch:
+`delegate` takes `agent`, `task`, an optional `branch`, and an optional total execution limit:
 
 ```
-delegate(agent: "dev", task: "Implement the parser", branch: "feature/parser")
+delegate(agent: "dev", task: "Implement the parser", branch: "feature/parser", timeoutSeconds: 900)
 delegate(agent: "doc", task: "Document the parser API", branch: "feature/parser-docs")
 ```
+
+When `timeoutSeconds` is omitted, `subagents.defaultTimeoutSeconds` is used (1800 seconds by default). While the parent waits, `f9` or `/subagents` opens a live inspector with the child's current tool, recent activity, deadline, steering (`s`), and stop (`x`) controls. Manual interruption and timeout return diagnostic context to the parent so it can change approach.
 
 The extension runs `git checkout -b <branch>` in the session directory before the subagent starts: the subagent works on that branch and its changes stay there after it finishes — ideal for parallel work streams. When git refuses (not a repository, branch already exists, invalid name), the delegation fails with a readable tool result to the caller agent (e.g. `Subagent dev failed: cannot create branch "feature/parser" ... already exists`) so it can react — retry with a different branch name, drop the `branch` argument to work on the current branch, or report the problem. The subagent process is never spawned when the branch cannot be created.
 
@@ -108,7 +110,16 @@ export default {
 ```json
 {
   "defaultAgent": "dev",
-  "keybindings": { "select": ["ctrl+shift+a", "alt+a"], "rotate": ["ctrl+shift+q", "alt+q"] },
+  "keybindings": {
+    "select": ["ctrl+shift+a", "alt+a"],
+    "rotate": ["ctrl+shift+q", "alt+q"],
+    "inspect": "f9"
+  },
+  "subagents": {
+    "defaultTimeoutSeconds": 1800,
+    "staleWarningMinutes": 5,
+    "gracefulStopSeconds": 5
+  },
   "mcpServers": {
     "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
     "github": {
@@ -126,7 +137,10 @@ export default {
 ```
 
 - `defaultAgent`: auto-selected on fresh sessions (`null`/unset = plain pi). Overridden by `--agent` flag and per-session selection.
-- `keybindings`: each action takes a single key or an array of fallbacks (terminal key encoding varies).
+- `keybindings`: each action takes a single key or an array of fallbacks (terminal key encoding varies). The built-in `f7`, `f8`, and `f9` fallbacks are always retained.
+- `subagents.defaultTimeoutSeconds`: total deadline when the tool omits `timeoutSeconds`.
+- `subagents.staleWarningMinutes`: inactivity threshold shown by the inspector; it does not stop the child.
+- `subagents.gracefulStopSeconds`: delay before escalating RPC abort to process signals.
 
 ## MCP servers
 

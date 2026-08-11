@@ -98,6 +98,7 @@ Either way: `/reload` in pi (or restart) to pick up the extension.
 |---|---|
 | Open agent picker | `f7` (also accepts configured shortcuts) |
 | Rotate to next agent | `f8` (cycles: plain pi → dev → doc → … → plain pi; also accepts configured shortcuts) |
+| Inspect running subagents | `f9` or `/subagents` |
 | Switch directly | `/agent dev`, `/agent none` |
 | Ask about the extension | `/agent:help <question>` (answered from the bundled guide) |
 | Picker | `/agent` |
@@ -161,12 +162,14 @@ export default {
 
 This adds the `delegate` tool automatically. The child runs as a fresh, ephemeral `pi --mode rpc --no-session --agent <name>` session with the selected agent and returns its final answer to the parent, so the parent context stays small. Delegation is restricted to the declared allowlist and nested delegation is capped at four levels. Set `PI_CODING_AGENT_BIN` if the `pi` executable is not the current process executable.
 
-`delegate` takes `agent`, `task`, and an optional `branch` to isolate the subagent's work on a new git branch:
+`delegate` takes `agent`, `task`, an optional `branch`, and an optional total execution limit in seconds:
 
 ```
-delegate(agent: "dev", task: "Implement the parser", branch: "feature/parser")
+delegate(agent: "dev", task: "Implement the parser", branch: "feature/parser", timeoutSeconds: 900)
 delegate(agent: "doc", task: "Document the parser API", branch: "feature/parser-docs")
 ```
+
+While the parent waits, press `f9` (or run `/subagents`) to open the live subagent inspector. It shows the current phase/tool, recent RPC activity, elapsed/remaining time, and stale warnings. Press `s` to steer the selected child or `x` to stop it. A manual interruption or deadline returns a diagnostic tool result to the parent agent so it can choose another approach. The default deadline is 1800 seconds.
 
 The extension runs `git checkout -b <branch>` in the session directory before the subagent starts, so the subagent works on that branch and its changes stay there after it finishes — ideal for parallel work streams. If git refuses (not a repository, branch already exists, invalid name), the delegation fails with a readable error to the caller agent (e.g. `Subagent dev failed: cannot create branch "feature/parser" ... already exists`). The caller can then retry with a different branch name, drop the `branch` argument to work on the current branch, or surface the issue to the user. The subagent process is never started when the branch cannot be created.
 
@@ -241,7 +244,13 @@ export default {
   "defaultAgent": "dev",
   "keybindings": {
     "select": ["ctrl+shift+a", "alt+a"],
-    "rotate": ["ctrl+shift+q", "alt+q"]
+    "rotate": ["ctrl+shift+q", "alt+q"],
+    "inspect": "f9"
+  },
+  "subagents": {
+    "defaultTimeoutSeconds": 1800,
+    "staleWarningMinutes": 5,
+    "gracefulStopSeconds": 5
   },
   "mcpServers": {
     "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
@@ -254,13 +263,14 @@ export default {
 }
 ```
 
-`defaultAgent` is optional. If it is unset, the last agent selection is remembered for the next `/new` session; otherwise the first agent marked `default: true` (or, when none is marked, the first discovered agent) is selected. Use `/agent none` to clear the current agent and restore plain pi for that session. Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends (e.g. `alt` keys on terminals that can't report `Ctrl+Shift`, see troubleshooting):
+`defaultAgent` is optional. If it is unset, the last agent selection is remembered for the next `/new` session; otherwise the first agent marked `default: true` (or, when none is marked, the first discovered agent) is selected. Use `/agent none` to clear the current agent and restore plain pi for that session. `subagents.defaultTimeoutSeconds` is the total deadline used when `delegate` omits `timeoutSeconds`; `staleWarningMinutes` only changes the inspector warning, and `gracefulStopSeconds` controls stop escalation. Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends (e.g. `alt` keys on terminals that can't report `Ctrl+Shift`, see troubleshooting):
 
 ```json
 {
   "keybindings": {
     "select": ["ctrl+shift+a", "alt+a"],
-    "rotate": ["ctrl+shift+q", "alt+q"]
+    "rotate": ["ctrl+shift+q", "alt+q"],
+    "inspect": "f9"
   }
 }
 ```
@@ -348,11 +358,11 @@ Works in plain pi or under any agent. The guide is not exposed as a tool and is 
 
 ## Troubleshooting: shortcuts don't fire
 
-The built-in shortcuts are `f7` (picker) and `f8` (rotate). Function keys are plain escape sequences, so they work through iTerm2 and herdr without changing terminal settings. Configured shortcuts are retained as additional aliases.
+The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent inspector). Function keys are plain escape sequences, so they work through iTerm2 and herdr without changing terminal settings. Configured shortcuts are retained as additional aliases.
 
 - **`ctrl+q`** is commonly consumed by terminal flow control, and **`ctrl+a`** is commonly reserved by the line editor. They cannot reliably be used as extension shortcuts.
 - Existing `ctrl+shift` and `alt` aliases may still require terminal-specific reporting. They remain supported when configured, but `f7`/`f8` do not require those settings.
-- If you prefer custom aliases, configure both keys; the built-in `f7`/`f8` aliases are still registered automatically:
+- If you prefer custom aliases, configure them; the built-in `f7`/`f8`/`f9` aliases are still registered automatically:
 
   ```json
   { "keybindings": { "select": ["ctrl+shift+a", "alt+a"], "rotate": ["ctrl+shift+q", "alt+q"] } }

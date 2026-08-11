@@ -114,6 +114,16 @@ export interface PiAgentsConfig {
 		/** One key or several (fallbacks for terminals that don't send alt/ctrl+shift distinctly). */
 		select?: string | string[];
 		rotate?: string | string[];
+		inspect?: string | string[];
+	};
+	/** Runtime limits and inspector diagnostics for delegated subagents. */
+	subagents?: {
+		/** Total execution limit used when delegate omits timeoutSeconds. */
+		defaultTimeoutSeconds?: number;
+		/** Highlight a running child after this many minutes without RPC activity. */
+		staleWarningMinutes?: number;
+		/** Grace period before escalating RPC abort to SIGTERM/SIGKILL. */
+		gracefulStopSeconds?: number;
 	};
 	/**
 	 * MCP servers, keyed by name. Either a stdio server (`command`+`args`,
@@ -331,12 +341,21 @@ function normalizeKeys(value: string | string[] | undefined): string[] | undefin
 	return keys.length > 0 ? keys : undefined;
 }
 
+function positiveNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function nonNegativeNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 function loadConfigFrom(dir: string): PiAgentsConfig {
 	const configPath = path.join(dir, "config.json");
 	if (!fs.existsSync(configPath)) return {};
 	try {
 		const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8")) as Partial<PiAgentsConfig>;
 		const keybindings = parsed.keybindings && typeof parsed.keybindings === "object" ? parsed.keybindings : undefined;
+		const subagents = parsed.subagents && typeof parsed.subagents === "object" ? parsed.subagents : undefined;
 		const mcpServers = normalizeMcpServers(parsed.mcpServers);
 		return {
 			defaultAgent: typeof parsed.defaultAgent === "string" ? parsed.defaultAgent : undefined,
@@ -344,6 +363,14 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 				? {
 						select: normalizeKeys(keybindings.select),
 						rotate: normalizeKeys(keybindings.rotate),
+						inspect: normalizeKeys(keybindings.inspect),
+				  }
+				: undefined,
+			subagents: subagents
+				? {
+						defaultTimeoutSeconds: positiveNumber(subagents.defaultTimeoutSeconds),
+						staleWarningMinutes: positiveNumber(subagents.staleWarningMinutes),
+						gracefulStopSeconds: nonNegativeNumber(subagents.gracefulStopSeconds),
 				  }
 				: undefined,
 			mcpServers,
@@ -431,6 +458,12 @@ export function loadConfig(cwd: string): PiAgentsConfig {
 		keybindings: {
 			select: projectConfig.keybindings?.select ?? globalConfig.keybindings?.select,
 			rotate: projectConfig.keybindings?.rotate ?? globalConfig.keybindings?.rotate,
+			inspect: projectConfig.keybindings?.inspect ?? globalConfig.keybindings?.inspect,
+		},
+		subagents: {
+			defaultTimeoutSeconds: projectConfig.subagents?.defaultTimeoutSeconds ?? globalConfig.subagents?.defaultTimeoutSeconds,
+			staleWarningMinutes: projectConfig.subagents?.staleWarningMinutes ?? globalConfig.subagents?.staleWarningMinutes,
+			gracefulStopSeconds: projectConfig.subagents?.gracefulStopSeconds ?? globalConfig.subagents?.gracefulStopSeconds,
 		},
 		mcpServers: { ...globalConfig.mcpServers, ...projectConfig.mcpServers },
 		env: { ...globalConfig.env, ...projectConfig.env },

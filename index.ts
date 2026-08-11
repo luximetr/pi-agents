@@ -5,19 +5,25 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text, type KeyId } from "@earendil-works/pi-tui";
 import { discoverAgents, loadConfig, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
-import { showAgentSelector, updateStatus } from "./ui.ts";
-import { runSubagent, type SubagentUsage } from "./subagents.ts";
+import { showAgentSelector, showSubagentInspector, updateStatus } from "./ui.ts";
+import { SubagentStoppedError, runSubagent, type RunningSubagentHandle, type SubagentUsage } from "./subagents.ts";
 
 const STATE_ENTRY = "pi-agents-state";
 // Function keys are encoded as escape sequences by iTerm2 and are passed
 // through herdr/tmux without requiring modifyOtherKeys or Option-as-Meta.
 const DEFAULT_SELECT_SHORTCUT = "f7";
 const DEFAULT_ROTATE_SHORTCUT = "f8";
+const DEFAULT_INSPECT_SHORTCUT = "f9";
+const DEFAULT_SUBAGENT_TIMEOUT_SECONDS = 1800;
+const DEFAULT_STALE_WARNING_MINUTES = 5;
+const DEFAULT_GRACEFUL_STOP_SECONDS = 5;
 const DELEGATE_TOOL = "delegate";
 
 type DelegateStatsDetails = {
 	agent: string;
 	statsLine?: string;
+	status?: "completed" | "interrupted" | "timed_out" | "failed";
+	error?: boolean;
 };
 
 type SubagentStats = {
@@ -102,6 +108,7 @@ export default function (pi: ExtensionAPI) {
 	let persistedName: string | undefined;
 	let turnSubagentStats: SubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 	let sessionSubagentStats: SubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
+	const runningSubagents = new Map<string, RunningSubagentHandle>();
 
 	function formatSubagentUsage(stats: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }): string {
 		const formatTokens = (count: number) => {
@@ -212,7 +219,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: DELEGATE_TOOL,
 		label: "Delegate",
-		description: "Delegate a focused task to an allowed subagent (optionally on a new git branch) and receive its concise result.",
+		description: "Delegate a focused task to an allowed subagent (optionally with a new git branch and execution deadline) and receive its concise result.",
 		promptSnippet: "delegate: ask a specialist agent to complete an isolated task",
 		parameters: jsonSchemaToTypeBox({
 			type: "object",
@@ -223,15 +230,28 @@ export default function (pi: ExtensionAPI) {
 					type: "string",
 					description: "Optional: git branch to create and check out for the subagent. Its edits land on this branch and stay there after it finishes.",
 				},
+				timeoutSeconds: {
+					type: "integer",
+					minimum: 1,
+					description: "Optional total execution limit in seconds. The configured default is used when omitted.",
+				},
 			},
 			required: ["agent", "task"],
 			additionalProperties: false,
 		}),
-		execute: async (_id, params, signal, onUpdate, ctx) => {
+		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 			const parent = activeAgent;
-			const agentName = String((params as { agent?: unknown }).agent ?? "").trim();
-			const task = String((params as { task?: unknown }).task ?? "").trim();
-			const branch = String((params as { branch?: unknown }).branch ?? "").trim();
+			const input = params as { agent?: unknown; task?: unknown; branch?: unknown; timeoutSeconds?: unknown };
+			const agentName = String(input.agent ?? "").trim();
+			const task = String(input.task ?? "").trim();
+			const branch = String(input.branch ?? "").trim();
+			const requestedTimeout = input.timeoutSeconds;
+			if (requestedTimeout !== undefined && (!Number.isInteger(requestedTimeout) || Number(requestedTimeout) <= 0)) {
+				return { content: [{ type: "text", text: "Delegation timeoutSeconds must be a positive integer." }], details: { agent: agentName, error: true } };
+			}
+			const timeoutSeconds = requestedTimeout === undefined
+				? config.subagents?.defaultTimeoutSeconds ?? DEFAULT_SUBAGENT_TIMEOUT_SECONDS
+				: Number(requestedTimeout);
 			if (!parent?.subagents?.includes(agentName)) {
 				return { content: [{ type: "text", text: `Delegation denied: ${agentName} is not an allowed subagent of ${parent?.name ?? "the current agent"}.` }], details: {} };
 			}
@@ -289,6 +309,13 @@ export default function (pi: ExtensionAPI) {
 				};
 				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
 					...(branch ? { branch } : {}),
+					id: String(toolCallId),
+					timeoutSeconds,
+					gracefulStopSeconds: config.subagents?.gracefulStopSeconds ?? DEFAULT_GRACEFUL_STOP_SECONDS,
+					onHandle: (handle) => {
+						if (handle) runningSubagents.set(handle.id, handle);
+						else runningSubagents.delete(String(toolCallId));
+					},
 					onProgress: (event) => {
 						switch (event.type) {
 							case "started": update(`▶ ${event.agent}: running`); break;
@@ -304,10 +331,25 @@ export default function (pi: ExtensionAPI) {
 				});
 				return {
 					content: [{ type: "text", text: `Result from ${agentName}:\n\n${result}` }],
-					details: { agent: agentName, statsLine: subagentStatsLine(callSubagentStats, Date.now() - startedAt) } satisfies DelegateStatsDetails,
+					details: { agent: agentName, status: "completed", statsLine: subagentStatsLine(callSubagentStats, Date.now() - startedAt) } satisfies DelegateStatsDetails,
 				};
 			} catch (err) {
-				return { content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}` }], details: { agent: agentName, error: true } };
+				if (err instanceof SubagentStoppedError) {
+					const snapshot = err.snapshot;
+					const status = err.reason === "timeout" ? "timed_out" : "interrupted";
+					const operation = snapshot.currentTool
+						? `\nCurrent operation: ${snapshot.currentTool}${formatToolArgs(snapshot.currentToolArgs)}`
+						: `\nPhase: ${snapshot.phase}`;
+					const partial = snapshot.partialText.trim() ? `\n\nPartial response:\n${snapshot.partialText.trim()}` : "";
+					const reason = err.reason === "timeout"
+						? `timed out after ${formatElapsed(Date.now() - snapshot.startedAt)}`
+						: err.reason === "user" ? "was interrupted by the user" : "was cancelled";
+					return {
+						content: [{ type: "text", text: `Subagent ${agentName} ${reason}.${operation}\nLast activity: ${formatElapsed(Date.now() - snapshot.lastActivityAt)} ago.${partial}\n\nChoose a different approach rather than blindly repeating the same delegation.` }],
+						details: { agent: agentName, status, error: true } satisfies DelegateStatsDetails,
+					};
+				}
+				return { content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}` }], details: { agent: agentName, status: "failed", error: true } satisfies DelegateStatsDetails };
 			}
 		},
 		renderResult(result, _options, theme) {
@@ -532,6 +574,26 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
+	async function inspectSubagents(ctx: ExtensionContext) {
+		await showSubagentInspector(
+			ctx,
+			() => [...runningSubagents.values()],
+			config.subagents?.staleWarningMinutes ?? DEFAULT_STALE_WARNING_MINUTES,
+		);
+	}
+
+	for (const key of normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT)) {
+		pi.registerShortcut(key as KeyId, {
+			description: "Inspect running subagents",
+			handler: inspectSubagents,
+		});
+	}
+
+	pi.registerCommand("subagents", {
+		description: "Inspect running delegated subagents",
+		handler: async (_args, ctx) => inspectSubagents(ctx),
+	});
+
 	pi.registerCommand("agent", {
 		description: "Select an agent: /agent <name>, /agent for picker, /agent none to clear",
 		getArgumentCompletions: (prefix: string) => {
@@ -627,6 +689,8 @@ export default function (pi: ExtensionAPI) {
 
 	// Close MCP server processes when the session ends.
 	pi.on("session_shutdown", async () => {
+		for (const handle of runningSubagents.values()) handle.stop("session");
+		runningSubagents.clear();
 		await mcpManager.disconnectAll();
 	});
 

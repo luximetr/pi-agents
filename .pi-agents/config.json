@@ -2,7 +2,13 @@
 	"defaultAgent": null,
 	"keybindings": {
 		"select": ["ctrl+shift+a", "alt+a"],
-		"rotate": ["ctrl+shift+q", "alt+q"]
+		"rotate": ["ctrl+shift+q", "alt+q"],
+		"inspect": "f9"
+	},
+	"subagents": {
+		"defaultTimeoutSeconds": 1800,
+		"staleWarningMinutes": 5,
+		"gracefulStopSeconds": 5
 	},
 	"mcpServers": {
 		"filesystem": {
