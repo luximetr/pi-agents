@@ -2,8 +2,9 @@
 // pi-agents — one-line installer for the pi-agents pi extension.
 //
 // Usage:
-//   pi-agents [install] [dir]     install into dir (default: current directory)
-//   pi-agents --global            install for all projects (user scope, ~/.pi/agent/settings.json)
+//   pi-agents [install] [dir]     install globally for ALL projects (default)
+//   pi-agents --global            same as the default (explicit user scope)
+//   pi-agents --local             install for the current project only
 //   pi-agents --legacy            classic install: symlink into <dir>/.pi/extensions/pi-agents/
 //   pi-agents --agents            also install the bundled sample agents (<dir>/.pi-agents/)
 //   pi-agents remove [dir]        uninstall (use the same scope flags you installed with)
@@ -13,11 +14,15 @@
 //   pi-agents --force             overwrite existing files
 //   pi-agents --help | --version  this help / version
 //
-// Default install delegates to pi's package manager (`pi install <repo> [-l]`):
-// the repo path is recorded in <dir>/.pi/settings.json and the extension is
-// loaded from the repo directly — nothing is copied and the target project
-// needs no node_modules of its own. `--legacy` keeps the classic symlink
-// layout (<dir>/.pi/extensions/pi-agents/) for pi setups without the
+// Default install delegates to pi's package manager (`pi install <repo>`): the
+// repo path is recorded in ~/.pi/agent/settings.json and the extension loads in
+// ALL projects — including git worktrees, which is why global is the default:
+// a project-local install is recorded in <dir>/.pi/settings.json, a file that
+// is never checked into git, so freshly created worktrees lose the extension.
+// Agent definitions stay per project (<git-root>/.pi-agents/, committed to the
+// repo, so they follow worktrees) and the extension falls back to the main
+// checkout for gitignored .pi-agents/.env secrets. `--legacy` keeps the classic
+// symlink layout (<dir>/.pi/extensions/pi-agents/) for pi setups without the
 // package manager or when you prefer auto-discovery.
 //
 // Zero runtime dependencies (node builtins only); runs as a script or as a
@@ -43,7 +48,7 @@ const fail = (msg) => { out(`error: ${msg}`, C.red); process.exit(1); };
 // argument parsing
 
 function parseArgs(argv) {
-  const opts = { command: "install", dir: null, repo: null, global: false, legacy: false, agents: false, yes: false, force: false, help: false, version: false };
+  const opts = { command: "install", dir: null, repo: null, global: false, local: false, legacy: false, agents: false, yes: false, force: false, help: false, version: false };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -52,6 +57,7 @@ function parseArgs(argv) {
       case "-v": case "--version": opts.version = true; break;
       case "-g": case "--global": opts.global = true; break;
       case "-l": case "--legacy": opts.legacy = true; break;
+      case "--local": opts.local = true; break;
       case "-a": case "--agents": opts.agents = true; break;
       case "-y": case "--yes": opts.yes = true; break;
       case "-f": case "--force": opts.force = true; break;
@@ -61,6 +67,8 @@ function parseArgs(argv) {
         positional.push(a);
     }
   }
+  if (opts.local && opts.global) fail("--local and --global are mutually exclusive");
+  if (opts.local && opts.legacy) fail("--local and --legacy are mutually exclusive (legacy is already project-local)");
   if (positional.length > 2) fail(`too many arguments: ${positional.join(" ")}`);
   if (positional[0] && !COMMANDS.includes(positional[0])) {
     // bare path: `pi-agents /path/to/project` == `pi-agents install /path/to/project`
@@ -132,6 +140,7 @@ const trustDecision = (dir) => {
 const persistTrust = (dir) => {
   const key = fs.realpathSync(dir);
   const storePath = path.join(userAgentDir(), "trust.json");
+  fs.mkdirSync(path.dirname(storePath), { recursive: true });
   let data = {};
   try { data = JSON.parse(fs.readFileSync(storePath, "utf8")); } catch { /* new store */ }
   if (data[key] === true) return;
@@ -179,10 +188,13 @@ function runPi(args, dir) {
 
 function settingsInstall(repo, dir, opts) {
   if (!piOnPath()) fail("`pi` not found on PATH — install pi first, or use --legacy for the symlink layout");
-  const args = ["install", repo, ...(opts.global ? [] : ["-l"])];
-  if (opts.yes && !opts.global) persistTrust(dir); // pre-approve: trust the project up front
+  // Default scope is global (all projects + worktrees). --local records the
+  // package in <dir>/.pi/settings.json instead — that file is not checked into
+  // git, so freshly created worktrees of this repo lose the extension.
+  const args = ["install", repo, ...(opts.local ? ["-l"] : [])];
+  if (opts.yes || opts.local) persistTrust(dir); // pre-approve trust of the target project
   let r = runPi(args, dir);
-  if (r.status !== 0 && !opts.global && /trusted/i.test(String(r.stderr ?? ""))) {
+  if (r.status !== 0 && opts.local && /trusted/i.test(String(r.stderr ?? ""))) {
     // pi refuses to touch project settings for untrusted projects. Grant the same
     // decision the interactive "Trust project folder?" prompt would record, then retry.
     out(`project ${dir} is not yet trusted — recording trust (equivalent of accepting pi's trust prompt)`, C.yellow);
@@ -190,10 +202,11 @@ function settingsInstall(repo, dir, opts) {
     r = runPi([...args, "--approve"], dir);
   }
   if (r.status !== 0) fail(`\`pi install\` exited with status ${r.status}`);
-  if (!opts.global && trustDecision(dir) !== true) {
-    // installing created .pi/settings.json, which makes pi require a trust decision
-    // at runtime; record it now so the extension actually loads (same as accepting
-    // pi's "Trust project folder?" prompt on first start).
+  // The extension itself loads everywhere when installed globally, but the
+  // project's .pi-agents/ agents and configs are project code: they load only
+  // in trusted projects, so record the decision now (same as accepting pi's
+  // "Trust project folder?" prompt on first start).
+  if (trustDecision(dir) !== true) {
     persistTrust(dir);
     out(`recorded trust for ${dir}`, C.dim);
   }
@@ -265,14 +278,16 @@ function rewriteImport(file, repo) {
 }
 
 function summary(dir, opts) {
+  const scope = opts.legacy ? "project (legacy symlinks)" : opts.local ? `project only (${path.join(dir, ".pi", "settings.json")})` : "ALL projects (user scope)";
   out("");
   out("Next steps:", C.bold);
-  out(`  1. Start pi in ${dir} — the extension loads automatically (trust already recorded)`);
-  out(`  2. /reload if pi is already running there`);
-  out(`  3. ctrl+shift+a → agent picker · ctrl+shift+q → rotate · /agent dev · /agent:help <question>`);
-  out(`  4. Agents: define project agents in ${path.join(dir, ".pi-agents")}/ or shared ones in ${path.join(userAgentDir(), "pi-agents")}/`);
+  out(`  1. The extension is installed for ${scope} — no project setup needed, works in git worktrees too`);
+  out(`  2. Start pi in ${dir} — the extension loads automatically (trust already recorded)`);
+  out(`  3. /reload if pi is already running there`);
+  out(`  4. ctrl+shift+a → agent picker · ctrl+shift+q → rotate · /agent dev · /agent:help <question>`);
+  out(`  5. Agents: define project agents in ${path.join(dir, ".pi-agents")}/ (commit them — they follow worktrees) or shared ones in ${path.join(userAgentDir(), "pi-agents")}/`);
   out("");
-  out(`Manage: pi-agents status · pi-agents remove${opts.global ? " --global" : ""} · pi list · pi remove`, C.dim);
+  out(`Manage: pi-agents status · pi-agents remove${opts.local || opts.legacy ? " --local" : ""} · pi list · pi remove`, C.dim);
 }
 
 // ---------------------------------------------------------------------------
@@ -283,9 +298,10 @@ function remove(repo, dir, opts) {
   if (opts.legacy) {
     done = legacyRemove(dir);
   } else if (piOnPath()) {
-    const args = ["remove", repo ?? "", ...(opts.global ? [] : ["-l"])].filter(Boolean);
+    // Default scope is global; --local removes a project-local install.
+    const args = ["remove", repo ?? "", ...(opts.local ? ["-l"] : [])].filter(Boolean);
     let r = runPi(args, dir);
-    if (r.status !== 0 && !opts.global && /trusted/i.test(String(r.stderr ?? ""))) {
+    if (r.status !== 0 && opts.local && /trusted/i.test(String(r.stderr ?? ""))) {
       out(`project ${dir} is not yet trusted — recording trust, retrying`, C.yellow);
       persistTrust(dir);
       r = runPi([...args, "--approve"], dir);
@@ -299,7 +315,7 @@ function remove(repo, dir, opts) {
   } else {
     out("`pi` not found on PATH — nothing to remove", C.yellow);
   }
-  if (!opts.legacy && !opts.global) legacyRemove(dir); // also drop a legacy layout if present in the target
+  if (opts.legacy || opts.local) legacyRemove(dir); // also drop a legacy layout if present in the target
   const agentsDir = opts.global ? path.join(userAgentDir(), "pi-agents") : path.join(dir, ".pi-agents");
   if (fs.existsSync(agentsDir)) out(`note: sample agents remain in ${agentsDir} — delete manually if unwanted`, C.dim);
   if (done) out("done", C.green);
@@ -389,8 +405,9 @@ function usage() {
   out(`pi-agents — one-line installer for the pi-agents pi extension`);
   out("");
   out("Usage:");
-  out("  pi-agents [install] [dir]      Install into dir (default: current dir)");
-  out("  pi-agents --global             Install for all projects (~/.pi/agent/settings.json)");
+  out("  pi-agents [install] [dir]      Install GLOBALLY for all projects (default; worktree-safe)");
+  out("  pi-agents --global             Same as the default, explicit user scope");
+  out("  pi-agents --local              Install for the current project only (not worktree-safe)");
   out("  pi-agents --legacy             Classic install: symlink into <dir>/.pi/extensions/pi-agents/");
   out("  pi-agents --agents             Also install sample agents into <dir>/.pi-agents/");
   out("  pi-agents remove [dir]         Uninstall (use the same scope flags you installed with)");
@@ -400,9 +417,14 @@ function usage() {
   out("  pi-agents --force              Overwrite existing files");
   out("  pi-agents --help, --version    This help / version");
   out("");
-  out("Default install delegates to pi's package manager (\`pi install <repo> [-l]\`):");
-  out("the repo path is recorded in <dir>/.pi/settings.json and the extension is");
-  out("loaded from there — nothing is copied, the target needs no node_modules.");
+  out("Default install delegates to pi's package manager (\`pi install <repo>\`):");
+  out("the repo path is recorded in ~/.pi/agent/settings.json and the extension");
+  out("loads in all projects — including git worktrees. A --local install is");
+  out("recorded in <dir>/.pi/settings.json, a file git never checks out, so");
+  out("worktrees of that repo lose the extension; prefer the default.");
+  out("Agent definitions stay per project: <git-root>/.pi-agents/, committed to");
+  out("the repo, so they follow worktrees (secrets: .pi-agents/.env are gitignored");
+  out("and fall back to the main checkout's copy inside worktrees).");
 }
 
 // ---------------------------------------------------------------------------

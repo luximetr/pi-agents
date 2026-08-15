@@ -15,6 +15,8 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 - Project: `<git-root>/.pi-agents/` (searched upward from cwd)
 - Global: `~/.pi/agent/pi-agents/` (same layout; project wins on name collision)
 
+Commit the project's `.pi-agents/` to the repo — it is the per-project configuration and follows every checkout and worktree. In a git worktree, agents come from the worktree's own checkout (exactly the commit it was created from), and the gitignored `.env` secrets fall back to the main checkout's `.pi-agents/.env` / `.pi-agents/<name>/.env`; a `.env` present in the worktree wins per key. Project agents and configs load only in trusted projects (the extension itself is installed globally); a worktree of an already-trusted repo is trusted automatically, since it contains the same committed code.
+
 ## Create an agent
 
 Two layouts:

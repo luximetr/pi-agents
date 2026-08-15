@@ -4,27 +4,31 @@ Opencode-style agents for [pi](https://github.com/earendil-dev/pi): define agent
 
 ## Install
 
-### From GitHub (published)
+### From GitHub (published) — recommended: global install
 
-Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own:
+Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.1.2        # all projects (user scope)
-pi install git:github.com/luximetr/pi-agents@v0.1.2 -l     # current project only
+pi install git:github.com/luximetr/pi-agents@v0.2.0        # all projects (user scope)
 ```
+
+Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
 
 To track the latest commit on `main` instead of a pinned release:
 
 ```bash
 pi install git:github.com/luximetr/pi-agents
-pi install git:github.com/luximetr/pi-agents -l
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.1.2`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart). Project-local installs load only in **trusted** projects — pi asks on first interactive start (or run `/trust`). Manage with `pi list` / `pi remove`.
+To update an existing installation, run the same command with the desired ref (for example `@v0.2.0`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+
+Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
+
+> **Project-local installs are not worktree-safe.** `pi install <repo> -l` records the extension in `<dir>/.pi/settings.json`, a file that git never checks out — freshly created worktrees of that repo have no extension. Prefer the global install; keep `-l` only for non-git or throwaway setups. If you already did a local install, migrate with `pi install git:github.com/luximetr/pi-agents` (global) and then `pi remove <repo> -l` in the project.
 
 ### With the `pi-agents` installer CLI
 
-For local-checkout installs, bundled sample agents (`--agents`), and non-interactive setups. **One line per project** — after linking the CLI once:
+For local-checkout installs, bundled sample agents (`--agents`), and non-interactive setups. **One line per machine** — after linking the CLI once:
 
 ```bash
 cd <this repo>
@@ -35,27 +39,30 @@ npm link            # once: makes the `pi-agents` command available on your mach
 then, in any project on your machine:
 
 ```bash
-pi-agents install            # install into the current project
-pi-agents install <dir>      # …or an explicit project dir
-pi-agents --global           # …or enable it in ALL projects (~/.pi/agent/settings.json)
+pi-agents install            # global install (default): extension in ALL projects, incl. worktrees
+pi-agents install <dir>      # …or explicit project dir; extension still installed globally
+pi-agents --local            # …or record the extension for this project only (not worktree-safe)
+pi-agents --legacy           # classic symlink layout: <dir>/.pi/extensions/pi-agents/
 pi-agents --agents           # also copy the bundled sample agents into <dir>/.pi-agents/
 ```
 
-The installer delegates to pi's package manager (`pi install <repo> [-l]`): the repo path
-is recorded in the project's `.pi/settings.json` (or `~/.pi/agent/settings.json` for
-`--global`) and the extension is loaded from the repo directly — nothing is copied and
+The installer delegates to pi's package manager (`pi install <repo>`): the repo path
+is recorded in `~/.pi/agent/settings.json` (or `<dir>/.pi/settings.json` with
+`--local`) and the extension is loaded from the repo directly — nothing is copied and
 the target project needs **no node_modules of its own** (deps resolve from this repo).
 It also records the project trust decision (same as accepting pi's "Trust project
-folder?" prompt), so the extension loads immediately. Manage with `pi-agents status`,
-`pi-agents remove`, or pi's own `pi list` / `pi remove`. The pi one-liner works too:
-`pi install <path-to-this-repo> -l` (add `-a` to trust).
+folder?" prompt), so the project's `.pi-agents/` agents load immediately. Manage
+with `pi-agents status`, `pi-agents remove`, or pi's own `pi list` / `pi remove`. The
+pi one-liner works too: `pi install <path-to-this-repo>` (add `-l` for project-local,
+`-a` to trust).
 
 `pi-agents` CLI reference:
 
 | Command | Effect |
 |---|---|
-| `pi-agents install [dir]` | install into dir (default: current dir) — the default command |
-| `pi-agents --global` | install for all projects (`~/.pi/agent/settings.json`) |
+| `pi-agents install [dir]` | global install (default) — extension for all projects |
+| `pi-agents --global` | same as the default, explicit user scope |
+| `pi-agents --local` | install for the current project only (`.pi/settings.json`; not worktree-safe) |
 | `pi-agents --agents` | also copy the bundled sample agents into `<dir>/.pi-agents/` (imports rewritten to point at the extension) |
 | `pi-agents --legacy` | classic layout: symlink into `<dir>/.pi/extensions/pi-agents/` |
 | `pi-agents remove [dir]` | uninstall (use the same scope flags you installed with) |
@@ -92,6 +99,16 @@ Project-local extensions load only in **trusted** projects — pi will ask on fi
 
 Either way: `/reload` in pi (or restart) to pick up the extension.
 
+## Worktrees
+
+The extension is installed globally, so it is present in every linked git worktree. What's per project is the **agent configuration**, and it follows the worktree automatically:
+
+- **Agents** — commit `.pi-agents/` to the repo; a worktree created from commit X checks out exactly the agents from X (same as the branch it was created from). Uncommitted edits in the main checkout are not carried over (that's git's normal worktree isolation).
+- **Secrets** — `.pi-agents/.env` and `.pi-agents/<name>/.env` are gitignored by design, so they do not exist in a fresh worktree. The extension detects the worktree (`git rev-parse --git-common-dir`) and falls back to reading the **main checkout's** `.env` files; a `.env` you create inside the worktree itself wins over the main checkout's per key.
+- **Trust** — pi asks before loading project code in a new folder. Because a worktree contains the same committed code as its main checkout, the extension answers the `project_trust` event itself: if the main checkout is already trusted, the worktree is trusted automatically (remembered, so it won't ask again).
+
+If the main checkout was never trusted, the normal pi trust prompt applies in the worktree too — `/trust` after accepting.
+
 ## Usage
 
 | Action | How |
@@ -109,7 +126,7 @@ Model and reasoning level are **not** part of an agent — pick them in pi itsel
 
 ## Defining agents
 
-Agents live in `.pi-agents/` — project root (walked up to git root) and global `~/.pi/agent/pi-agents/` (pi's agent config dir). Project agents override global ones with the same name.
+Agents live in `.pi-agents/` — project root (walked up to git root) and global `~/.pi/agent/pi-agents/` (pi's agent config dir). Project agents override global ones with the same name. Commit the project's `.pi-agents/` to the repo: every checkout and worktree then gets the same agents. In a git worktree the extension loads the committed agents from the worktree itself (exactly the ones from the commit the worktree was created from) and falls back to the main checkout for the gitignored `.env` secrets (see [Worktrees](#worktrees)).
 
 ### Folder per agent (recommended)
 
@@ -305,7 +322,7 @@ export default {
 
 Header values can reference env vars as `${VAR}` so secrets never sit in a committed config: `"Authorization": "Bearer ${DOC_MCP_TOKEN}"` resolves at connect time (with a warning if unset). `insecure: true` skips TLS verification for self-signed certs (common on Tailscale IPs).
 
-For per-project secrets without shell setup: put the values in a gitignored `.pi-agents/.env` (e.g. `DOC_MCP_TOKEN=...`; template in `.pi-agents/.env.example`). It's loaded automatically — project `.env` wins over the global `~/.pi/pi-agents/.env`, and your real shell environment wins over both. Nothing to key in per launch.
+For per-project secrets without shell setup: put the values in a gitignored `.pi-agents/.env` (e.g. `DOC_MCP_TOKEN=...`; template in `.pi-agents/.env.example`). It's loaded automatically — project `.env` wins over the global `~/.pi/pi-agents/.env`, and your real shell environment wins over both. Nothing to key in per launch. Inside a git worktree, `.pi-agents/.env` is not checked out; the extension falls back to the main checkout's copy (a `.env` you create in the worktree itself still wins per key).
 
 Servers can also be **per agent**: define `mcpServers` inside `agent.ts` (same shape) and only that agent can use them — other agents get a "server not defined" warning. The key then lives in a gitignored `.pi-agents/<name>/.env` (agent dir). Resolution order: shell env → agent `.env` → project `.env` → global `.env`. Example:
 
@@ -394,7 +411,9 @@ The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent insp
 
 ## How it works
 
-- `session_start`: agents are discovered and loaded; the selection is restored (priority: `--agent` flag → current session selection → selection from the session replaced by `/new` or `/clone` → `config.defaultAgent` → `default: true` agent → first agent)
+- `session_start`: agents are discovered and loaded; the selection is restored (priority: `--agent` flag → current session selection → selection from the session replaced by `/new` or `/clone` → `config.defaultAgent` → `default: true` agent → first agent). Project agents/config load only in **trusted** projects (`ctx.isProjectTrusted()`); the extension itself is global, so in untrusted projects only global agents are available
+- `project_trust`: when pi asks about a linked worktree whose main checkout is already trusted, the extension answers `trusted: yes` (remembered) — worktrees contain the same committed code as the trusted main checkout
+- Worktrees: agents come from the worktree's committed `.pi-agents/`; gitignored `.env` secrets fall back to the main checkout (detected via `git rev-parse --git-common-dir`), per key, worktree `.env` wins
 - Applying an agent: `pi.setActiveTools(...)` restricts tools; `before_agent_start` appends the agent's system prompt to every turn
 - MCP: servers from merged `config.json` are connected on demand when an agent with `mcp: [...]` is applied; their tools are registered as `<server>__<tool>` and activated together with the tool allowlist
 - Selection is persisted via `pi.appendEntry`; it survives restarts and is inherited by `/new` and `/clone` sessions
@@ -404,3 +423,4 @@ The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent insp
 
 - MCP supports stdio and streamable HTTP transports (no SSE); server config is static (no dynamic add/remove at runtime)
 - Agents are discovered at session start; edits to `.pi-agents/` need `/reload` (or a new session) to take effect for shortcuts/commands — the picker always reads fresh definitions
+- Project-local installs (`pi install <repo> -l` / `pi-agents --local`) are recorded in `.pi/settings.json`, which git never checks out — freshly created worktrees of such a project have no extension. Use the default global install instead (the `.pi-agents/` configs remain per project)

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -177,6 +178,8 @@ function normalizeAgent(
 	filePath: string,
 	source: "global" | "project",
 	fallbackName?: string,
+	/** Additional dirs whose .env files fill in missing agent secrets (main checkout of a worktree). */
+	envFallbackDirs?: string[],
 ): DiscoveredAgent | null {
 	if (!raw || typeof raw !== "object") {
 		console.error(`pi-agents: ${filePath} must export an agent config object`);
@@ -208,8 +211,10 @@ function normalizeAgent(
 
 	// Agent-local MCP servers + secrets (`.env` in the agent dir) — only this
 	// agent can use them; project/global servers with the same name are overridden.
+	// In a linked worktree the gitignored `.env` lives in the main checkout, so
+	// fall back to it: the agent's own dir wins, the main checkout fills gaps.
 	const mcpServers = normalizeMcpServers(cfg.mcpServers);
-	const agentEnv = loadEnvFile(dir);
+	const agentEnv = mergeEnv(loadEnvFile(dir), ...(envFallbackDirs ?? []).map((fallback) => loadEnvFile(fallback)));
 
 	const customTools = normalizeCustomTools(cfg.customTools);
 
@@ -298,6 +303,7 @@ async function loadAgentFile(
 	filePath: string,
 	source: "global" | "project",
 	fallbackName?: string,
+	envFallbackDirs?: string[],
 ): Promise<DiscoveredAgent | null> {
 	try {
 		let mod: unknown;
@@ -309,7 +315,7 @@ async function loadAgentFile(
 		let config: unknown = (mod as { default?: unknown })?.default ?? mod;
 		if (typeof config === "function") config = await (config as () => unknown)();
 		if (config && typeof (config as Promise<unknown>).then === "function") config = await config;
-		return normalizeAgent(config, filePath, source, fallbackName);
+		return normalizeAgent(config, filePath, source, fallbackName, envFallbackDirs);
 	} catch (err) {
 		console.error(`pi-agents: failed to load ${filePath}: ${err}`);
 		return null;
@@ -332,6 +338,44 @@ function listAgentDirs(dir: string): string[] {
 
 function isGitRootOrFsRoot(dir: string): boolean {
 	return fs.existsSync(path.join(dir, ".git")) || path.dirname(dir) === dir;
+}
+
+/**
+ * When `cwd` is inside a linked git worktree, return the main checkout root
+ * (the directory that owns `.git`). The gitignored `.pi-agents/.env` secrets
+ * are not checked out into worktrees, so the extension falls back to reading
+ * them from the main checkout. Returns null outside a worktree or a git repo.
+ */
+export function findMainCheckoutRoot(cwd: string): string | null {
+	try {
+		const toplevel = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, stdio: "pipe", encoding: "utf8" }).trim();
+		if (!toplevel) return null;
+		const common = execFileSync("git", ["rev-parse", "--git-common-dir"], { cwd: toplevel, stdio: "pipe", encoding: "utf8" }).trim();
+		const commonDir = path.resolve(toplevel, common);
+		// Main checkout: the common git dir is its own `.git`. A linked worktree
+		// points into the main checkout's git dir (`.git/worktrees/<name>`).
+		if (path.resolve(commonDir) === path.resolve(toplevel, ".git")) return null;
+		return path.dirname(commonDir);
+	} catch {
+		return null; // not a git repository, or git unavailable
+	}
+}
+
+/** The main checkout's `.pi-agents` dir when cwd is a linked worktree of a repo that has one. */
+function findMainCheckoutAgentsDir(cwd: string): string | null {
+	const mainRoot = findMainCheckoutRoot(cwd);
+	if (!mainRoot) return null;
+	const dir = path.join(mainRoot, ".pi-agents");
+	return fs.existsSync(dir) && fs.statSync(dir).isDirectory() ? dir : null;
+}
+
+/** Merge env maps; later sources win. */
+function mergeEnv(...sources: Array<Record<string, string> | undefined>): Record<string, string> {
+	const merged: Record<string, string> = {};
+	for (const source of sources) {
+		if (source) Object.assign(merged, source);
+	}
+	return merged;
 }
 
 /** Find nearest project .pi-agents dir walking up from cwd. */
@@ -468,11 +512,25 @@ function normalizeMcpServers(raw: unknown): Record<string, McpServerConfig> | un
 	return Object.keys(mcpServers).length > 0 ? mcpServers : undefined;
 }
 
+export interface DiscoverOptions {
+	/**
+	 * Include project-scope agents and config. Defaults to true. Pass false for
+	 * untrusted projects — agents are code and project configs can spawn
+	 * processes, so they must respect pi's project trust like project-local
+	 * extensions do.
+	 */
+	includeProject?: boolean;
+}
+
 /** Merged config.json from global + project dirs (project wins). */
-export function loadConfig(cwd: string): PiAgentsConfig {
+export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig {
 	const globalConfig = loadConfigFrom(getGlobalAgentsDir());
-	const projectDir = findProjectAgentsDir(cwd);
+	const projectDir = opts?.includeProject === false ? null : findProjectAgentsDir(cwd);
 	const projectConfig = projectDir ? loadConfigFrom(projectDir) : {};
+	// In a linked worktree the gitignored .pi-agents/.env lives in the main
+	// checkout; the worktree's own .env (when present) still wins per key.
+	const mainAgentsDir = projectDir ? findMainCheckoutAgentsDir(cwd) : null;
+	const env = mergeEnv(globalConfig.env, mainAgentsDir ? loadEnvFile(mainAgentsDir) : undefined, projectConfig.env);
 	return {
 		defaultAgent: projectConfig.defaultAgent ?? globalConfig.defaultAgent,
 		keybindings: {
@@ -492,8 +550,36 @@ export function loadConfig(cwd: string): PiAgentsConfig {
 			},
 		},
 		mcpServers: { ...globalConfig.mcpServers, ...projectConfig.mcpServers },
-		env: { ...globalConfig.env, ...projectConfig.env },
+		env,
 	};
+}
+
+/**
+ * Read pi's saved trust decision for a directory (true/false/undefined),
+ * walking up parent directories exactly like pi's own trust store lookup.
+ * Keys are realpaths. Returns undefined when nothing is recorded.
+ */
+export function readTrustDecision(dir: string): boolean | undefined {
+	let key: string;
+	try {
+		key = fs.realpathSync(dir);
+	} catch {
+		return undefined;
+	}
+	let data: Record<string, unknown> = {};
+	try {
+		data = JSON.parse(fs.readFileSync(path.join(getAgentDir(), "trust.json"), "utf8"));
+	} catch {
+		return undefined;
+	}
+	let current = key;
+	while (true) {
+		const value = data[current];
+		if (value === true || value === false) return value;
+		const parent = path.dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
 }
 
 /** Global agents dir: ~/.pi/pi-agents */
@@ -503,20 +589,25 @@ export function getGlobalAgentsDir(): string {
 
 /**
  * Discover all agents from global + project dirs (project wins on name collision).
- * Also returns the merged config.json settings.
+ * Also returns the merged config.json settings. Pass `includeProject: false`
+ * for untrusted projects to skip project agents and project config entirely
+ * (global agents/config still apply everywhere).
  */
-export async function discoverAgents(cwd: string): Promise<{ agents: DiscoveredAgent[]; config: PiAgentsConfig }> {
+export async function discoverAgents(cwd: string, opts?: DiscoverOptions): Promise<{ agents: DiscoveredAgent[]; config: PiAgentsConfig }> {
 	const globalDir = getGlobalAgentsDir();
-	const projectDir = findProjectAgentsDir(cwd);
+	const projectDir = opts?.includeProject === false ? null : findProjectAgentsDir(cwd);
+	// Secrets for project agents in a linked worktree come from the main checkout.
+	const mainAgentsDir = projectDir ? findMainCheckoutAgentsDir(cwd) : null;
 
 	const byName = new Map<string, DiscoveredAgent>();
 
-	async function loadFrom(dir: string, source: "global" | "project") {
+	async function loadFrom(dir: string, source: "global" | "project", envFallbackDir?: string) {
 		// Folder per agent: <dir>/<name>/agent.ts (or index.ts)
 		for (const agentDir of listAgentDirs(dir)) {
 			const filePath = [path.join(agentDir, "agent.ts"), path.join(agentDir, "index.ts")].find((p) => fs.existsSync(p));
 			if (filePath) {
-				const agent = await loadAgentFile(filePath, source);
+				const fallback = envFallbackDir ? [path.join(envFallbackDir, path.basename(agentDir))] : undefined;
+				const agent = await loadAgentFile(filePath, source, undefined, fallback);
 				if (agent) byName.set(agent.name, agent);
 			}
 		}
@@ -524,16 +615,16 @@ export async function discoverAgents(cwd: string): Promise<{ agents: DiscoveredA
 		for (const filePath of listAgentFiles(dir)) {
 			if (filePath.endsWith("config.json")) continue;
 			const fallbackName = path.basename(filePath).replace(/\.(ts|js|mjs)$/, "");
-			const agent = await loadAgentFile(filePath, source, fallbackName);
+			const agent = await loadAgentFile(filePath, source, fallbackName, envFallbackDir ? [envFallbackDir] : undefined);
 			if (agent) byName.set(agent.name, agent);
 		}
 	}
 
 	await loadFrom(globalDir, "global");
-	if (projectDir) await loadFrom(projectDir, "project");
+	if (projectDir) await loadFrom(projectDir, "project", mainAgentsDir ?? undefined);
 
 	return {
 		agents: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)),
-		config: loadConfig(cwd),
+		config: loadConfig(cwd, opts),
 	};
 }

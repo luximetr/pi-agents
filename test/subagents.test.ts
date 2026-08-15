@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { discoverAgents } from "../agents.ts";
+import { discoverAgents, findMainCheckoutRoot } from "../agents.ts";
 import extension, { matchesDeniedPath } from "../index.ts";
 import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
 import { showSubagentInspector } from "../ui.ts";
@@ -43,7 +43,7 @@ test("end to end: active agent blocks denied file-tool calls", async () => {
 		};
 		extension(pi);
 		const theme = { fg: (role: string, text: string) => text, getColorMode: () => "truecolor" };
-		const ctx: any = { cwd: root, sessionManager: { getSessionFile: () => undefined }, ui: { theme, setStatus: () => {}, notify: () => {} } };
+		const ctx: any = { cwd: root, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => undefined }, ui: { theme, setStatus: () => {}, notify: () => {} } };
 		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
 		const call = handlers.get("tool_call")!;
 		assert.equal(call({ toolName: "read", input: { path: ".env" } })?.block, true);
@@ -133,7 +133,7 @@ test("execution timeout stops a stalled subagent and preserves diagnostic state"
 		`);
 		await chmod(fakePi, 0o755);
 		await assert.rejects(
-			runSubagent("worker", "stall", root, noAbort, { executable: fakePi, timeoutSeconds: 0.5, gracefulStopSeconds: 0.01 }),
+			runSubagent("worker", "stall", root, noAbort, { executable: fakePi, timeoutSeconds: 2, gracefulStopSeconds: 0.01 }),
 			(error: unknown) => {
 				assert.ok(error instanceof SubagentStoppedError);
 				assert.equal(error.reason, "timeout");
@@ -332,7 +332,7 @@ function bootExtension(root: string) {
 	};
 	extension(pi);
 	const theme = { fg: (role: string, text: string) => text, getColorMode: () => "truecolor" };
-	const ctx: any = { cwd: root, sessionManager: { getSessionFile: () => undefined }, ui: { theme, setStatus: () => {}, notify: () => {} } };
+	const ctx: any = { cwd: root, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => undefined }, ui: { theme, setStatus: () => {}, notify: () => {} } };
 	return { handlers, registered, ctx };
 }
 
@@ -442,6 +442,68 @@ test("end to end: delegate with useWorktree isolates the subagent", async () => 
 	} finally {
 		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
 		else process.env.PI_CODING_AGENT_BIN = previousBin;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("worktree discovery falls back to the main checkout's gitignored .env files", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-worktree-env-"));
+	try {
+		execFileSync("git", ["init", "-q"], { cwd: root });
+		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
+		execFileSync("git", ["config", "user.name", "Test User"], { cwd: root });
+		// Committed: agents + config. Not committed: .env secrets (gitignored).
+		await writeFile(path.join(root, ".gitignore"), ".env\n");
+		await mkdir(path.join(root, ".pi-agents", "dev"), { recursive: true });
+		await writeFile(path.join(root, ".pi-agents", "dev", "agent.ts"), `
+			export default { name: "dev", description: "Dev", mcp: ["gh"] };
+		`);
+		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({ mcpServers: { gh: { command: "npx", args: ["x"] } } }));
+		execFileSync("git", ["add", "."], { cwd: root });
+		execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: root });
+
+		// Secrets exist only in the main checkout.
+		await writeFile(path.join(root, ".pi-agents", ".env"), "PROJECT_SECRET=main\n");
+		await writeFile(path.join(root, ".pi-agents", "dev", ".env"), "GH_TOKEN=main-token\n");
+
+		const worktree = path.join(root, "wt");
+		execFileSync("git", ["worktree", "add", "-q", "-b", "wt-branch", worktree], { cwd: root });
+		// git reports canonical (realpath) paths; /tmp is a symlink on macOS.
+		assert.equal(findMainCheckoutRoot(worktree), realpathSync(root));
+		assert.equal(findMainCheckoutRoot(root), null);
+
+		const result = await discoverAgents(worktree);
+		const dev = result.agents.find((agent) => agent.name === "dev");
+		assert.ok(dev, "worktree discovers committed project agents");
+		assert.equal(dev?.env?.GH_TOKEN, "main-token");
+		assert.equal(result.config.env?.PROJECT_SECRET, "main");
+		assert.equal(result.config.mcpServers?.gh?.command, "npx");
+
+		// A .env created in the worktree itself wins per key over the main checkout.
+		await writeFile(path.join(worktree, ".pi-agents", ".env"), "PROJECT_SECRET=worktree\n");
+		const result2 = await discoverAgents(worktree);
+		assert.equal(result2.config.env?.PROJECT_SECRET, "worktree");
+		assert.equal(result2.config.env?.GH_TOKEN, undefined); // agent-level, not project-level
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("discoverAgents includeProject:false skips project agents and config", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-untrusted-"));
+	try {
+		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
+		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
+			export default { name: "lead", description: "Coordinator", default: true };
+		`);
+		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({ defaultAgent: "lead" }));
+		const result = await discoverAgents(root, { includeProject: false });
+		assert.equal(result.agents.find((agent) => agent.name === "lead"), undefined);
+		assert.equal(result.config.defaultAgent, undefined);
+		const trusted = await discoverAgents(root);
+		assert.equal(trusted.agents.find((agent) => agent.name === "lead")?.description, "Coordinator");
+		assert.equal(trusted.config.defaultAgent, "lead");
+	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
 });

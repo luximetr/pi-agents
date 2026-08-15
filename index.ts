@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type KeyId } from "@earendil-works/pi-tui";
-import { discoverAgents, loadConfig, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, loadConfig, readTrustDecision, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { showAgentSelector, showSubagentInspector, updateStatus } from "./ui.ts";
 import { SubagentStoppedError, runSubagent, type RunningSubagentHandle, type SubagentUsage, type SubagentWorktreeInfo } from "./subagents.ts";
@@ -380,9 +380,10 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Keybindings come from config.json (global + project, project wins).
-	// Load at extension load time: cwd is the directory pi started in.
-	config = loadConfig(process.cwd());
+	// Keybindings come from config.json (global + project, project wins). The
+	// global config is safe to read at load time; project keybindings are added
+	// at session_start once the project trust decision is known.
+	config = loadConfig(process.cwd(), { includeProject: false });
 
 	// Deny direct file access for the active agent. Bash is intentionally not
 	// intercepted here; shell sandboxing is a separate, stronger concern.
@@ -571,25 +572,50 @@ export default function (pi: ExtensionAPI) {
 		else await applyAgent(nextName, ctx);
 	}
 
+	// --- Trust: worktrees inherit the main checkout's decision ---
+	// The extension is installed globally, but project `.pi-agents/` agents and
+	// configs are project code (agents are jiti-imported, configs can spawn MCP
+	// processes), so they must respect pi's project trust like project-local
+	// extensions do. A linked worktree contains the same committed code as its
+	// main checkout — when the main checkout is already trusted, trust the
+	// worktree without prompting (and remember the decision for next time).
+	// Everything else stays undecided and pi's normal trust flow applies.
+	pi.on("project_trust", (event) => {
+		const cwd = event.cwd;
+		// An explicit denial of this folder always stands.
+		if (readTrustDecision(cwd) === false) return { trusted: "no" as const };
+		if (readTrustDecision(cwd) === true) return { trusted: "undecided" as const }; // already trusted — let pi proceed
+		const mainRoot = findMainCheckoutRoot(cwd);
+		if (mainRoot && readTrustDecision(mainRoot) === true) {
+			return { trusted: "yes" as const, remember: true };
+		}
+		return { trusted: "undecided" as const };
+	});
+
 	// --- UI registration (bindings configurable via config.json, one key or several) ---
 
-	for (const key of normalizeShortcutKeys(config.keybindings?.select, DEFAULT_SELECT_SHORTCUT)) {
-		pi.registerShortcut(key as KeyId, {
-			description: "Select agent",
-			handler: async (ctx) => {
-				await showPicker(ctx);
-			},
-		});
+	// Keys already registered for this extension instance (defaults + global
+	// config at load time); project config may add more at session_start.
+	const registeredShortcutKeys = new Set<string>();
+	function registerConfiguredShortcuts(
+		keys: string[],
+		description: string,
+		handler: (ctx: ExtensionContext) => Promise<void>,
+	) {
+		for (const key of keys) {
+			if (registeredShortcutKeys.has(key)) continue;
+			registeredShortcutKeys.add(key);
+			pi.registerShortcut(key as KeyId, { description, handler });
+		}
 	}
 
-	for (const key of normalizeShortcutKeys(config.keybindings?.rotate, DEFAULT_ROTATE_SHORTCUT)) {
-		pi.registerShortcut(key as KeyId, {
-			description: "Rotate agent",
-			handler: async (ctx) => {
-				await rotateAgent(ctx);
-			},
-		});
-	}
+	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.select, DEFAULT_SELECT_SHORTCUT), "Select agent", async (ctx) => {
+		await showPicker(ctx);
+	});
+
+	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.rotate, DEFAULT_ROTATE_SHORTCUT), "Rotate agent", async (ctx) => {
+		await rotateAgent(ctx);
+	});
 
 	async function inspectSubagents(ctx: ExtensionContext) {
 		await showSubagentInspector(
@@ -599,12 +625,7 @@ export default function (pi: ExtensionAPI) {
 		);
 	}
 
-	for (const key of normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT)) {
-		pi.registerShortcut(key as KeyId, {
-			description: "Inspect running subagents",
-			handler: inspectSubagents,
-		});
-	}
+	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Inspect running subagents", inspectSubagents);
 
 	pi.registerCommand("subagents", {
 		description: "Inspect running delegated subagents",
@@ -665,11 +686,23 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (event, ctx) => {
 		sessionCwd = ctx.cwd;
 		sessionSubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
-		const result = await discoverAgents(ctx.cwd);
+		// Project agents/config are project code: only load them when pi trusts
+		// this project (the extension itself is installed globally).
+		const trusted = ctx.isProjectTrusted ? ctx.isProjectTrusted() : true;
+		if (!trusted && findProjectAgentsDir(ctx.cwd)) {
+			ctx.ui.notify("Project .pi-agents/ not loaded — this project folder is not trusted by pi (run /trust)", "warning");
+		}
+		const result = await discoverAgents(ctx.cwd, { includeProject: trusted });
 		agents = result.agents;
 		config = result.config;
 		activeName = undefined;
 		activeAgent = undefined;
+
+		// Project keybindings (trusted projects) add aliases on top of the
+		// defaults + global config registered at load time.
+		registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.select, DEFAULT_SELECT_SHORTCUT), "Select agent", async (sc) => { await showPicker(sc); });
+		registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.rotate, DEFAULT_ROTATE_SHORTCUT), "Rotate agent", async (sc) => { await rotateAgent(sc); });
+		registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Inspect running subagents", inspectSubagents);
 
 		// Restore this session first. A newly-created session has no entries, so
 		// inherit the selection from the session it replaced (the OpenCode-style
