@@ -111,7 +111,8 @@ function textFromMessage(message: unknown): string {
 		.join("");
 }
 
-function formatArgs(args: unknown): string {
+/** Render tool arguments as a compact single-line suffix for progress output. */
+export function formatArgs(args: unknown): string {
 	if (args === undefined || args === null) return "";
 	try {
 		const value = JSON.stringify(args);

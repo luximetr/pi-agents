@@ -145,7 +145,7 @@ export interface PiAgentsConfig {
 	 */
 	mcpServers?: Record<string, McpServerConfig>;
 	/**
-	 * Secrets loaded from `.env` files (global `~/.pi/pi-agents/.env` and
+	 * Secrets loaded from `.env` files (global `~/.pi/agent/pi-agents/.env` and
 	 * project `.pi-agents/.env`, project wins). Referenced from config as
 	 * `${VAR}` — the shell environment takes precedence over both.
 	 */
@@ -582,7 +582,7 @@ export function readTrustDecision(dir: string): boolean | undefined {
 	}
 }
 
-/** Global agents dir: ~/.pi/pi-agents */
+/** Global agents dir: ~/.pi/agent/pi-agents */
 export function getGlobalAgentsDir(): string {
 	return path.join(getAgentDir(), "pi-agents");
 }

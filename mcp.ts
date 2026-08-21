@@ -2,8 +2,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import * as fs from "node:fs";
 import https from "node:https";
 import type { IncomingHttpHeaders, OutgoingHttpHeaders } from "node:http";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 import { Type } from "typebox";
@@ -11,6 +14,17 @@ import type { McpServerConfig } from "./agents.ts";
 
 /** Separator between server name and tool name in the registered pi tool name. */
 const TOOL_SEP = "__";
+
+/** Client version reported to MCP servers (kept in sync with package.json). */
+const CLIENT_VERSION = (() => {
+	try {
+		const modulePath = fileURLToPath(import.meta.url);
+		const pkg = JSON.parse(fs.readFileSync(path.join(path.dirname(fs.realpathSync(modulePath)), "package.json"), "utf8")) as { version?: unknown };
+		return typeof pkg.version === "string" && pkg.version ? pkg.version : "0.0.0";
+	} catch {
+		return "0.0.0";
+	}
+})();
 
 /**
  * Structural view of an MCP callTool result. The SDK's inferred return type
@@ -178,7 +192,7 @@ export class McpManager {
 	}
 
 	private async doConnect(name: string, cfg: McpServerConfig, env: Record<string, string>): Promise<string[]> {
-		const client = new Client({ name: "pi-agents", version: "0.1.0" }, { capabilities: {} });
+		const client = new Client({ name: "pi-agents", version: CLIENT_VERSION }, { capabilities: {} });
 		const transport = cfg.url ? this.makeHttpTransport(name, cfg, env) : this.makeStdioTransport(name, cfg);
 
 		try {
@@ -239,8 +253,10 @@ export class McpManager {
 
 		return new StreamableHTTPClientTransport(url, {
 			requestInit: { headers },
-			// Skip TLS verification for self-signed certs (insecure: true).
-			fetch: cfg.insecure ? (insecureFetch as typeof fetch) : undefined,
+			// Skip TLS verification for self-signed certs (insecure: true). Only
+			// meaningful for https URLs — plain http has no certificate to verify,
+			// and insecureFetch speaks https exclusively.
+			fetch: cfg.insecure && url.protocol === "https:" ? (insecureFetch as typeof fetch) : undefined,
 		});
 	}
 

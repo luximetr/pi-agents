@@ -6,7 +6,7 @@ import { Text, type KeyId } from "@earendil-works/pi-tui";
 import { discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, loadConfig, readTrustDecision, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { showAgentSelector, showSubagentInspector, updateStatus } from "./ui.ts";
-import { SubagentStoppedError, runSubagent, type RunningSubagentHandle, type SubagentUsage, type SubagentWorktreeInfo } from "./subagents.ts";
+import { formatArgs, SubagentStoppedError, runSubagent, type RunningSubagentHandle, type SubagentUsage, type SubagentWorktreeInfo } from "./subagents.ts";
 
 const STATE_ENTRY = "pi-agents-state";
 // Function keys are encoded as escape sequences by iTerm2 and are passed
@@ -37,16 +37,6 @@ type SubagentStats = {
 	cost: number;
 	models: Set<string>;
 };
-
-function formatToolArgs(args: unknown): string {
-	if (args === undefined || args === null) return "";
-	try {
-		const text = JSON.stringify(args);
-		return text && text !== "{}" ? ` ${text}` : "";
-	} catch {
-		return " [args unavailable]";
-	}
-}
 
 /** Match a denied path glob against both the cwd-relative path and basename. */
 export function matchesDeniedPath(target: string, cwd: string, patterns: string[]): boolean {
@@ -326,7 +316,7 @@ export default function (pi: ExtensionAPI) {
 							case "started": update(`▶ ${event.agent}: running`); break;
 							case "text": stream(event.delta); break;
 							case "stats": recordSubagentUsage(event.usage, callSubagentStats); refreshStatus(ctx); publish(); break;
-							case "tool-start": update(`→ ${event.tool}${formatToolArgs(event.args)}`); break;
+							case "tool-start": update(`→ ${event.tool}${formatArgs(event.args)}`); break;
 							case "tool-update": update(`  ${event.text}`); break;
 							case "tool-end": update(`${event.error ? "✗" : "✓"} ${event.tool}`); break;
 							case "finished": update(`✓ ${agentName}: finished`); break;
@@ -350,7 +340,7 @@ export default function (pi: ExtensionAPI) {
 					const snapshot = err.snapshot;
 					const status = err.reason === "timeout" ? "timed_out" : "interrupted";
 					const operation = snapshot.currentTool
-						? `\nCurrent operation: ${snapshot.currentTool}${formatToolArgs(snapshot.currentToolArgs)}`
+						? `\nCurrent operation: ${snapshot.currentTool}${formatArgs(snapshot.currentToolArgs)}`
 						: `\nPhase: ${snapshot.phase}`;
 					const partial = snapshot.partialText.trim() ? `\n\nPartial response:\n${snapshot.partialText.trim()}` : "";
 					const reason = err.reason === "timeout"
@@ -547,7 +537,7 @@ export default function (pi: ExtensionAPI) {
 	async function showPicker(ctx: ExtensionContext) {
 		if (agents.length === 0) {
 			ctx.ui.notify(
-				"No agents defined. Create .pi-agents/<name>/agent.ts in this project or ~/.pi/pi-agents/<name>/agent.ts",
+				"No agents defined. Create .pi-agents/<name>/agent.ts in this project or ~/.pi/agent/pi-agents/<name>/agent.ts",
 				"warning",
 			);
 			return;
