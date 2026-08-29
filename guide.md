@@ -31,7 +31,7 @@ export default {
   name: "browser",
   description: "Drives a browser via MCP.",
   tools: ["read", "bash"],            // allowlist; omit = keep current, [] = no tools
-  subagents: ["developer"],            // optional delegation allowlist
+  subagents: ["developer"],            // optional delegation allowlist; object entries may set model
   mcp: ["playwright"],                // MCP servers to connect (opt-in!)
   // color: "#ff8800",                 // theme role or hex; auto-assigned by name when omitted
   systemPrompt: "You are...",         // inline…
@@ -61,12 +61,15 @@ An agent can delegate isolated work to another agent with the built-in `delegate
 export default {
   name: "lead",
   description: "Coordinates specialists.",
-  subagents: ["developer", "researcher"],
+  subagents: [
+    "developer",
+    { name: "researcher", model: "anthropic/claude-sonnet-5" },
+  ],
   systemPrompt: "Delegate implementation and research; keep the high-level context short.",
 };
 ```
 
-`subagents` is an allowlist. The child runs as a fresh ephemeral `pi --mode rpc --no-session --agent <name>` process and only its final answer is returned to the parent. Nested delegation is limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
+`subagents` is an allowlist. A string entry uses Pi's normal default model selection. An object entry fixes the model for that parent-to-child delegation and launches the child with `--model <value>`; different parents may select different models for the same child. The child runs as a fresh ephemeral `pi --mode rpc --no-session --agent <name>` process and only its final answer is returned to the parent. Nested delegation is limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
 
 `delegate` takes `agent`, `task`, an optional `useWorktree` boolean (default `false`), and an optional total execution limit:
 

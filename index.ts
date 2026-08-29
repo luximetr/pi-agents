@@ -321,7 +321,8 @@ export default function (pi: ExtensionAPI) {
 				requestedTimeout === undefined ? undefined : Number(requestedTimeout),
 				config.subagents?.defaultTimeoutSeconds,
 			);
-			if (!parent?.subagents?.includes(agentName)) {
+			const subagent = parent?.subagents?.find((candidate) => candidate.name === agentName);
+			if (!subagent) {
 				return { content: [{ type: "text", text: `Delegation denied: ${agentName} is not an allowed subagent of ${parent?.name ?? "the current agent"}.` }], details: {} };
 			}
 			if (!agents.some((a) => a.name === agentName)) {
@@ -379,6 +380,7 @@ export default function (pi: ExtensionAPI) {
 				};
 				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
 					useWorktree,
+					model: subagent.model,
 					id: String(toolCallId),
 					timeoutSeconds,
 					gracefulStopSeconds: config.subagents?.gracefulStopSeconds ?? DEFAULT_GRACEFUL_STOP_SECONDS,
@@ -564,10 +566,10 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			base = pi.getActiveTools();
 		}
-		const allowedSubagents = (agent.subagents ?? []).filter((name) => agents.some((candidate) => candidate.name === name));
-		const unknownSubagents = (agent.subagents ?? []).filter((name) => !agents.some((candidate) => candidate.name === name));
+		const allowedSubagents = (agent.subagents ?? []).filter((subagent) => agents.some((candidate) => candidate.name === subagent.name));
+		const unknownSubagents = (agent.subagents ?? []).filter((subagent) => !agents.some((candidate) => candidate.name === subagent.name));
 		if (unknownSubagents.length > 0 && !opts?.silent) {
-			ctx.ui.notify(`Agent "${name}": unknown subagents: ${unknownSubagents.join(", ")}`, "warning");
+			ctx.ui.notify(`Agent "${name}": unknown subagents: ${unknownSubagents.map((subagent) => subagent.name).join(", ")}`, "warning");
 		}
 		const delegationTools = allowedSubagents.length > 0 ? [DELEGATE_TOOL] : [];
 		const active = [...new Set([...base, ...customToolNames, ...mcpToolNames, ...delegationTools])];

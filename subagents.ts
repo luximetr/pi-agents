@@ -86,6 +86,8 @@ export interface RunSubagentOptions {
 	onHandle?: (handle: RunningSubagentHandle | undefined) => void;
 	onWorktreeCreated?: (worktree: SubagentWorktreeInfo) => void;
 	executable?: string;
+	/** Pi model pattern or provider/model ID selected for the child process. */
+	model?: string;
 	/** Run the child in a separate worktree on an automatically named branch. Defaults to false. */
 	useWorktree?: boolean;
 	worktree?: SubagentWorktreeOptions;
@@ -587,7 +589,9 @@ export function runSubagent(
 		}
 
 		const executable = options.executable ?? process.env.PI_CODING_AGENT_BIN ?? process.argv[1] ?? "pi";
-		const child: ChildProcessWithoutNullStreams = spawn(executable, ["--mode", "rpc", "--no-session", "--agent", agentName], {
+		const childArgs = ["--mode", "rpc", "--no-session", "--agent", agentName];
+		if (options.model?.trim()) childArgs.push("--model", options.model.trim());
+		const child: ChildProcessWithoutNullStreams = spawn(executable, childArgs, {
 			cwd: childCwd,
 			env: { ...process.env, PI_AGENTS_SUBAGENT_DEPTH: String(depth + 1) },
 			stdio: ["pipe", "pipe", "pipe"],

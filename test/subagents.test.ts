@@ -66,7 +66,7 @@ test("smoke: discovers an agent hierarchy", async () => {
 	try {
 		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
-			export default { name: "lead", description: "Coordinator", subagents: ["worker"] };
+			export default { name: "lead", description: "Coordinator", subagents: ["worker", { name: "researcher", model: "test/research-model" }] };
 		`);
 		await mkdir(path.join(root, ".pi-agents", "worker"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
@@ -77,7 +77,10 @@ test("smoke: discovers an agent hierarchy", async () => {
 		}));
 		const result = await discoverAgents(root);
 		const lead = result.agents.find((agent) => agent.name === "lead");
-		assert.deepEqual(lead?.subagents, ["worker"]);
+		assert.deepEqual(lead?.subagents, [
+			{ name: "worker" },
+			{ name: "researcher", model: "test/research-model" },
+		]);
 		assert.deepEqual(result.config.subagents?.worktree, {
 			baseDir: undefined,
 			copyEnvFiles: false,
@@ -353,13 +356,16 @@ test("end to end: configured default timeout returns control to the parent deleg
 			subagents: { defaultTimeoutSeconds: 1.5, gracefulStopSeconds: 0.01 },
 		}));
 		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
-			export default { name: "lead", description: "Lead", default: true, subagents: ["worker"] };
+			export default { name: "lead", description: "Lead", default: true, subagents: [{ name: "worker", model: "test/worker-model" }] };
 		`);
 		await mkdir(path.join(root, ".pi-agents", "worker"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
 			export default { name: "worker", description: "Worker" };
 		`);
 		await writeFile(fakePi, `#!/usr/bin/env node
+			const args = process.argv.slice(2);
+			const expected = ["--mode", "rpc", "--no-session", "--agent", "worker", "--model", "test/worker-model"];
+			if (JSON.stringify(args) !== JSON.stringify(expected)) process.exit(2);
 			process.stdin.on("data", chunk => {
 				const command = JSON.parse(String(chunk).trim());
 				if (command.type === "prompt") {

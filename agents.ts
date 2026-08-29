@@ -57,9 +57,21 @@ export interface AgentCustomTool {
 	execute: (args: Record<string, unknown>, ctx: ExtensionContext, exec: ExecFn) => AgentToolResult<unknown> | string | Promise<AgentToolResult<unknown> | string>;
 }
 
+/** A child agent that this agent may delegate to, with an optional fixed model. */
+export interface SubagentConfig {
+	/** Name of the allowed child agent. */
+	name: string;
+	/** Pi model pattern or provider/model ID used for this delegation. Omit to inherit Pi's default selection. */
+	model?: string;
+}
+
+/** Shorthand agent name or a configured parent-to-child delegation. */
+export type SubagentDeclaration = string | SubagentConfig;
+
 /**
- * Agent definition. Model and thinking level are NOT part of an agent -
- * they are selected in pi itself (/model, thinking UI).
+ * Agent definition. The interactive agent's model and thinking level are
+ * selected in pi itself. A delegated child may have a fixed model configured
+ * on its parent's `subagents` entry.
  */
 export interface AgentConfig {
 	/** Unique agent name, used in UI and commands */
@@ -95,13 +107,15 @@ export interface AgentConfig {
 	 * name. Registered when the agent is applied; active only while it is.
 	 */
 	customTools?: Record<string, AgentCustomTool>;
-	/** Agents this agent is allowed to delegate work to. Enables the built-in `delegate` tool. */
-	subagents?: string[];
+	/** Agents this agent may delegate to. Object entries can select a fixed model for that parent-to-child delegation. */
+	subagents?: SubagentDeclaration[];
 	/** Auto-select this agent on session start (config.json defaultAgent wins over this) */
 	default?: boolean;
 }
 
-export interface DiscoveredAgent extends AgentConfig {
+export interface DiscoveredAgent extends Omit<AgentConfig, "subagents"> {
+	/** Normalized delegation entries. */
+	subagents?: SubagentConfig[];
 	filePath: string;
 	source: "global" | "project";
 	dir: string;
@@ -235,14 +249,44 @@ function normalizeAgent(
 		env: Object.keys(agentEnv).length > 0 ? agentEnv : undefined,
 		systemPrompt: systemPrompt?.trim() ? systemPrompt : undefined,
 		customTools,
-		subagents: Array.isArray(cfg.subagents)
-			? cfg.subagents.map((s) => String(s).trim()).filter(Boolean)
-			: undefined,
+		subagents: normalizeSubagents(cfg.subagents, filePath),
 		default: cfg.default === true,
 		filePath,
 		source,
 		dir,
 	};
+}
+
+/** Normalize legacy string entries and configured delegation objects. */
+function normalizeSubagents(raw: unknown, filePath: string): SubagentConfig[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const subagents: SubagentConfig[] = [];
+	for (const entry of raw) {
+		if (typeof entry === "string") {
+			const name = entry.trim();
+			if (name) subagents.push({ name });
+			continue;
+		}
+		if (!entry || typeof entry !== "object") {
+			console.error(`pi-agents: ${filePath}: invalid subagent entry — use a name string or { name, model? }`);
+			continue;
+		}
+		const candidate = entry as { name?: unknown; model?: unknown };
+		const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
+		if (!name) {
+			console.error(`pi-agents: ${filePath}: subagent entry is missing a valid "name"`);
+			continue;
+		}
+		if (candidate.model !== undefined && (typeof candidate.model !== "string" || !candidate.model.trim())) {
+			console.error(`pi-agents: ${filePath}: subagent "${name}" has an invalid "model"`);
+			continue;
+		}
+		subagents.push({
+			name,
+			model: typeof candidate.model === "string" ? candidate.model.trim() : undefined,
+		});
+	}
+	return subagents.length > 0 ? subagents : undefined;
 }
 
 /** Theme roles usable as an agent color (pi's ThemeColor union). */
