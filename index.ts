@@ -5,8 +5,20 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text, type KeyId } from "@earendil-works/pi-tui";
 import { discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, loadConfig, readTrustDecision, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
-import { showAgentSelector, showSubagentInspector, updateStatus } from "./ui.ts";
-import { formatArgs, SubagentStoppedError, runSubagent, type RunningSubagentHandle, type SubagentUsage, type SubagentWorktreeInfo } from "./subagents.ts";
+import { showAgentSelector, showSubagentInspector, showWorktreeManager, updateStatus, type WorktreeViewItem } from "./ui.ts";
+import {
+	DEFAULT_WORKTREE_RETENTION_DAYS,
+	deleteRetainedWorktree,
+	formatArgs,
+	listRetainedWorktrees,
+	pruneRetainedWorktrees,
+	SubagentStoppedError,
+	runSubagent,
+	type RemoveWorktreeResult,
+	type RunningSubagentHandle,
+	type SubagentUsage,
+	type SubagentWorktreeInfo,
+} from "./subagents.ts";
 
 const STATE_ENTRY = "pi-agents-state";
 // Function keys are encoded as escape sequences by iTerm2 and are passed
@@ -14,7 +26,7 @@ const STATE_ENTRY = "pi-agents-state";
 const DEFAULT_SELECT_SHORTCUT = "f7";
 const DEFAULT_ROTATE_SHORTCUT = "f8";
 const DEFAULT_INSPECT_SHORTCUT = "f9";
-const DEFAULT_SUBAGENT_TIMEOUT_SECONDS = 1800;
+export const DEFAULT_SUBAGENT_TIMEOUT_SECONDS = 1800;
 const DEFAULT_STALE_WARNING_MINUTES = 5;
 const DEFAULT_GRACEFUL_STOP_SECONDS = 5;
 const DELEGATE_TOOL = "delegate";
@@ -64,6 +76,11 @@ export function matchesDeniedPath(target: string, cwd: string, patterns: string[
 		const regex = globRegex(pattern);
 		return pattern.includes("/") ? candidates.slice(0, 2).some((candidate) => regex.test(candidate)) : regex.test(candidates[2]);
 	});
+}
+
+/** Resolve the delegate deadline: per-call override, configured fallback, then the built-in 30-minute default. */
+export function resolveSubagentTimeoutSeconds(requested: number | undefined, configured: number | undefined): number | undefined {
+	return requested ?? configured ?? DEFAULT_SUBAGENT_TIMEOUT_SECONDS;
 }
 
 /** Load the bundled guide.md (resolve symlinks so relative lookup works for symlinked installs). */
@@ -166,6 +183,65 @@ export default function (pi: ExtensionAPI) {
 		return `${minutes}m ${Math.floor((ms % 60000) / 1000)}s`;
 	}
 
+	/** Retention window for clean retained subagent worktrees (days); 0 disables auto-prune. */
+	function worktreeRetentionDays(): number {
+		return config.subagents?.worktree?.retentionDays ?? DEFAULT_WORKTREE_RETENTION_DAYS;
+	}
+
+	function worktreeOptions(): { baseDir?: string } {
+		return { baseDir: config.subagents?.worktree?.baseDir };
+	}
+
+	function formatAge(ms: number): string {
+		const value = Math.max(0, ms);
+		const minutes = Math.floor(value / 60_000);
+		if (minutes < 60) return `${minutes}m`;
+		const hours = Math.floor(minutes / 60);
+		if (hours < 48) return `${hours}h`;
+		return `${Math.floor(hours / 24)}d`;
+	}
+
+	function describeWorktreeOutcome(branch: string, outcome: RemoveWorktreeResult): string {
+		if (!outcome.worktreeRemoved && !outcome.branchRemoved) return `Could not delete ${branch}: ${outcome.reason ?? "unknown error"}`;
+		const parts: string[] = [];
+		if (outcome.worktreeRemoved) parts.push("worktree removed");
+		parts.push(outcome.branchRemoved ? "branch deleted" : "branch kept (unmerged commits)");
+		return `${branch}: ${parts.join(", ")}`;
+	}
+
+	/** Browse and garbage-collect retained delegation worktrees. */
+	async function manageWorktrees(ctx: ExtensionContext) {
+		await showWorktreeManager(
+			ctx,
+			() => {
+				const listing = listRetainedWorktrees(ctx.cwd, worktreeOptions());
+				const now = Date.now();
+				return {
+					baseDir: listing.baseDir,
+					items: listing.items.map<WorktreeViewItem>((item) => ({
+						branch: item.branch,
+						agent: item.agent,
+						ageLabel: formatAge(now - (item.finishedAt ?? item.startedAt)),
+						dirty: item.dirty,
+						unmerged: item.merged === false,
+						stale: !item.dirExists,
+						status: item.status,
+					})),
+				};
+			},
+			{
+				remove: (item) => describeWorktreeOutcome(item.branch, deleteRetainedWorktree(ctx.cwd, item.branch, worktreeOptions())),
+				prune: () => {
+					const outcome = pruneRetainedWorktrees(ctx.cwd, { ...worktreeOptions(), maxAgeDays: worktreeRetentionDays() });
+					const parts = [`Pruned ${outcome.removed.length} worktree${outcome.removed.length === 1 ? "" : "s"}`];
+					if (outcome.keptBranches.length > 0) parts.push(`kept ${outcome.keptBranches.length} unmerged branch${outcome.keptBranches.length === 1 ? "" : "es"}`);
+					if (outcome.skipped.length > 0) parts.push(`skipped ${outcome.skipped.length}`);
+					return parts.join(" · ");
+				},
+			},
+		);
+	}
+
 	function subagentStatsLine(stats: SubagentStats = turnSubagentStats, elapsedMs?: number): string | undefined {
 		if (stats.calls === 0) return undefined;
 		const usage = formatSubagentUsage(stats);
@@ -225,7 +301,7 @@ export default function (pi: ExtensionAPI) {
 				timeoutSeconds: {
 					type: "integer",
 					minimum: 1,
-					description: "Optional total execution limit in seconds. The configured default is used when omitted.",
+					description: "Optional total execution limit in seconds. When omitted, the configured fallback or built-in 30-minute default is used.",
 				},
 			},
 			required: ["agent", "task"],
@@ -241,9 +317,10 @@ export default function (pi: ExtensionAPI) {
 			if (requestedTimeout !== undefined && (!Number.isInteger(requestedTimeout) || Number(requestedTimeout) <= 0)) {
 				return { content: [{ type: "text", text: "Delegation timeoutSeconds must be a positive integer." }], details: { agent: agentName, error: true } };
 			}
-			const timeoutSeconds = requestedTimeout === undefined
-				? config.subagents?.defaultTimeoutSeconds ?? DEFAULT_SUBAGENT_TIMEOUT_SECONDS
-				: Number(requestedTimeout);
+			const timeoutSeconds = resolveSubagentTimeoutSeconds(
+				requestedTimeout === undefined ? undefined : Number(requestedTimeout),
+				config.subagents?.defaultTimeoutSeconds,
+			);
 			if (!parent?.subagents?.includes(agentName)) {
 				return { content: [{ type: "text", text: `Delegation denied: ${agentName} is not an allowed subagent of ${parent?.name ?? "the current agent"}.` }], details: {} };
 			}
@@ -618,8 +695,12 @@ export default function (pi: ExtensionAPI) {
 	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Inspect running subagents", inspectSubagents);
 
 	pi.registerCommand("subagents", {
-		description: "Inspect running delegated subagents",
-		handler: async (_args, ctx) => inspectSubagents(ctx),
+		description: "Inspect running delegated subagents; `/subagents worktrees` manages retained worktrees",
+		handler: async (args, ctx) => {
+			const sub = args?.trim().toLowerCase();
+			if (sub === "worktrees" || sub === "wt") await manageWorktrees(ctx);
+			else await inspectSubagents(ctx);
+		},
 	});
 
 	pi.registerCommand("agent", {
@@ -725,6 +806,22 @@ export default function (pi: ExtensionAPI) {
 		if (selected) await applyAgent(selected, ctx, { silent: true });
 		else refreshStatus(ctx);
 		persistedName = activeName;
+
+		// Best-effort retention: remove clean delegated worktrees past the
+		// configured age. Dirty worktrees and unmerged branches are never touched.
+		const retentionDays = worktreeRetentionDays();
+		if (trusted && retentionDays > 0) {
+			try {
+				const pruned = pruneRetainedWorktrees(ctx.cwd, { ...worktreeOptions(), maxAgeDays: retentionDays });
+				if (pruned.removed.length > 0) {
+					const kept = pruned.keptBranches.length;
+					ctx.ui.notify(
+						`pi-agents: pruned ${pruned.removed.length} retained subagent worktree${pruned.removed.length === 1 ? "" : "s"}${kept > 0 ? ` (${kept} unmerged branch${kept === 1 ? "" : "es"} kept)` : ""}`,
+						"info",
+					);
+				}
+			} catch { /* not a git repository — nothing to prune */ }
+		}
 	});
 
 	// Close MCP server processes when the session ends.

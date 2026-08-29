@@ -6,11 +6,17 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { discoverAgents, findMainCheckoutRoot } from "../agents.ts";
-import extension, { matchesDeniedPath } from "../index.ts";
+import extension, { matchesDeniedPath, resolveSubagentTimeoutSeconds } from "../index.ts";
 import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
 import { showSubagentInspector } from "../ui.ts";
 
 const noAbort = new AbortController().signal;
+
+test("delegate timeout parameter is optional and defaults to 30 minutes", () => {
+	assert.equal(resolveSubagentTimeoutSeconds(undefined, undefined), 1800);
+	assert.equal(resolveSubagentTimeoutSeconds(undefined, 1800), 1800);
+	assert.equal(resolveSubagentTimeoutSeconds(900, 1800), 900);
+});
 
 test("denied paths: matches extensions, root files, and absolute paths", () => {
 	const cwd = "/tmp/project";
@@ -67,7 +73,7 @@ test("smoke: discovers an agent hierarchy", async () => {
 			export default { name: "worker", description: "Specialist" };
 		`);
 		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({
-			subagents: { worktree: { copyEnvFiles: false, copyFiles: ["dev.pem"], setupCommand: "bun install --frozen-lockfile" } },
+			subagents: { worktree: { copyEnvFiles: false, copyFiles: ["dev.pem"], setupCommand: "bun install --frozen-lockfile", retentionDays: 3 } },
 		}));
 		const result = await discoverAgents(root);
 		const lead = result.agents.find((agent) => agent.name === "lead");
@@ -77,6 +83,7 @@ test("smoke: discovers an agent hierarchy", async () => {
 			copyEnvFiles: false,
 			copyFiles: ["dev.pem"],
 			setupCommand: "bun install --frozen-lockfile",
+			retentionDays: 3,
 		});
 	} finally {
 		await rm(root, { recursive: true, force: true });

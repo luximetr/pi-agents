@@ -117,9 +117,9 @@ export interface PiAgentsConfig {
 		rotate?: string | string[];
 		inspect?: string | string[];
 	};
-	/** Runtime limits, worktree setup, and inspector diagnostics for delegated subagents. */
+	/** Runtime limits, worktree setup, retention, and inspector diagnostics for delegated subagents. */
 	subagents?: {
-		/** Total execution limit used when delegate omits timeoutSeconds. */
+		/** Total execution limit used when delegate omits timeoutSeconds. Defaults to 30 minutes. */
 		defaultTimeoutSeconds?: number;
 		/** Highlight a running child after this many minutes without RPC activity. */
 		staleWarningMinutes?: number;
@@ -135,6 +135,8 @@ export interface PiAgentsConfig {
 			copyFiles?: string[];
 			/** Shell command run at the worktree root before spawning the child. */
 			setupCommand?: string;
+			/** Auto-prune clean retained worktrees idle longer than this many days at session start (0 disables). Default 7. */
+			retentionDays?: number;
 		};
 	};
 	/**
@@ -433,6 +435,7 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 									copyEnvFiles: typeof worktree.copyEnvFiles === "boolean" ? worktree.copyEnvFiles : undefined,
 									copyFiles: Array.isArray(worktree.copyFiles) ? worktree.copyFiles.map(String).map((file) => file.trim()).filter(Boolean) : undefined,
 									setupCommand: typeof worktree.setupCommand === "string" && worktree.setupCommand.trim() ? worktree.setupCommand.trim() : undefined,
+									retentionDays: nonNegativeNumber(worktree.retentionDays),
 							  }
 							: undefined,
 				  }
@@ -547,6 +550,7 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 				copyEnvFiles: projectConfig.subagents?.worktree?.copyEnvFiles ?? globalConfig.subagents?.worktree?.copyEnvFiles,
 				copyFiles: projectConfig.subagents?.worktree?.copyFiles ?? globalConfig.subagents?.worktree?.copyFiles,
 				setupCommand: projectConfig.subagents?.worktree?.setupCommand ?? globalConfig.subagents?.worktree?.setupCommand,
+				retentionDays: projectConfig.subagents?.worktree?.retentionDays ?? globalConfig.subagents?.worktree?.retentionDays,
 			},
 		},
 		mcpServers: { ...globalConfig.mcpServers, ...projectConfig.mcpServers },
