@@ -78,7 +78,7 @@ delegate(agent: "dev", task: "Implement the parser", useWorktree: true, timeoutS
 delegate(agent: "doc", task: "Document the parser API", useWorktree: true)
 ```
 
-The `timeoutSeconds` parameter is optional. When omitted, `subagents.defaultTimeoutSeconds` is used, falling back to 1800 seconds (30 minutes). While the parent waits, `f9` or `/subagents` opens a live inspector with the child's current tool, recent activity, deadline, steering (`s`), and stop (`x`) controls. Manual interruption and timeout return diagnostic context to the parent so it can change approach.
+The `timeoutSeconds` parameter is optional and should normally be omitted unless the user explicitly requests a different limit. When omitted, `subagents.defaultTimeoutSeconds` is used, falling back to 1800 seconds (30 minutes). While the parent waits, `f9` or `/subagents` opens a live inspector with the child's current tool, recent activity, deadline, steering (`s`), and stop (`x`) controls. Manual interruption and timeout return diagnostic context to the parent so it can change approach.
 
 When `useWorktree: true` is provided, the extension creates a linked Git worktree on an automatically named branch such as `pi-agents/dev/m4abc123-a1b2c3d4` and starts the child there. Its directory name is generated too. The parent checkout never switches, so delegations can run in parallel with separate files and indexes. Worktrees are retained after completion and their generated branches and paths are returned, preserving uncommitted as well as committed child changes. They default to `.git/pi-agents-worktrees/` in Git's common directory.
 

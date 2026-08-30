@@ -131,6 +131,7 @@ test("end to end: delegate launches an isolated child with the target agent", as
 test("execution timeout stops a stalled subagent and preserves diagnostic state", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-timeout-"));
 	const fakePi = path.join(root, "fake-pi.mjs");
+	const progress: string[] = [];
 	try {
 		await writeFile(fakePi, `#!/usr/bin/env node
 			process.stdin.on("data", chunk => {
@@ -139,19 +140,29 @@ test("execution timeout stops a stalled subagent and preserves diagnostic state"
 					process.stdout.write(JSON.stringify({type:"agent_start"}) + "\\n");
 					process.stdout.write(JSON.stringify({type:"tool_execution_start", toolName:"bash", args:{command:"sleep forever"}}) + "\\n");
 				}
+				if (command.type === "abort") {
+					process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
+				}
 			});
 		`);
 		await chmod(fakePi, 0o755);
 		await assert.rejects(
-			runSubagent("worker", "stall", root, noAbort, { executable: fakePi, timeoutSeconds: 2, gracefulStopSeconds: 0.01 }),
+			runSubagent("worker", "stall", root, noAbort, {
+				executable: fakePi,
+				timeoutSeconds: 2,
+				gracefulStopSeconds: 0.01,
+				onProgress: (event) => progress.push(event.type),
+			}),
 			(error: unknown) => {
 				assert.ok(error instanceof SubagentStoppedError);
 				assert.equal(error.reason, "timeout");
 				assert.equal(error.snapshot.currentTool, "bash");
 				assert.equal(error.snapshot.stopReason, "timeout");
+				assert.equal(error.snapshot.phase, "deadline exceeded");
 				return true;
 			},
 		);
+		assert.equal(progress.includes("finished"), false);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

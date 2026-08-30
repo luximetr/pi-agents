@@ -301,7 +301,7 @@ export default function (pi: ExtensionAPI) {
 				timeoutSeconds: {
 					type: "integer",
 					minimum: 1,
-					description: "Optional total execution limit in seconds. When omitted, the configured fallback or built-in 30-minute default is used.",
+					description: "Optional total execution limit in seconds. Normally omit this field so the configured fallback or built-in 30-minute default is used; set it only when the user explicitly requests a different limit.",
 				},
 			},
 			required: ["agent", "task"],
