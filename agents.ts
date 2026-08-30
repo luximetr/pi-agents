@@ -57,12 +57,14 @@ export interface AgentCustomTool {
 	execute: (args: Record<string, unknown>, ctx: ExtensionContext, exec: ExecFn) => AgentToolResult<unknown> | string | Promise<AgentToolResult<unknown> | string>;
 }
 
-/** A child agent that this agent may delegate to, with an optional fixed model. */
+/** A child agent that this agent may delegate to, with optional fixed runtime settings. */
 export interface SubagentConfig {
 	/** Name of the allowed child agent. */
 	name: string;
 	/** Pi model pattern or provider/model ID used for this delegation. Omit to inherit Pi's default selection. */
 	model?: string;
+	/** Total execution limit in seconds for this parent-to-child delegation. Omit to use the configured or built-in default. */
+	timeoutSeconds?: number;
 }
 
 /** Shorthand agent name or a configured parent-to-child delegation. */
@@ -70,8 +72,8 @@ export type SubagentDeclaration = string | SubagentConfig;
 
 /**
  * Agent definition. The interactive agent's model and thinking level are
- * selected in pi itself. A delegated child may have a fixed model configured
- * on its parent's `subagents` entry.
+ * selected in pi itself. A delegated child may have fixed model and timeout
+ * settings configured on its parent's `subagents` entry.
  */
 export interface AgentConfig {
 	/** Unique agent name, used in UI and commands */
@@ -107,7 +109,7 @@ export interface AgentConfig {
 	 * name. Registered when the agent is applied; active only while it is.
 	 */
 	customTools?: Record<string, AgentCustomTool>;
-	/** Agents this agent may delegate to. Object entries can select a fixed model for that parent-to-child delegation. */
+	/** Agents this agent may delegate to. Object entries can set a model and timeout for that parent-to-child delegation. */
 	subagents?: SubagentDeclaration[];
 	/** Auto-select this agent on session start (config.json defaultAgent wins over this) */
 	default?: boolean;
@@ -133,7 +135,7 @@ export interface PiAgentsConfig {
 	};
 	/** Runtime limits, worktree setup, retention, and inspector diagnostics for delegated subagents. */
 	subagents?: {
-		/** Total execution limit used when delegate omits timeoutSeconds. Defaults to 30 minutes. */
+		/** Default total execution limit for subagent entries that omit timeoutSeconds. Defaults to 30 minutes. */
 		defaultTimeoutSeconds?: number;
 		/** Highlight a running child after this many minutes without RPC activity. */
 		staleWarningMinutes?: number;
@@ -268,10 +270,10 @@ function normalizeSubagents(raw: unknown, filePath: string): SubagentConfig[] | 
 			continue;
 		}
 		if (!entry || typeof entry !== "object") {
-			console.error(`pi-agents: ${filePath}: invalid subagent entry — use a name string or { name, model? }`);
+			console.error(`pi-agents: ${filePath}: invalid subagent entry — use a name string or { name, model?, timeoutSeconds? }`);
 			continue;
 		}
-		const candidate = entry as { name?: unknown; model?: unknown };
+		const candidate = entry as { name?: unknown; model?: unknown; timeoutSeconds?: unknown };
 		const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
 		if (!name) {
 			console.error(`pi-agents: ${filePath}: subagent entry is missing a valid "name"`);
@@ -281,9 +283,14 @@ function normalizeSubagents(raw: unknown, filePath: string): SubagentConfig[] | 
 			console.error(`pi-agents: ${filePath}: subagent "${name}" has an invalid "model"`);
 			continue;
 		}
+		if (candidate.timeoutSeconds !== undefined && (typeof candidate.timeoutSeconds !== "number" || !Number.isFinite(candidate.timeoutSeconds) || candidate.timeoutSeconds <= 0)) {
+			console.error(`pi-agents: ${filePath}: subagent "${name}" has an invalid "timeoutSeconds"`);
+			continue;
+		}
 		subagents.push({
 			name,
 			model: typeof candidate.model === "string" ? candidate.model.trim() : undefined,
+			timeoutSeconds: typeof candidate.timeoutSeconds === "number" ? candidate.timeoutSeconds : undefined,
 		});
 	}
 	return subagents.length > 0 ? subagents : undefined;

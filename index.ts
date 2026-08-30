@@ -78,9 +78,9 @@ export function matchesDeniedPath(target: string, cwd: string, patterns: string[
 	});
 }
 
-/** Resolve the delegate deadline: per-call override, configured fallback, then the built-in 30-minute default. */
-export function resolveSubagentTimeoutSeconds(requested: number | undefined, configured: number | undefined): number | undefined {
-	return requested ?? configured ?? DEFAULT_SUBAGENT_TIMEOUT_SECONDS;
+/** Resolve the delegate deadline: parent-to-child setting, configured fallback, then the built-in 30-minute default. */
+export function resolveSubagentTimeoutSeconds(subagentTimeout: number | undefined, configuredDefault: number | undefined): number | undefined {
+	return subagentTimeout ?? configuredDefault ?? DEFAULT_SUBAGENT_TIMEOUT_SECONDS;
 }
 
 /** Load the bundled guide.md (resolve symlinks so relative lookup works for symlinked installs). */
@@ -298,29 +298,16 @@ export default function (pi: ExtensionAPI) {
 					type: "boolean",
 					description: "Optional, default false: run the subagent in an isolated worktree on an automatically named branch. The parent checkout stays unchanged.",
 				},
-				timeoutSeconds: {
-					type: "integer",
-					minimum: 1,
-					description: "Optional total execution limit in seconds. Normally omit this field so the configured fallback or built-in 30-minute default is used; set it only when the user explicitly requests a different limit.",
-				},
 			},
 			required: ["agent", "task"],
 			additionalProperties: false,
 		}),
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 			const parent = activeAgent;
-			const input = params as { agent?: unknown; task?: unknown; useWorktree?: unknown; timeoutSeconds?: unknown };
+			const input = params as { agent?: unknown; task?: unknown; useWorktree?: unknown };
 			const agentName = String(input.agent ?? "").trim();
 			const task = String(input.task ?? "").trim();
 			const useWorktree = input.useWorktree === true;
-			const requestedTimeout = input.timeoutSeconds;
-			if (requestedTimeout !== undefined && (!Number.isInteger(requestedTimeout) || Number(requestedTimeout) <= 0)) {
-				return { content: [{ type: "text", text: "Delegation timeoutSeconds must be a positive integer." }], details: { agent: agentName, error: true } };
-			}
-			const timeoutSeconds = resolveSubagentTimeoutSeconds(
-				requestedTimeout === undefined ? undefined : Number(requestedTimeout),
-				config.subagents?.defaultTimeoutSeconds,
-			);
 			const subagent = parent?.subagents?.find((candidate) => candidate.name === agentName);
 			if (!subagent) {
 				return { content: [{ type: "text", text: `Delegation denied: ${agentName} is not an allowed subagent of ${parent?.name ?? "the current agent"}.` }], details: {} };
@@ -329,6 +316,7 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `Unknown subagent: ${agentName}.` }], details: {} };
 			}
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
+			const timeoutSeconds = resolveSubagentTimeoutSeconds(subagent.timeoutSeconds, config.subagents?.defaultTimeoutSeconds);
 			let worktreeInfo: SubagentWorktreeInfo | undefined;
 			try {
 				const startedAt = Date.now();

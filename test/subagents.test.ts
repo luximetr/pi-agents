@@ -12,7 +12,7 @@ import { showSubagentInspector } from "../ui.ts";
 
 const noAbort = new AbortController().signal;
 
-test("delegate timeout parameter is optional and defaults to 30 minutes", () => {
+test("subagent timeout uses the relationship setting, then defaults to 30 minutes", () => {
 	assert.equal(resolveSubagentTimeoutSeconds(undefined, undefined), 1800);
 	assert.equal(resolveSubagentTimeoutSeconds(undefined, 1800), 1800);
 	assert.equal(resolveSubagentTimeoutSeconds(900, 1800), 900);
@@ -66,7 +66,7 @@ test("smoke: discovers an agent hierarchy", async () => {
 	try {
 		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
-			export default { name: "lead", description: "Coordinator", subagents: ["worker", { name: "researcher", model: "test/research-model" }] };
+			export default { name: "lead", description: "Coordinator", subagents: ["worker", { name: "researcher", model: "test/research-model", timeoutSeconds: 45 }] };
 		`);
 		await mkdir(path.join(root, ".pi-agents", "worker"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
@@ -79,7 +79,7 @@ test("smoke: discovers an agent hierarchy", async () => {
 		const lead = result.agents.find((agent) => agent.name === "lead");
 		assert.deepEqual(lead?.subagents, [
 			{ name: "worker" },
-			{ name: "researcher", model: "test/research-model" },
+			{ name: "researcher", model: "test/research-model", timeoutSeconds: 45 },
 		]);
 		assert.deepEqual(result.config.subagents?.worktree, {
 			baseDir: undefined,
@@ -357,17 +357,17 @@ function bootExtension(root: string) {
 	return { handlers, registered, ctx };
 }
 
-test("end to end: configured default timeout returns control to the parent delegate", async () => {
+test("end to end: configured subagent timeout returns control to the parent delegate", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegate-timeout-"));
 	const fakePi = path.join(root, "fake-pi.mjs");
 	const previousBin = process.env.PI_CODING_AGENT_BIN;
 	try {
 		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({
-			subagents: { defaultTimeoutSeconds: 1.5, gracefulStopSeconds: 0.01 },
+			subagents: { defaultTimeoutSeconds: 60, gracefulStopSeconds: 0.01 },
 		}));
 		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
-			export default { name: "lead", description: "Lead", default: true, subagents: [{ name: "worker", model: "test/worker-model" }] };
+			export default { name: "lead", description: "Lead", default: true, subagents: [{ name: "worker", model: "test/worker-model", timeoutSeconds: 1.5 }] };
 		`);
 		await mkdir(path.join(root, ".pi-agents", "worker"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
@@ -390,6 +390,7 @@ test("end to end: configured default timeout returns control to the parent deleg
 		const { handlers, registered, ctx } = bootExtension(root);
 		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
 		const delegate = registered.find((tool) => tool.name === "delegate")!;
+		assert.equal("timeoutSeconds" in delegate.parameters.properties, false);
 		const result = await delegate.execute("timeout-call", { agent: "worker", task: "hang" }, undefined, undefined, ctx);
 		assert.equal(result.details.status, "timed_out");
 		assert.match(String(result.content[0].text), /timed out/);
