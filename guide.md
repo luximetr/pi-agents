@@ -69,7 +69,7 @@ export default {
 };
 ```
 
-`subagents` is an allowlist. A string entry uses Pi's normal default model selection and timeout. An object entry can fix the model and/or `timeoutSeconds` for that parent-to-child delegation; different parents may configure the same child differently. The child runs as a fresh ephemeral `pi --mode rpc --no-session --agent <name>` process and only its final answer is returned to the parent. Nested delegation is limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
+`subagents` is an allowlist. A string entry uses Pi's normal default model selection and has no deadline. An object entry can fix the model and/or `timeoutSeconds` for that parent-to-child delegation; different parents may configure the same child differently. The child runs as a fresh ephemeral `pi --mode rpc --no-session --agent <name>` process and only its final answer is returned to the parent. Nested delegation is limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
 
 `delegate` takes `agent`, `task`, and an optional `useWorktree` boolean (default `false`):
 
@@ -78,7 +78,7 @@ delegate(agent: "dev", task: "Implement the parser", useWorktree: true)
 delegate(agent: "doc", task: "Document the parser API", useWorktree: true)
 ```
 
-The agent cannot choose its deadline at call time. Configure `timeoutSeconds` on the parent's subagent entry; when omitted there, `subagents.defaultTimeoutSeconds` is used, falling back to 1800 seconds (30 minutes). While the parent waits, `f9` or `/subagents` opens a live inspector with the child's current tool, recent activity, deadline, steering (`s`), and stop (`x`) controls. Manual interruption and timeout return diagnostic context to the parent so it can change approach.
+The agent cannot choose its deadline at call time. Configure `timeoutSeconds` on the parent's subagent entry, or omit it to run without a deadline. While the parent waits, `f9` or `/subagents` opens a live inspector with the child's current tool, recent activity, deadline, steering (`s`), and stop (`x`) controls. Manual interruption and timeout return diagnostic context to the parent so it can change approach.
 
 When `useWorktree: true` is provided, the extension creates a linked Git worktree on an automatically named branch such as `pi-agents/dev/m4abc123-a1b2c3d4` and starts the child there. Its directory name is generated too. The parent checkout never switches, so delegations can run in parallel with separate files and indexes. Worktrees are retained after completion and their generated branches and paths are returned, preserving uncommitted as well as committed child changes. They default to `.git/pi-agents-worktrees/` in Git's common directory.
 
@@ -125,7 +125,6 @@ export default {
     "inspect": "f9"
   },
   "subagents": {
-    "defaultTimeoutSeconds": 1800,
     "staleWarningMinutes": 5,
     "gracefulStopSeconds": 5,
     "worktree": {
@@ -153,7 +152,6 @@ export default {
 
 - `defaultAgent`: auto-selected on fresh sessions (`null`/unset = plain pi). Overridden by `--agent` flag and per-session selection.
 - `keybindings`: each action takes a single key or an array of fallbacks (terminal key encoding varies). The built-in `f7`, `f8`, and `f9` fallbacks are always retained.
-- `subagents.defaultTimeoutSeconds`: fallback deadline for subagent entries that omit `timeoutSeconds`; defaults to 1800 seconds (30 minutes).
 - `subagents.staleWarningMinutes`: inactivity threshold shown by the inspector; it does not stop the child.
 - `subagents.gracefulStopSeconds`: delay before escalating RPC abort to process signals.
 - `subagents.worktree.baseDir`: optional checkout parent, relative to the repository root when not absolute.

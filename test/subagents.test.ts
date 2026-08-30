@@ -6,17 +6,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { discoverAgents, findMainCheckoutRoot } from "../agents.ts";
-import extension, { matchesDeniedPath, resolveSubagentTimeoutSeconds } from "../index.ts";
+import extension, { matchesDeniedPath } from "../index.ts";
 import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
 import { showSubagentInspector } from "../ui.ts";
 
 const noAbort = new AbortController().signal;
-
-test("subagent timeout uses the relationship setting, then defaults to 30 minutes", () => {
-	assert.equal(resolveSubagentTimeoutSeconds(undefined, undefined), 1800);
-	assert.equal(resolveSubagentTimeoutSeconds(undefined, 1800), 1800);
-	assert.equal(resolveSubagentTimeoutSeconds(900, 1800), 900);
-});
 
 test("denied paths: matches extensions, root files, and absolute paths", () => {
 	const cwd = "/tmp/project";
@@ -115,10 +109,13 @@ test("end to end: delegate launches an isolated child with the target agent", as
 		`);
 		await chmod(fakePi, 0o755);
 		const progress: string[] = [];
+		let deadlineAt: number | undefined;
 		const result = await runSubagent("worker", "inspect files", root, noAbort, {
 			executable: fakePi,
+			onHandle: (handle) => { if (handle) deadlineAt = handle.snapshot.deadlineAt; },
 			onProgress: (event) => progress.push(event.type),
 		});
+		assert.equal(deadlineAt, undefined);
 		assert.ok(progress.includes("tool-start"));
 		assert.ok(progress.includes("text"));
 		assert.ok(progress.includes("stats"));
@@ -364,7 +361,7 @@ test("end to end: configured subagent timeout returns control to the parent dele
 	try {
 		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({
-			subagents: { defaultTimeoutSeconds: 60, gracefulStopSeconds: 0.01 },
+			subagents: { gracefulStopSeconds: 0.01 },
 		}));
 		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
 			export default { name: "lead", description: "Lead", default: true, subagents: [{ name: "worker", model: "test/worker-model", timeoutSeconds: 1.5 }] };

@@ -9,7 +9,7 @@ Opencode-style agents for [pi](https://github.com/earendil-dev/pi): define agent
 Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.2.3        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.2.4        # all projects (user scope)
 ```
 
 Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
@@ -20,7 +20,7 @@ To track the latest commit on `main` instead of a pinned release:
 pi install git:github.com/luximetr/pi-agents
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.2.3`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+To update an existing installation, run the same command with the desired ref (for example `@v0.2.4`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
 
 Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
 
@@ -190,7 +190,7 @@ delegate(agent: "dev", task: "Implement the parser", useWorktree: true)
 delegate(agent: "doc", task: "Document the parser API", useWorktree: true)
 ```
 
-While the parent waits, press `f9` (or run `/subagents`) to open the live subagent inspector. It shows the current phase/tool, recent RPC activity, elapsed/remaining time, and stale warnings. Press `s` to steer the selected child or `x` to stop it. A manual interruption or deadline returns a diagnostic tool result to the parent agent so it can choose another approach. The agent cannot choose its deadline at call time: configure `timeoutSeconds` on the parent's subagent entry. Entries that omit it use `subagents.defaultTimeoutSeconds`, falling back to 1800 seconds (30 minutes).
+While the parent waits, press `f9` (or run `/subagents`) to open the live subagent inspector. It shows the current phase/tool, recent RPC activity, elapsed/remaining time, and stale warnings. Press `s` to steer the selected child or `x` to stop it. A manual interruption or deadline returns a diagnostic tool result to the parent agent so it can choose another approach. The agent cannot choose its deadline at call time: configure `timeoutSeconds` on the parent's subagent entry. Omit it to run without a deadline.
 
 When `useWorktree: true` is provided, the extension creates a linked Git worktree on an automatically named branch such as `pi-agents/dev/m4abc123-a1b2c3d4` and starts the child there. The worktree directory is also generated automatically. The parent checkout never switches, so multiple delegations can run in parallel without sharing files or an index. Worktrees are retained after completion (and their generated branch and path are returned in the tool result), preserving both committed and uncommitted child changes. By default they live under Git's common directory at `.git/pi-agents-worktrees/`.
 
@@ -289,7 +289,6 @@ export default {
     "inspect": "f9"
   },
   "subagents": {
-    "defaultTimeoutSeconds": 1800,
     "staleWarningMinutes": 5,
     "gracefulStopSeconds": 5,
     "worktree": {
@@ -310,7 +309,7 @@ export default {
 }
 ```
 
-`defaultAgent` is optional. If it is unset, the last agent selection is remembered for the next `/new` session; otherwise the first agent marked `default: true` (or, when none is marked, the first discovered agent) is selected. Use `/agent none` to clear the current agent and restore plain pi for that session. `subagents.defaultTimeoutSeconds` overrides the built-in 30-minute fallback for parent-to-child entries that omit `timeoutSeconds`; `staleWarningMinutes` only changes the inspector warning, and `gracefulStopSeconds` controls stop escalation. `subagents.worktree` configures worktree provisioning (`baseDir`, `copyEnvFiles`, `copyFiles`, and `setupCommand`) and retention (`retentionDays`). Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends (e.g. `alt` keys on terminals that can't report `Ctrl+Shift`, see troubleshooting):
+`defaultAgent` is optional. If it is unset, the last agent selection is remembered for the next `/new` session; otherwise the first agent marked `default: true` (or, when none is marked, the first discovered agent) is selected. Use `/agent none` to clear the current agent and restore plain pi for that session. Subagent deadlines are configured only on the parent's individual `subagents` entries; omitting `timeoutSeconds` means no deadline. `staleWarningMinutes` only changes the inspector warning, and `gracefulStopSeconds` controls stop escalation. `subagents.worktree` configures worktree provisioning (`baseDir`, `copyEnvFiles`, `copyFiles`, and `setupCommand`) and retention (`retentionDays`). Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends (e.g. `alt` keys on terminals that can't report `Ctrl+Shift`, see troubleshooting):
 
 ```json
 {

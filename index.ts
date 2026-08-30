@@ -26,7 +26,6 @@ const STATE_ENTRY = "pi-agents-state";
 const DEFAULT_SELECT_SHORTCUT = "f7";
 const DEFAULT_ROTATE_SHORTCUT = "f8";
 const DEFAULT_INSPECT_SHORTCUT = "f9";
-export const DEFAULT_SUBAGENT_TIMEOUT_SECONDS = 1800;
 const DEFAULT_STALE_WARNING_MINUTES = 5;
 const DEFAULT_GRACEFUL_STOP_SECONDS = 5;
 const DELEGATE_TOOL = "delegate";
@@ -76,11 +75,6 @@ export function matchesDeniedPath(target: string, cwd: string, patterns: string[
 		const regex = globRegex(pattern);
 		return pattern.includes("/") ? candidates.slice(0, 2).some((candidate) => regex.test(candidate)) : regex.test(candidates[2]);
 	});
-}
-
-/** Resolve the delegate deadline: parent-to-child setting, configured fallback, then the built-in 30-minute default. */
-export function resolveSubagentTimeoutSeconds(subagentTimeout: number | undefined, configuredDefault: number | undefined): number | undefined {
-	return subagentTimeout ?? configuredDefault ?? DEFAULT_SUBAGENT_TIMEOUT_SECONDS;
 }
 
 /** Load the bundled guide.md (resolve symlinks so relative lookup works for symlinked installs). */
@@ -316,7 +310,7 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `Unknown subagent: ${agentName}.` }], details: {} };
 			}
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
-			const timeoutSeconds = resolveSubagentTimeoutSeconds(subagent.timeoutSeconds, config.subagents?.defaultTimeoutSeconds);
+			const timeoutSeconds = subagent.timeoutSeconds;
 			let worktreeInfo: SubagentWorktreeInfo | undefined;
 			try {
 				const startedAt = Date.now();

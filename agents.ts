@@ -63,7 +63,7 @@ export interface SubagentConfig {
 	name: string;
 	/** Pi model pattern or provider/model ID used for this delegation. Omit to inherit Pi's default selection. */
 	model?: string;
-	/** Total execution limit in seconds for this parent-to-child delegation. Omit to use the configured or built-in default. */
+	/** Total execution limit in seconds for this parent-to-child delegation. Omit for no deadline. */
 	timeoutSeconds?: number;
 }
 
@@ -135,8 +135,6 @@ export interface PiAgentsConfig {
 	};
 	/** Runtime limits, worktree setup, retention, and inspector diagnostics for delegated subagents. */
 	subagents?: {
-		/** Default total execution limit for subagent entries that omit timeoutSeconds. Defaults to 30 minutes. */
-		defaultTimeoutSeconds?: number;
 		/** Highlight a running child after this many minutes without RPC activity. */
 		staleWarningMinutes?: number;
 		/** Grace period before escalating RPC abort to SIGTERM/SIGKILL. */
@@ -477,7 +475,6 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 				: undefined,
 			subagents: subagents
 				? {
-						defaultTimeoutSeconds: positiveNumber(subagents.defaultTimeoutSeconds),
 						staleWarningMinutes: positiveNumber(subagents.staleWarningMinutes),
 						gracefulStopSeconds: nonNegativeNumber(subagents.gracefulStopSeconds),
 						worktree: worktree
@@ -593,7 +590,6 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 			inspect: projectConfig.keybindings?.inspect ?? globalConfig.keybindings?.inspect,
 		},
 		subagents: {
-			defaultTimeoutSeconds: projectConfig.subagents?.defaultTimeoutSeconds ?? globalConfig.subagents?.defaultTimeoutSeconds,
 			staleWarningMinutes: projectConfig.subagents?.staleWarningMinutes ?? globalConfig.subagents?.staleWarningMinutes,
 			gracefulStopSeconds: projectConfig.subagents?.gracefulStopSeconds ?? globalConfig.subagents?.gracefulStopSeconds,
 			worktree: {

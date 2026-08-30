@@ -6,7 +6,6 @@
 		"inspect": "f9"
 	},
 	"subagents": {
-		"defaultTimeoutSeconds": 1800,
 		"staleWarningMinutes": 5,
 		"gracefulStopSeconds": 5
 	},
