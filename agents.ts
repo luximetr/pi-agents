@@ -137,10 +137,23 @@ export interface DiscoveredAgent extends Omit<AgentConfig, "subagents"> {
 	dir: string;
 	/** Secrets from the agent dir's `.env` (gitignored), e.g. `.pi-agents/<name>/.env`. */
 	env?: Record<string, string>;
+	/** True when the effective definition includes an unsaved session-scoped Agent Studio draft. */
+	studioDraft?: boolean;
+}
+
+export interface AgentOverride {
+	/** Replace the agent's declared base tool allowlist. Omit to keep the source definition. */
+	tools?: ToolName[];
+	/** Replace the agent's MCP assignments. */
+	mcp?: string[];
+	/** Replace the agent prompt; null explicitly clears it. */
+	systemPrompt?: string | null;
 }
 
 export interface PiAgentsConfig {
 	defaultAgent?: string;
+	/** Declarative Agent Studio overlays, keyed by agent name. */
+	agentOverrides?: Record<string, AgentOverride>;
 	keybindings?: {
 		/** One key or several (fallbacks for terminals that don't send alt/ctrl+shift distinctly). */
 		select?: string | string[];
@@ -175,7 +188,7 @@ export interface PiAgentsConfig {
 	 */
 	mcpServers?: Record<string, McpServerConfig>;
 	/** Provenance for each merged MCP server definition (project definitions win). */
-	mcpServerSources?: Record<string, "global" | "project">;
+	mcpServerSources?: Record<string, "builtin" | "global" | "project">;
 	/**
 	 * Secrets loaded from `.env` files (global `~/.pi/agent/pi-agents/.env` and
 	 * project `.pi-agents/.env`, project wins). Referenced from config as
@@ -393,7 +406,9 @@ async function loadAgentFile(
 ): Promise<DiscoveredAgent | null> {
 	try {
 		let mod: unknown;
-		if (filePath.endsWith(".mjs")) {
+		if (filePath.endsWith(".json")) {
+			mod = JSON.parse(fs.readFileSync(filePath, "utf8"));
+		} else if (filePath.endsWith(".mjs")) {
 			mod = await import(pathToFileURL(filePath).href);
 		} else {
 			mod = await jiti.import(filePath);
@@ -501,6 +516,57 @@ function nonNegativeNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+function normalizeAgentOverrides(raw: unknown): Record<string, AgentOverride> | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const overrides: Record<string, AgentOverride> = {};
+	for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (!value || typeof value !== "object") continue;
+		const candidate = value as Record<string, unknown>;
+		const override: AgentOverride = {};
+		if (Array.isArray(candidate.tools)) override.tools = candidate.tools.map(String).map((item) => item.trim()).filter(Boolean);
+		if (Array.isArray(candidate.mcp)) override.mcp = candidate.mcp.map(String).map((item) => item.trim()).filter(Boolean);
+		if (candidate.systemPrompt === null || typeof candidate.systemPrompt === "string") override.systemPrompt = candidate.systemPrompt;
+		if (Object.keys(override).length > 0) overrides[name] = override;
+	}
+	return Object.keys(overrides).length > 0 ? overrides : undefined;
+}
+
+function mergeAgentOverrides(
+	base: Record<string, AgentOverride> | undefined,
+	override: Record<string, AgentOverride> | undefined,
+): Record<string, AgentOverride> | undefined {
+	const names = new Set([...Object.keys(base ?? {}), ...Object.keys(override ?? {})]);
+	if (names.size === 0) return undefined;
+	return Object.fromEntries([...names].map((name) => [name, { ...(base?.[name] ?? {}), ...(override?.[name] ?? {}) }]));
+}
+
+/** Curated, opt-in MCP recipes shown by Agent Studio. Project/global config can override them by name. */
+export const BUILTIN_MCP_SERVERS: Record<string, McpServerConfig> = {
+	playwright: { command: "npx", args: ["-y", "@playwright/mcp@0.0.80"] },
+	"ios-simulator": { command: "npx", args: ["-y", "ios-simulator-mcp@2.1.0"] },
+	"pen.dev": {
+		command: "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/out/mcp-server-darwin-arm64",
+		args: ["--app", "desktop", "--agent", "pi"],
+	},
+	dochub: {
+		url: "http://localhost:3001/mcp",
+		headers: { Authorization: "Bearer ${DOCHUB_TOKEN}" },
+	},
+	designhub: {
+		url: "http://localhost:5101/mcp",
+		headers: { Authorization: "Bearer ${DESIGNHUB_TOKEN}" },
+	},
+};
+
+/** Human-facing recipe help used by Agent Studio's details pane. */
+export const BUILTIN_MCP_SERVER_DESCRIPTIONS: Record<string, string> = {
+	playwright: "Automate and inspect a web browser with Playwright. The pinned npm server is downloaded on first use.",
+	"ios-simulator": "Inspect and control iOS Simulator. Requires Xcode and a bootable simulator on macOS.",
+	"pen.dev": "Inspect and edit .pen design files through the running Pen desktop app. Requires Pen.app in /Applications on Apple silicon.",
+	dochub: "Search and retrieve indexed documentation from local DocHub. Requires DocHub on port 3001 and DOCHUB_TOKEN in the shell or .pi-agents/.env.",
+	designhub: "Read and update project design context through the local DesignHub editor proxy. Requires DesignHub on port 5101 and DESIGNHUB_TOKEN in the shell or .pi-agents/.env.",
+};
+
 function loadConfigFrom(dir: string): PiAgentsConfig {
 	const configPath = path.join(dir, "config.json");
 	if (!fs.existsSync(configPath)) return {};
@@ -512,6 +578,7 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 		const mcpServers = normalizeMcpServers(parsed.mcpServers);
 		return {
 			defaultAgent: typeof parsed.defaultAgent === "string" ? parsed.defaultAgent : undefined,
+			agentOverrides: normalizeAgentOverrides(parsed.agentOverrides),
 			keybindings: keybindings
 				? {
 						select: normalizeKeys(keybindings.select),
@@ -628,11 +695,13 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 	// checkout; the worktree's own .env (when present) still wins per key.
 	const mainAgentsDir = projectDir ? findMainCheckoutAgentsDir(cwd) : null;
 	const env = mergeEnv(globalConfig.env, mainAgentsDir ? loadEnvFile(mainAgentsDir) : undefined, projectConfig.env);
-	const mcpServerSources: Record<string, "global" | "project"> = {};
+	const mcpServerSources: Record<string, "builtin" | "global" | "project"> = {};
+	for (const name of Object.keys(BUILTIN_MCP_SERVERS)) mcpServerSources[name] = "builtin";
 	for (const name of Object.keys(globalConfig.mcpServers ?? {})) mcpServerSources[name] = "global";
 	for (const name of Object.keys(projectConfig.mcpServers ?? {})) mcpServerSources[name] = "project";
 	return {
 		defaultAgent: projectConfig.defaultAgent ?? globalConfig.defaultAgent,
+		agentOverrides: mergeAgentOverrides(globalConfig.agentOverrides, projectConfig.agentOverrides),
 		keybindings: {
 			select: projectConfig.keybindings?.select ?? globalConfig.keybindings?.select,
 			rotate: projectConfig.keybindings?.rotate ?? globalConfig.keybindings?.rotate,
@@ -649,7 +718,7 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 				retentionDays: projectConfig.subagents?.worktree?.retentionDays ?? globalConfig.subagents?.worktree?.retentionDays,
 			},
 		},
-		mcpServers: { ...globalConfig.mcpServers, ...projectConfig.mcpServers },
+		mcpServers: { ...BUILTIN_MCP_SERVERS, ...globalConfig.mcpServers, ...projectConfig.mcpServers },
 		mcpServerSources,
 		env,
 	};
@@ -688,6 +757,80 @@ export function getGlobalAgentsDir(): string {
 	return path.join(getAgentDir(), "pi-agents");
 }
 
+/** Apply a declarative Studio overlay without mutating the code-backed source definition. */
+export function applyAgentOverride(agent: DiscoveredAgent, override: AgentOverride | undefined, studioDraft = false): DiscoveredAgent {
+	if (!override) return { ...agent, studioDraft: false };
+	const result: DiscoveredAgent = { ...agent, studioDraft };
+	if (override.tools !== undefined) result.tools = [...override.tools];
+	if (override.mcp !== undefined) result.mcp = [...override.mcp];
+	if (override.systemPrompt !== undefined) {
+		result.systemPrompt = override.systemPrompt === null || !override.systemPrompt.trim() ? undefined : override.systemPrompt;
+		result.systemPromptPath = undefined;
+	}
+	return result;
+}
+
+/** Persist an Agent Studio overlay while preserving unrelated config.json fields. */
+export function saveAgentOverride(cwd: string, scope: "project" | "global", name: string, override: AgentOverride): string {
+	const dir = scope === "global" ? getGlobalAgentsDir() : (findProjectAgentsDir(cwd) ?? path.join(findProjectRoot(cwd), ".pi-agents"));
+	fs.mkdirSync(dir, { recursive: true });
+	const configPath = path.join(dir, "config.json");
+	let raw: Record<string, unknown> = {};
+	if (fs.existsSync(configPath)) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+		} catch (err) {
+			throw new Error(`cannot save Agent Studio override: ${configPath} is not valid JSON (${err})`);
+		}
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			throw new Error(`cannot save Agent Studio override: ${configPath} must contain a JSON object`);
+		}
+		raw = parsed as Record<string, unknown>;
+	}
+	const existing = raw.agentOverrides && typeof raw.agentOverrides === "object" && !Array.isArray(raw.agentOverrides)
+		? raw.agentOverrides as Record<string, unknown>
+		: {};
+	raw.agentOverrides = { ...existing, [name]: override };
+	const tempPath = `${configPath}.tmp-${process.pid}`;
+	fs.writeFileSync(tempPath, `${JSON.stringify(raw, null, "\t")}\n`, { encoding: "utf8", mode: 0o600 });
+	fs.renameSync(tempPath, configPath);
+	return configPath;
+}
+
+export interface DeclarativeAgentInput {
+	name: string;
+	description: string;
+	tools?: ToolName[];
+	mcp?: string[];
+	systemPrompt?: string;
+}
+
+/** Create a JSON-backed agent that Agent Studio can manage without rewriting TypeScript. */
+export function saveDeclarativeAgent(cwd: string, scope: "project" | "global", input: DeclarativeAgentInput): string {
+	const name = input.name.trim();
+	if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("agent name may contain only letters, numbers, dot, underscore, and hyphen");
+	if (!input.description.trim()) throw new Error("agent description is required");
+	const root = scope === "global" ? getGlobalAgentsDir() : (findProjectAgentsDir(cwd) ?? path.join(findProjectRoot(cwd), ".pi-agents"));
+	const dir = path.join(root, name);
+	fs.mkdirSync(dir, { recursive: true });
+	const filePath = path.join(dir, "agent.json");
+	if (fs.existsSync(filePath) || fs.existsSync(path.join(dir, "agent.ts")) || fs.existsSync(path.join(dir, "index.ts"))) {
+		throw new Error(`agent source already exists: ${dir}`);
+	}
+	const data: DeclarativeAgentInput = {
+		name,
+		description: input.description.trim(),
+		...(input.tools === undefined ? {} : { tools: [...input.tools] }),
+		...(input.mcp === undefined ? {} : { mcp: [...input.mcp] }),
+		...(input.systemPrompt?.trim() ? { systemPrompt: input.systemPrompt } : {}),
+	};
+	const tempPath = `${filePath}.tmp-${process.pid}`;
+	fs.writeFileSync(tempPath, `${JSON.stringify(data, null, "\t")}\n`, { encoding: "utf8", mode: 0o600 });
+	fs.renameSync(tempPath, filePath);
+	return filePath;
+}
+
 /**
  * Discover all agents from global + project dirs (project wins on name collision).
  * Also returns the merged config.json settings. Pass `includeProject: false`
@@ -703,9 +846,9 @@ export async function discoverAgents(cwd: string, opts?: DiscoverOptions): Promi
 	const byName = new Map<string, DiscoveredAgent>();
 
 	async function loadFrom(dir: string, source: "global" | "project", envFallbackDir?: string) {
-		// Folder per agent: <dir>/<name>/agent.ts (or index.ts)
+		// Folder per agent: code-backed agent.ts/index.ts or Studio-created agent.json.
 		for (const agentDir of listAgentDirs(dir)) {
-			const filePath = [path.join(agentDir, "agent.ts"), path.join(agentDir, "index.ts")].find((p) => fs.existsSync(p));
+			const filePath = [path.join(agentDir, "agent.ts"), path.join(agentDir, "index.ts"), path.join(agentDir, "agent.json")].find((p) => fs.existsSync(p));
 			if (filePath) {
 				const fallback = envFallbackDir ? [path.join(envFallbackDir, path.basename(agentDir))] : undefined;
 				const agent = await loadAgentFile(filePath, source, undefined, fallback);
@@ -732,8 +875,11 @@ export async function discoverAgents(cwd: string, opts?: DiscoverOptions): Promi
 	await loadFrom(globalDir, "global");
 	if (projectDir) await loadFrom(projectDir, "project", mainAgentsDir ?? undefined);
 
+	const config = loadConfig(cwd, opts);
 	return {
-		agents: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)),
-		config: loadConfig(cwd, opts),
+		agents: [...byName.values()]
+			.map((agent) => applyAgentOverride(agent, config.agentOverrides?.[agent.name]))
+			.sort((a, b) => a.name.localeCompare(b.name)),
+		config,
 	};
 }

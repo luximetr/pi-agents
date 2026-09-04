@@ -97,6 +97,8 @@ export interface RunSubagentOptions {
 	timeoutSeconds?: number;
 	/** Time between RPC abort and SIGTERM, and between SIGTERM and SIGKILL. */
 	gracefulStopSeconds?: number;
+	/** Session-scoped Agent Studio overlays inherited by the ephemeral child. */
+	runtimeAgentOverrides?: Record<string, unknown>;
 	/** Stable id supplied by the caller; otherwise a process-local id is generated. */
 	id?: string;
 }
@@ -611,7 +613,13 @@ export function runSubagent(
 		const invocation = piInvocation(childArgs, options.executable);
 		const child: ChildProcessWithoutNullStreams = spawn(invocation.command, invocation.args, {
 			cwd: childCwd,
-			env: { ...process.env, PI_AGENTS_SUBAGENT_DEPTH: String(depth + 1) },
+			env: {
+				...process.env,
+				PI_AGENTS_SUBAGENT_DEPTH: String(depth + 1),
+				...(options.runtimeAgentOverrides && Object.keys(options.runtimeAgentOverrides).length > 0
+					? { PI_AGENTS_STUDIO_OVERRIDES: JSON.stringify(options.runtimeAgentOverrides) }
+					: {}),
+			},
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		const startedAt = Date.now();

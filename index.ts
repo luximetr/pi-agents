@@ -5,12 +5,13 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, loadConfig, readTrustDecision, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, loadConfig, readTrustDecision, saveAgentOverride, saveDeclarativeAgent, type AgentOverride, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import {
 	renderDelegateCall,
 	renderDelegateResult,
 	showAgentSelector,
+	showAgentStudio,
 	showSubagentInspector,
 	showWorktreeManager,
 	updateStatus,
@@ -32,6 +33,7 @@ import {
 } from "./subagents.ts";
 
 const STATE_ENTRY = "pi-agents-state";
+const STUDIO_STATE_ENTRY = "pi-agents-studio-state";
 // Function keys are encoded as escape sequences by iTerm2 and are passed
 // through herdr/tmux without requiring modifyOtherKeys or Option-as-Meta.
 const DEFAULT_SELECT_SHORTCUT = "f7";
@@ -107,6 +109,9 @@ function normalizeShortcutKeys(value: string | string[] | undefined, fallback: s
 
 export default function (pi: ExtensionAPI) {
 	let agents: DiscoveredAgent[] = [];
+	/** Definitions after code-backed files and saved global/project overlays, before session drafts. */
+	let sourceAgents: DiscoveredAgent[] = [];
+	const studioDrafts = new Map<string, AgentOverride>();
 	let config: PiAgentsConfig = {};
 	let activeName: string | undefined;
 	let activeAgent: DiscoveredAgent | undefined;
@@ -290,6 +295,54 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function normalizeStudioOverride(value: unknown): AgentOverride | undefined {
+		if (!value || typeof value !== "object") return undefined;
+		const raw = value as Record<string, unknown>;
+		const result: AgentOverride = {};
+		if (Array.isArray(raw.tools)) result.tools = raw.tools.map(String);
+		if (Array.isArray(raw.mcp)) result.mcp = raw.mcp.map(String);
+		if (raw.systemPrompt === null || typeof raw.systemPrompt === "string") result.systemPrompt = raw.systemPrompt;
+		return Object.keys(result).length > 0 ? result : undefined;
+	}
+
+	function restoreStudioDrafts(ctx: ExtensionContext) {
+		studioDrafts.clear();
+		// Delegated RPC children inherit the parent's unsaved Studio experiments.
+		// The payload contains agent fields only; MCP secrets stay in the existing
+		// .env hierarchy and are never serialized here.
+		try {
+			const inherited = JSON.parse(process.env.PI_AGENTS_STUDIO_OVERRIDES ?? "{}") as Record<string, unknown>;
+			for (const [name, value] of Object.entries(inherited)) {
+				const override = normalizeStudioOverride(value);
+				if (override) studioDrafts.set(name, override);
+			}
+		} catch { /* malformed inherited state is ignored */ }
+		// Lightweight SDK/test hosts may expose only part of SessionManager; a
+		// missing branch simply means there are no resumable Studio drafts.
+		const manager = ctx.sessionManager as typeof ctx.sessionManager & { getBranch?: () => ReturnType<typeof ctx.sessionManager.getBranch> };
+		const branch = typeof manager.getBranch === "function" ? manager.getBranch() : [];
+		for (const entry of branch) {
+			if (entry.type !== "custom" || entry.customType !== STUDIO_STATE_ENTRY) continue;
+			const data = entry.data as { name?: unknown; override?: unknown } | undefined;
+			const name = typeof data?.name === "string" ? data.name : undefined;
+			if (!name) continue;
+			const override = normalizeStudioOverride(data?.override);
+			if (override) studioDrafts.set(name, override);
+			else studioDrafts.delete(name);
+		}
+	}
+
+	function rebuildEffectiveAgents() {
+		agents = sourceAgents.map((agent) => applyAgentOverride(agent, studioDrafts.get(agent.name), studioDrafts.has(agent.name)));
+	}
+
+	function persistStudioDraft(name: string, override: AgentOverride | undefined) {
+		if (override) studioDrafts.set(name, override);
+		else studioDrafts.delete(name);
+		pi.appendEntry(STUDIO_STATE_ENTRY, { name, override: override ?? null });
+		rebuildEffectiveAgents();
+	}
+
 	const mcpManager = new McpManager(pi);
 	/** Custom tool name -> agent name that registered it (for collision warnings). */
 	const customToolOwners = new Map<string, string>();
@@ -404,6 +457,7 @@ export default function (pi: ExtensionAPI) {
 					timeoutSeconds,
 					gracefulStopSeconds: config.subagents?.gracefulStopSeconds ?? DEFAULT_GRACEFUL_STOP_SECONDS,
 					worktree: config.subagents?.worktree,
+					runtimeAgentOverrides: Object.fromEntries(studioDrafts),
 					onWorktreeCreated: (worktree) => { worktreeInfo = worktree; },
 					onHandle: (handle) => {
 						if (handle) runningSubagents.set(handle.id, handle);
@@ -642,22 +696,14 @@ export default function (pi: ExtensionAPI) {
 		return applyAgent(name, ctx, opts);
 	}
 
-	/** Show the picker and apply the selection. */
-	async function showPicker(ctx: ExtensionContext) {
-		if (agents.length === 0) {
-			ctx.ui.notify(
-				"No agents defined. Create .pi-agents/<name>/agent.ts in this project or ~/.pi/agent/pi-agents/<name>/agent.ts",
-				"warning",
-			);
-			return;
-		}
+	function selectorOptions(ctx: ExtensionContext) {
 		const projectAgentsDir = findProjectAgentsDir(ctx.cwd) ?? undefined;
 		const projectRoot = findProjectRoot(ctx.cwd);
 		const serverNames = [...new Set([
 			...Object.keys(config.mcpServers ?? {}),
 			...agents.flatMap((agent) => [...(agent.mcp ?? []), ...Object.keys(agent.mcpServers ?? {})]),
 		])];
-		const result = await showAgentSelector(ctx, agents, activeName, {
+		return {
 			projectName: path.basename(projectRoot) || projectRoot,
 			projectRoot,
 			projectAgentsDir,
@@ -667,10 +713,87 @@ export default function (pi: ExtensionAPI) {
 			mcpServers: config.mcpServers ?? {},
 			mcpServerSources: config.mcpServerSources ?? {},
 			mcpStatuses: mcpManager.getStatuses(serverNames),
-		});
-		if (result === null) return; // cancelled
-		if (result === "(none)") await clearAgent(ctx);
-		else await applyAgent(result, ctx);
+		};
+	}
+
+	async function reapplyAgent(name: string, ctx: ExtensionContext, opts?: { silent?: boolean }) {
+		if (activeName === name) await mcpManager.disconnectAll();
+		await applyAgent(name, ctx, opts);
+	}
+
+	async function editAgent(name: string, ctx: ExtensionContext): Promise<void> {
+		const agent = agents.find((candidate) => candidate.name === name);
+		if (!agent) return;
+		const result = await showAgentStudio(ctx, agent, { ...selectorOptions(ctx), hasSessionDraft: studioDrafts.has(name) });
+		if (!result) return;
+		if (result.action === "revert") {
+			persistStudioDraft(name, undefined);
+			if (activeName === name) await reapplyAgent(name, ctx);
+			ctx.ui.notify(`Agent "${name}": session draft reverted`, "info");
+			return;
+		}
+		if (result.action === "apply") {
+			persistStudioDraft(name, result.override);
+			await reapplyAgent(name, ctx);
+			ctx.ui.notify(`Agent "${name}": session draft applied`, "info");
+			return;
+		}
+
+		const scope = result.action === "save-global" ? "global" : "project";
+		const configPath = saveAgentOverride(ctx.cwd, scope, name, result.override);
+		persistStudioDraft(name, undefined);
+		const discovered = await discoverAgents(ctx.cwd, { includeProject: ctx.isProjectTrusted ? ctx.isProjectTrusted() : true });
+		sourceAgents = discovered.agents;
+		config = discovered.config;
+		rebuildEffectiveAgents();
+		await reapplyAgent(name, ctx);
+		ctx.ui.notify(`Agent "${name}" saved to ${configPath}`, "info");
+	}
+
+	async function createAgent(ctx: ExtensionContext): Promise<void> {
+		const trusted = ctx.isProjectTrusted ? ctx.isProjectTrusted() : true;
+		const scopes = trusted ? ["Project (commit with this repository)", "Global (all projects)"] : ["Global (all projects)"];
+		const selectedScope = await ctx.ui.select("Create agent · save location", scopes);
+		if (!selectedScope) return;
+		const scope = selectedScope.startsWith("Global") ? "global" : "project";
+		const name = (await ctx.ui.input("Agent name", "e.g. developer, browser-verifier"))?.trim();
+		if (!name) return;
+		if (agents.some((agent) => agent.name === name)) {
+			ctx.ui.notify(`Agent "${name}" already exists; select it and press e to edit`, "warning");
+			return;
+		}
+		const description = (await ctx.ui.input("Description", `What ${name} is responsible for`))?.trim();
+		if (!description) return;
+		const prompt = await ctx.ui.editor(`Initial system prompt · ${name}`, "");
+		const available = new Set(pi.getAllTools().map((tool) => tool.name));
+		const tools = pi.getActiveTools().filter((tool) => available.has(tool) && tool !== DELEGATE_TOOL && !tool.includes("__"));
+		try {
+			const filePath = saveDeclarativeAgent(ctx.cwd, scope, { name, description, tools, mcp: [], systemPrompt: prompt });
+			const discovered = await discoverAgents(ctx.cwd, { includeProject: trusted });
+			sourceAgents = discovered.agents;
+			config = discovered.config;
+			rebuildEffectiveAgents();
+			ctx.ui.notify(`Created agent "${name}" at ${filePath}`, "info");
+			await editAgent(name, ctx);
+		} catch (err) {
+			ctx.ui.notify(`Could not create agent: ${err instanceof Error ? err.message : String(err)}`, "error");
+		}
+	}
+
+	/** Show the dashboard; Studio actions return to it after closing. */
+	async function showPicker(ctx: ExtensionContext) {
+		while (true) {
+			const result = await showAgentSelector(ctx, agents, activeName, selectorOptions(ctx));
+			if (result === null) return;
+			if (typeof result === "object") {
+				if (result.action === "create") await createAgent(ctx);
+				else await editAgent(result.agent, ctx);
+				continue;
+			}
+			if (result === "(none)") await clearAgent(ctx);
+			else await applyAgent(result, ctx);
+			return;
+		}
 	}
 
 	/** Rotate to the next agent, wrapping through "(none)". */
@@ -828,7 +951,9 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("Project .pi-agents/ not loaded — this project folder is not trusted by pi (run /trust)", "warning");
 		}
 		const result = await discoverAgents(ctx.cwd, { includeProject: trusted });
-		agents = result.agents;
+		sourceAgents = result.agents;
+		restoreStudioDrafts(ctx);
+		rebuildEffectiveAgents();
 		config = result.config;
 		activeName = undefined;
 		activeAgent = undefined;
@@ -899,6 +1024,13 @@ export default function (pi: ExtensionAPI) {
 				}
 			} catch { /* not a git repository — nothing to prune */ }
 		}
+	});
+
+	pi.on("session_tree", async (_event, ctx) => {
+		const selected = activeName;
+		restoreStudioDrafts(ctx);
+		rebuildEffectiveAgents();
+		if (selected && agents.some((agent) => agent.name === selected)) await reapplyAgent(selected, ctx, { silent: true });
 	});
 
 	// Close MCP server processes when the session ends.

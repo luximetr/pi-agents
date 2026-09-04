@@ -113,7 +113,8 @@ If the main checkout was never trusted, the normal pi trust prompt applies in th
 
 | Action | How |
 |---|---|
-| Open agent picker | `f7` (also accepts configured shortcuts) |
+| Open Agent Studio / picker | `f7` (also accepts configured shortcuts) |
+| Edit or create an agent | In `f7`: select an agent and press `e`, or press `n` for a new JSON-backed agent |
 | Rotate to next agent | `f8` (cycles: plain pi → dev → doc → … → plain pi; also accepts configured shortcuts) |
 | Inspect running subagents | `f9` or `/subagents` |
 | Manage retained worktrees | `/subagents worktrees` (list, delete, prune) |
@@ -124,6 +125,26 @@ If the main checkout was never trusted, the normal pi trust prompt applies in th
 | Active agent indicator | footer status line: `agent:dev · 7 tools · MCP:playwright`, tinted with the agent's color |
 
 The interactive agent's model and reasoning level are selected in pi itself (`/model`, thinking UI). A parent agent can select a fixed model and timeout for each delegated subagent as described below.
+
+## Agent Studio
+
+`f7` is both the agent dashboard and the entry point to Agent Studio:
+
+- Select an agent and press `e` to edit its prompt, built-in/extension tool allowlist, and MCP assignments. Tool and MCP selectors show details for the highlighted item in a right-side pane.
+- Press `n` to create a project or global agent interactively. Studio-created agents use a declarative `agent.json`; no TypeScript is generated.
+- **Apply as session draft** tests changes immediately without touching the source definition. Drafts are stored in session history, survive resume/tree navigation, are marked `◆ draft` in the dashboard, and are inherited by delegated children.
+- **Save project/global override** persists the effective prompt/tools/MCP selection in `config.json` under `agentOverrides`. Code-backed `agent.ts` files are never rewritten.
+- **Revert session draft** returns to the saved source and overlays.
+
+The MCP editor includes curated recipes for Playwright, iOS Simulator, pen.dev, local DocHub, and local DesignHub. They remain disconnected until assigned to an agent. Project/global `mcpServers` with the same name override the bundled recipe.
+
+- `playwright`: pinned `@playwright/mcp@0.0.80`.
+- `ios-simulator`: pinned `ios-simulator-mcp@2.1.0`; requires Xcode/iOS Simulator.
+- `pen.dev`: connects to the Apple-silicon MCP server inside `/Applications/Pen.app`; keep Pen running.
+- `dochub`: connects to `http://localhost:3001/mcp`; set `DOCHUB_TOKEN` in the shell or `.pi-agents/.env`.
+- `designhub`: connects through the editor proxy at `http://localhost:5101/mcp`; set `DESIGNHUB_TOKEN` in the shell or `.pi-agents/.env`.
+
+This layered model keeps arbitrary TypeScript safe: `source definition + saved global/project override + session draft = effective agent`.
 
 ## Defining agents
 
@@ -146,6 +167,14 @@ Agents live in `.pi-agents/` — project root (walked up to git root) and global
 ```
 .pi-agents/doc.ts     # name defaults to filename
 ```
+
+### Declarative agent (created by Studio)
+
+```
+.pi-agents/browser/agent.json
+```
+
+`agent.json` supports the normal serializable agent fields such as `name`, `description`, `tools`, `mcp`, and `systemPrompt`. Use `agent.ts` when imports, factories, or executable custom tools are needed.
 
 ### agent.ts
 
@@ -437,6 +466,7 @@ The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent insp
 
 ## Limitations / roadmap
 
-- MCP supports stdio and streamable HTTP transports (no SSE); server config is static (no dynamic add/remove at runtime)
-- Agents are discovered at session start; edits to `.pi-agents/` need `/reload` (or a new session) before the dashboard, shortcuts, and commands reflect them
+- Agent Studio currently edits prompts, tool allowlists, and MCP assignments; metadata, delegation relationships, policies, and executable custom-tool code still use the source definition.
+- MCP supports stdio and streamable HTTP transports (no SSE); custom server definitions are still configured statically, while the bundled Playwright, iOS Simulator, pen.dev, DocHub, and DesignHub recipes can be assigned in Studio.
+- External edits to `.pi-agents/` need `/reload` (or a new session); Studio drafts and saves are applied immediately.
 - Project-local installs (`pi install <repo> -l` / `pi-agents --local`) are recorded in `.pi/settings.json`, which git never checks out — freshly created worktrees of such a project have no extension. Use the default global install instead (the `.pi-agents/` configs remain per project)

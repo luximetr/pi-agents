@@ -129,6 +129,30 @@ test("end to end: delegate launches an isolated child with the target agent", as
 	}
 });
 
+test("delegated children inherit serialized Agent Studio drafts", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-child-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	try {
+		await writeFile(fakePi, `#!/usr/bin/env node
+			process.stdin.once("data", () => {
+				const inherited = JSON.parse(process.env.PI_AGENTS_STUDIO_OVERRIDES || "{}");
+				const text = inherited.worker?.systemPrompt || "missing";
+				process.stdout.write(JSON.stringify({type:"message_end", message:{content:[{type:"text", text}]}}) + "\\n");
+				process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
+				process.exit(0);
+			});
+		`);
+		await chmod(fakePi, 0o755);
+		const result = await runSubagent("worker", "verify draft", root, noAbort, {
+			executable: fakePi,
+			runtimeAgentOverrides: { worker: { tools: ["read"], systemPrompt: "experimental child prompt" } },
+		});
+		assert.equal(result, "experimental child prompt");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("execution timeout stops a stalled subagent and preserves diagnostic state", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-timeout-"));
 	const fakePi = path.join(root, "fake-pi.mjs");

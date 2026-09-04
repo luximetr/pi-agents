@@ -4,11 +4,30 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 
 ## Using the extension (quick start)
 
-- Switch agents: `f7` (dashboard/picker), `f8` (rotate), or `/agent <name>` (`/agent none` clears). In the dashboard, type to filter, use `↑↓` to choose an agent, and use `Tab` or `←→` to inspect its overview, effective tools, MCP status, and exact system prompt before activating it. Inspect a running delegated subagent with `f9` or `/subagents`; `/subagents worktrees` manages retained delegation worktrees. Function-key shortcuts work through iTerm2 and herdr without terminal setting changes; configured aliases remain available too.
+- Switch agents: `f7` (Agent Studio/dashboard), `f8` (rotate), or `/agent <name>` (`/agent none` clears). In `f7`, type to filter, use `↑↓` to choose an agent, `Tab`/`←→` to inspect it, `e` to edit it, or `n` to create one. Inspect a running delegated subagent with `f9` or `/subagents`; `/subagents worktrees` manages retained delegation worktrees. Function-key shortcuts work through iTerm2 and herdr without terminal setting changes; configured aliases remain available too.
 - Start with an agent from the CLI: `pi --agent dev`.
 - The active agent's system prompt is appended every turn; its tools are restricted to its allowlist (+ its MCP tools).
 - No agent selected = plain pi, unchanged.
 - `/agent:help <question>` answers a question from this guide (e.g. `/agent:help how do I add an MCP server?`).
+
+## Agent Studio
+
+Open `f7`, select an agent, and press `e`. Studio can edit the effective system prompt, direct tool allowlist, and MCP assignments without modifying arbitrary TypeScript. Tool and MCP selectors show the highlighted item's description and connection details in a right-side pane.
+
+- **Apply as session draft**: activates immediately, persists in session history, follows session-tree navigation, and is inherited by delegated children. The dashboard marks it `◆ draft`.
+- **Save project override**: writes an `agentOverrides` entry to the project `.pi-agents/config.json` and applies it immediately.
+- **Save global override**: writes the same declarative overlay to the global config.
+- **Revert session draft**: restores the saved source/global/project composition.
+
+Press `n` in the dashboard to create a project or global JSON-backed agent interactively. It captures the current direct toolset as a starting point, then opens Studio. Use TypeScript definitions for imports, factories, and executable custom tools; Studio overlays never rewrite them.
+
+The MCP selector always offers recipes shipped with the extension. They are opt-in and disconnected until assigned. A project/global server definition with the same name overrides its bundled recipe:
+
+- `playwright`: pinned `@playwright/mcp@0.0.80`.
+- `ios-simulator`: pinned `ios-simulator-mcp@2.1.0`; requires Xcode/iOS Simulator.
+- `pen.dev`: uses the Apple-silicon MCP server bundled in `/Applications/Pen.app`; keep Pen running.
+- `dochub`: local Streamable HTTP at `http://localhost:3001/mcp`; set `DOCHUB_TOKEN` in the shell or `.pi-agents/.env`.
+- `designhub`: local Streamable HTTP through the editor proxy at `http://localhost:5101/mcp`; set `DESIGNHUB_TOKEN` in the shell or `.pi-agents/.env`.
 
 ## Where agents live
 
@@ -19,9 +38,10 @@ Commit the project's `.pi-agents/` to the repo — it is the per-project configu
 
 ## Create an agent
 
-Two layouts:
+Supported layouts:
 
 - Folder: `.pi-agents/<name>/agent.ts` (optionally with a `prompt.md`)
+- Studio/declarative: `.pi-agents/<name>/agent.json`
 - Single file: `.pi-agents/<name>.ts` (name defaults to the filename)
 
 `agent.ts` default-exports a config object:
@@ -187,4 +207,4 @@ Per agent: a server can also be defined **inside the agent** (`mcpServers` in `a
 
 ## After editing .pi-agents/
 
-Agents are discovered at session start — run `/reload` (or start a new session) before the `/agent` dashboard reflects definition changes.
+External source edits are discovered at session start — run `/reload` (or start a new session). Agent Studio applies its own session drafts and saved overlays immediately without reload.

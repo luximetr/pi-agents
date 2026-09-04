@@ -1,7 +1,7 @@
 import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder, getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, Input, Key, Markdown, SelectList, Spacer, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
-import type { DiscoveredAgent, McpServerConfig } from "./agents.ts";
+import { BUILTIN_MCP_SERVER_DESCRIPTIONS, type AgentOverride, type DiscoveredAgent, type McpServerConfig } from "./agents.ts";
 import type { McpRuntimeStatus } from "./mcp.ts";
 import type { RunningSubagentHandle, SubagentSnapshot } from "./subagents.ts";
 
@@ -67,6 +67,7 @@ export function agentLabel(agent: DiscoveredAgent): string {
 	if (agent.mcp?.length) parts.push(`MCP: ${agent.mcp.join(", ")}`);
 	if (agent.subagents?.length) parts.push(`delegates: ${agent.subagents.map((child) => child.name).join(", ")}`);
 	if (agent.deniedPaths?.length) parts.push(`${agent.deniedPaths.length} path rule${agent.deniedPaths.length === 1 ? "" : "s"}`);
+	if (agent.studioDraft) parts.push("Studio draft");
 	parts.push(agent.source);
 	return parts.join(" · ");
 }
@@ -521,7 +522,7 @@ export interface AgentSelectorOptions {
 	allTools: Array<{ name: string; description?: string }>;
 	activeTools: string[];
 	mcpServers: Record<string, McpServerConfig>;
-	mcpServerSources: Record<string, "global" | "project">;
+	mcpServerSources: Record<string, "builtin" | "global" | "project">;
 	mcpStatuses: Record<string, McpRuntimeStatus>;
 }
 
@@ -572,7 +573,7 @@ function renderAgentDetails(
 		return lines;
 	}
 
-	lines.push(` ${colorize(theme, agent, theme.bold(agent.name))}${agent.name === activeName ? theme.fg("success", "  ● active") : ""}`);
+	lines.push(` ${colorize(theme, agent, theme.bold(agent.name))}${agent.name === activeName ? theme.fg("success", "  ● active") : ""}${agent.studioDraft ? theme.fg("warning", "  ◆ draft") : ""}`);
 	if (tab === "overview") {
 		pushWrapped(lines, width, agent.description);
 		if (agent.whenToUse) pushWrapped(lines, width, `${theme.fg("muted", "Use when: ")}${agent.whenToUse}`);
@@ -621,13 +622,199 @@ function renderAgentDetails(
 	return lines;
 }
 
-/** Agent dashboard and picker. Returns selected agent name, "(none)", or null (cancelled). */
+export type AgentSelectorResult = string | { action: "edit"; agent: string } | { action: "create" } | null;
+
+export type AgentStudioResult =
+	| { action: "apply" | "save-project" | "save-global"; override: AgentOverride }
+	| { action: "revert" }
+	| null;
+
+const TOGGLE_EDITOR_HEIGHT = 16;
+
+/** Checkbox selector with a stable details pane for the currently highlighted tool/server. */
+async function showToggleEditor(
+	ctx: ExtensionContext,
+	title: string,
+	items: Array<{ id: string; label: string; description?: string }>,
+	initial: string[],
+): Promise<string[]> {
+	const enabled = new Set(initial);
+	await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+		const searchInput = new Input();
+		searchInput.focused = true;
+		let selectedId = items.find((item) => enabled.has(item.id))?.id ?? items[0]?.id;
+
+		const filteredItems = () => {
+			const query = searchInput.getValue().trim().toLowerCase();
+			return query
+				? items.filter((item) => `${item.label}\n${item.description ?? ""}`.toLowerCase().includes(query))
+				: items;
+		};
+		const ensureSelection = () => {
+			const filtered = filteredItems();
+			if (!filtered.some((item) => item.id === selectedId)) selectedId = filtered[0]?.id;
+			return filtered;
+		};
+
+		return {
+			get focused() { return searchInput.focused; },
+			set focused(value: boolean) { searchInput.focused = value; },
+			render(width: number) {
+				const filtered = ensureSelection();
+				const selectedIndex = Math.max(0, filtered.findIndex((item) => item.id === selectedId));
+				const selected = filtered[selectedIndex];
+				const border = theme.fg("borderAccent", "─".repeat(Math.max(1, width)));
+				const [input = ""] = searchInput.render(Math.max(1, width - 11));
+				const lines = [border, truncateToWidth(theme.fg("accent", theme.bold(title)), width), `${theme.fg("muted", " Filter  ")}${input}`];
+				const usableWidth = Math.max(2, width - 3);
+				const desiredLeftWidth = Math.max(12, Math.min(32, Math.floor(usableWidth * 0.38)));
+				const leftWidth = Math.min(Math.max(1, usableWidth - 1), desiredLeftWidth);
+				const rightWidth = Math.max(1, usableWidth - leftWidth);
+				const listCapacity = TOGGLE_EDITOR_HEIGHT - 2;
+				const listStart = Math.min(
+					Math.max(0, selectedIndex - Math.floor(listCapacity / 2)),
+					Math.max(0, filtered.length - listCapacity),
+				);
+				const leftPane = [
+					theme.fg("accent", theme.bold(` Choices (${enabled.size}/${items.length})`)),
+					theme.fg("dim", ` ${filtered.length} shown`),
+					...(filtered.length > 0
+						? filtered.slice(listStart, listStart + listCapacity).map((item) => {
+							const marker = item.id === selectedId ? theme.fg("accent", "›") : " ";
+							const check = enabled.has(item.id) ? theme.fg("success", "✓") : theme.fg("muted", "○");
+							const label = item.id === selectedId ? theme.fg("accent", item.label) : item.label;
+							return ` ${marker} ${check} ${label}`;
+						})
+						: [theme.fg("warning", " No matching choices")]),
+				];
+				const rightPane: string[] = [];
+				if (selected) {
+					rightPane.push(
+						theme.fg("accent", theme.bold(` ${selected.label}`)),
+						theme.fg(enabled.has(selected.id) ? "success" : "muted", ` ${enabled.has(selected.id) ? "✓ enabled" : "○ disabled"}`),
+						"",
+					);
+					for (const paragraph of (selected.description ?? "No description is registered for this item.").split("\n")) {
+						pushWrapped(rightPane, rightWidth, paragraph, 1);
+					}
+				} else {
+					rightPane.push(theme.fg("muted", " No item selected."));
+				}
+				const divider = theme.fg("borderMuted", " │ ");
+				for (let row = 0; row < TOGGLE_EDITOR_HEIGHT; row++) {
+					lines.push(`${padToWidth(leftPane[row] ?? "", leftWidth)}${divider}${padToWidth(rightPane[row] ?? "", rightWidth)}`);
+				}
+				lines.push(theme.fg("dim", " type to filter · ↑↓ select · space/enter toggle · esc done"), border);
+				return lines.map((line) => truncateToWidth(line, width));
+			},
+			invalidate() { searchInput.invalidate(); },
+			handleInput(data: string) {
+				const filtered = ensureSelection();
+				const index = Math.max(0, filtered.findIndex((item) => item.id === selectedId));
+				if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+					done(undefined);
+				} else if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
+					if (filtered.length > 0) {
+						const offset = matchesKey(data, Key.up) ? -1 : 1;
+						selectedId = filtered[(index + offset + filtered.length) % filtered.length].id;
+					}
+				} else if (data === " " || matchesKey(data, Key.enter)) {
+					if (selectedId) {
+						if (enabled.has(selectedId)) enabled.delete(selectedId);
+						else enabled.add(selectedId);
+					}
+				} else {
+					searchInput.handleInput(data);
+					ensureSelection();
+				}
+				tui.requestRender();
+			},
+		};
+	});
+	return items.map((item) => item.id).filter((id) => enabled.has(id));
+}
+
+/** Interactive live-draft editor for the fields that can safely override code-backed agents. */
+export async function showAgentStudio(
+	ctx: ExtensionContext,
+	agent: DiscoveredAgent,
+	options: AgentSelectorOptions & { hasSessionDraft: boolean },
+): Promise<AgentStudioResult> {
+	let tools = agent.tools === undefined ? [...options.activeTools] : [...agent.tools];
+	let inheritsTools = agent.tools === undefined;
+	let mcp = [...(agent.mcp ?? [])];
+	let systemPrompt = agent.systemPrompt ?? "";
+
+	while (true) {
+		const promptLabel = `Edit prompt (${systemPrompt ? `${systemPrompt.split("\n").length} lines` : "empty"})`;
+		const toolsLabel = `Choose tools (${inheritsTools ? "inherited" : tools.length})`;
+		const mcpLabel = `Choose MCP servers (${mcp.length})`;
+		const actions = [
+			promptLabel,
+			toolsLabel,
+			mcpLabel,
+			"Apply as session draft",
+			...(options.trusted ? ["Save project override"] : []),
+			"Save global override",
+			...(options.hasSessionDraft ? ["Revert session draft"] : []),
+			"Back without applying",
+		];
+		const choice = await ctx.ui.select(`Agent Studio · ${agent.name}`, actions);
+		if (!choice || choice === "Back without applying") return null;
+		if (choice === promptLabel) {
+			const edited = await ctx.ui.editor(`System prompt · ${agent.name}`, systemPrompt);
+			if (edited !== undefined) systemPrompt = edited;
+			continue;
+		}
+		if (choice === toolsLabel) {
+			const ownCustom = new Set(Object.keys(agent.customTools ?? {}));
+			const choices = options.allTools
+				.filter((tool) => tool.name !== "delegate" && tool.name !== "powershell" && !tool.name.includes("__") && !ownCustom.has(tool.name))
+				.map((tool) => ({ id: tool.name, label: tool.name, description: tool.description }));
+			tools = await showToggleEditor(ctx, `Tools · ${agent.name}`, choices, tools);
+			inheritsTools = false;
+			continue;
+		}
+		if (choice === mcpLabel) {
+			const names = [...new Set([...Object.keys(options.mcpServers), ...Object.keys(agent.mcpServers ?? {}), ...mcp])].sort();
+			const choices = names.map((name) => {
+				const source = agent.mcpServers?.[name] ? "agent-local" : options.mcpServerSources[name] ?? "unknown";
+				const cfg = agent.mcpServers?.[name] ?? options.mcpServers[name];
+				const transport = cfg?.url
+					? `HTTP · ${cfg.url}`
+					: cfg?.command
+						? `stdio · ${[cfg.command, ...(cfg.args ?? [])].join(" ")}`
+						: "missing definition";
+				const recipeHelp = source === "builtin" ? BUILTIN_MCP_SERVER_DESCRIPTIONS[name] : undefined;
+				return {
+					id: name,
+					label: name,
+					description: [recipeHelp, `${transport} · ${source}`].filter(Boolean).join("\n"),
+				};
+			});
+			if (choices.length === 0) ctx.ui.notify("No MCP servers or built-in recipes are available.", "warning");
+			else mcp = await showToggleEditor(ctx, `MCP servers · ${agent.name}`, choices, mcp);
+			continue;
+		}
+		if (choice === "Revert session draft") return { action: "revert" };
+		const override: AgentOverride = {
+			...(inheritsTools ? {} : { tools }),
+			mcp,
+			systemPrompt: systemPrompt.trim() ? systemPrompt : null,
+		};
+		if (choice === "Apply as session draft") return { action: "apply", override };
+		if (choice === "Save project override") return { action: "save-project", override };
+		if (choice === "Save global override") return { action: "save-global", override };
+	}
+}
+
+/** Agent dashboard and picker. Enter activates; e opens Agent Studio. */
 export function showAgentSelector(
 	ctx: ExtensionContext,
 	agents: DiscoveredAgent[],
 	activeName: string | undefined,
 	options: AgentSelectorOptions,
-): Promise<string | null> {
+): Promise<AgentSelectorResult> {
 	const items: SelectItem[] = [
 		...agents.map((agent) => ({
 			value: agent.name,
@@ -637,7 +824,7 @@ export function showAgentSelector(
 		{ value: "(none)", label: activeName === undefined ? "● plain pi" : "  plain pi", description: "Default prompt and tools · no active agent" },
 	];
 
-	return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+	return ctx.ui.custom<AgentSelectorResult>((tui, theme, _kb, done) => {
 		const coloredItems = items.map((item) => {
 			const agent = agents.find((candidate) => candidate.name === item.value);
 			return agent ? { ...item, label: colorize(theme, agent, item.label) } : item;
@@ -703,7 +890,7 @@ export function showAgentSelector(
 				for (let row = 0; row < AGENT_DASHBOARD_HEIGHT; row++) {
 					lines.push(`${padToWidth(leftPane[row] ?? "", leftWidth)}${divider}${padToWidth(rightPane[row] ?? "", rightWidth)}`);
 				}
-				lines.push(theme.fg("dim", " type to filter · ↑↓ agent · tab/←→ details · PgUp/PgDn scroll · enter activate · esc cancel"), border);
+				lines.push(theme.fg("dim", " type to filter · ↑↓ agent · tab/←→ details · enter activate · e edit · n new · esc cancel"), border);
 				return lines.map((line) => truncateToWidth(line, width));
 			},
 			invalidate() { searchInput.invalidate(); selectList.invalidate(); },
@@ -718,6 +905,11 @@ export function showAgentSelector(
 					detailOffset = Math.min(maxDetailOffset, detailOffset + 10);
 				} else if (matchesKey(data, Key.pageUp)) {
 					detailOffset = Math.max(0, detailOffset - 10);
+				} else if (data.toLowerCase() === "e") {
+					const selected = selectList.getSelectedItem()?.value;
+					if (selected && selected !== "(none)") done({ action: "edit", agent: selected });
+				} else if (data.toLowerCase() === "n") {
+					done({ action: "create" });
 				} else if (matchesKey(data, Key.up) || matchesKey(data, Key.down) || matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
 					selectList.handleInput(data);
 				} else {

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import extension from "../index.ts";
+import { discoverAgents, saveAgentOverride, saveDeclarativeAgent } from "../agents.ts";
 
 async function makeAgent(root: string, name: string, extra = "") {
 	await mkdir(path.join(root, ".pi-agents", name), { recursive: true });
@@ -13,7 +14,17 @@ async function makeAgent(root: string, name: string, extra = "") {
 	);
 }
 
-function boot(root: string, options?: { flag?: string; sessionFile?: string; trusted?: boolean; mode?: string }) {
+function boot(root: string, options?: {
+	flag?: string;
+	sessionFile?: string;
+	trusted?: boolean;
+	mode?: string;
+	branchEntries?: any[];
+	selectAnswers?: Array<string | undefined>;
+	editorAnswers?: Array<string | undefined>;
+	inputAnswers?: Array<string | undefined>;
+	customActions?: Array<(component: any, done: (value: any) => void) => void>;
+}) {
 	const handlers = new Map<string, (event: any, ctx: any) => any>();
 	const commands = new Map<string, any>();
 	const activeToolsets: string[][] = [];
@@ -22,9 +33,10 @@ function boot(root: string, options?: { flag?: string; sessionFile?: string; tru
 	const statuses: string[] = [];
 	let customComponent: any;
 	const tools = new Map<string, any>([
-		["read", { name: "read" }],
-		["bash", { name: "bash" }],
-		["delegate", { name: "delegate" }],
+		["read", { name: "read", description: "Read file contents from disk." }],
+		["bash", { name: "bash", description: "Execute a shell command." }],
+		["powershell", { name: "powershell", description: "Execute PowerShell commands." }],
+		["delegate", { name: "delegate", description: "Delegate work to a child agent." }],
 	]);
 	const pi: any = {
 		on: (name: string, handler: any) => handlers.set(name, handler),
@@ -45,14 +57,26 @@ function boot(root: string, options?: { flag?: string; sessionFile?: string; tru
 		cwd: root,
 		mode: options?.mode,
 		isProjectTrusted: () => options?.trusted ?? true,
-		sessionManager: { getSessionFile: () => options?.sessionFile },
+		sessionManager: {
+			getSessionFile: () => options?.sessionFile,
+			getBranch: () => options?.branchEntries ?? [],
+			getEntries: () => options?.branchEntries ?? [],
+		},
 		ui: {
 			theme,
 			setStatus: (_key: string, value: string) => statuses.push(value),
 			notify: (message: string, level: string) => notifications.push({ message, level }),
+			select: async () => options?.selectAnswers?.shift(),
+			editor: async () => options?.editorAnswers?.shift(),
+			input: async () => options?.inputAnswers?.shift(),
 			custom: async (factory: any) => {
-				customComponent = factory({ requestRender: () => {} }, theme, {}, () => {});
-				return null;
+				let finish!: (value: any) => void;
+				const completion = new Promise<any>((resolve) => { finish = resolve; });
+				customComponent = factory({ requestRender: () => {} }, theme, {}, finish);
+				const action = options?.customActions?.shift();
+				if (!action) return null;
+				action(customComponent, finish);
+				return completion;
 			},
 		},
 	};
@@ -178,6 +202,181 @@ test("startup shows a concise project summary and capability-rich footer", async
 		assert.ok(runtime.notifications.some((entry) => entry.message.includes("1 project + 0 global agents · alpha active")));
 		assert.match(runtime.statuses.at(-1) ?? "", /agent:alpha/);
 		assert.match(runtime.statuses.at(-1) ?? "", /· 1 tool/);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("Agent Studio applies a live session prompt draft without rewriting agent.ts", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-live-"));
+	try {
+		await makeAgent(root, "alpha", "default: true");
+		const sourcePath = path.join(root, ".pi-agents", "alpha", "agent.ts");
+		const sourceBefore = await readFile(sourcePath, "utf8");
+		const runtime = boot(root, {
+			selectAnswers: ["Edit prompt (empty)", "Apply as session draft"],
+			editorAnswers: ["You are an experimental browser verifier."],
+			customActions: [
+				(component, _done) => component.handleInput("e"),
+				(component, _done) => component.handleInput("\u001b"),
+			],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		const prompt = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
+		assert.match(prompt.systemPrompt, /experimental browser verifier/);
+		assert.ok(runtime.entries.some((entry) => entry.customType === "pi-agents-studio-state"));
+		assert.equal(await readFile(sourcePath, "utf8"), sourceBefore);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("session startup restores Agent Studio tool and prompt drafts", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-restore-"));
+	try {
+		await makeAgent(root, "alpha", "default: true");
+		const runtime = boot(root, {
+			branchEntries: [{
+				type: "custom",
+				customType: "pi-agents-studio-state",
+				data: { name: "alpha", override: { tools: ["bash"], mcp: [], systemPrompt: "Restored draft prompt" } },
+			}],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		assert.deepEqual(runtime.activeToolsets.at(-1), ["bash"]);
+		const prompt = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
+		assert.match(prompt.systemPrompt, /Restored draft prompt/);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("Agent Studio creates an agent from the empty dashboard", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-empty-create-"));
+	try {
+		const runtime = boot(root, {
+			selectAnswers: ["Project (commit with this repository)", "Back without applying"],
+			inputAnswers: ["new-agent", "Experiments with project tools"],
+			editorAnswers: ["Use the available tools carefully."],
+			customActions: [
+				(component, _done) => component.handleInput("n"),
+				(component, _done) => component.handleInput("\u001b"),
+			],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		const created = JSON.parse(await readFile(path.join(root, ".pi-agents", "new-agent", "agent.json"), "utf8"));
+		assert.equal(created.description, "Experiments with project tools");
+		assert.equal(created.systemPrompt, "Use the available tools carefully.");
+		assert.ok(runtime.notifications.some((entry) => /Created agent "new-agent"/.test(entry.message)));
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("Agent Studio can create and discover a declarative JSON agent", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-create-"));
+	try {
+		const filePath = saveDeclarativeAgent(root, "project", {
+			name: "browser-verifier",
+			description: "Checks browser behavior",
+			tools: ["read"],
+			mcp: ["playwright"],
+			systemPrompt: "Verify the running application.",
+		});
+		assert.match(filePath, /browser-verifier\/agent\.json$/);
+		const discovered = await discoverAgents(root);
+		const agent = discovered.agents.find((candidate) => candidate.name === "browser-verifier");
+		assert.equal(agent?.description, "Checks browser behavior");
+		assert.deepEqual(agent?.tools, ["read"]);
+		assert.deepEqual(agent?.mcp, ["playwright"]);
+		assert.equal(agent?.systemPrompt, "Verify the running application.");
+		await assert.rejects(async () => saveDeclarativeAgent(root, "project", {
+			name: "browser-verifier", description: "duplicate",
+		}), /already exists/);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("project Studio overrides preserve config and expose curated MCP recipes", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-save-"));
+	try {
+		await makeAgent(root, "alpha", "default: true, systemPrompt: \"source prompt\"");
+		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({
+			defaultAgent: "alpha",
+			mcpServers: { custom: { command: "custom-mcp" } },
+		}));
+		const configPath = saveAgentOverride(root, "project", "alpha", {
+			tools: ["read", "grep"],
+			mcp: ["playwright"],
+			systemPrompt: "saved Studio prompt",
+		});
+		const raw = JSON.parse(await readFile(configPath, "utf8"));
+		assert.equal(raw.defaultAgent, "alpha");
+		assert.equal(raw.mcpServers.custom.command, "custom-mcp");
+		assert.deepEqual(raw.agentOverrides.alpha.mcp, ["playwright"]);
+
+		const discovered = await discoverAgents(root);
+		const alpha = discovered.agents.find((agent) => agent.name === "alpha");
+		assert.deepEqual(alpha?.tools, ["read", "grep"]);
+		assert.deepEqual(alpha?.mcp, ["playwright"]);
+		assert.equal(alpha?.systemPrompt, "saved Studio prompt");
+		assert.equal(alpha?.systemPromptPath, undefined);
+		assert.equal(discovered.config.mcpServerSources?.playwright, "builtin");
+		assert.deepEqual(discovered.config.mcpServers?.playwright.args, ["-y", "@playwright/mcp@0.0.80"]);
+		assert.equal(discovered.config.mcpServers?.["pen.dev"].command, "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/out/mcp-server-darwin-arm64");
+		assert.deepEqual(discovered.config.mcpServers?.dochub, {
+			url: "http://localhost:3001/mcp",
+			headers: { Authorization: "Bearer ${DOCHUB_TOKEN}" },
+		});
+		assert.deepEqual(discovered.config.mcpServers?.designhub, {
+			url: "http://localhost:5101/mcp",
+			headers: { Authorization: "Bearer ${DESIGNHUB_TOKEN}" },
+		});
+		assert.equal(discovered.config.mcpServerSources?.["pen.dev"], "builtin");
+		assert.equal(discovered.config.mcpServerSources?.dochub, "builtin");
+		assert.equal(discovered.config.mcpServerSources?.designhub, "builtin");
+		assert.equal(discovered.config.mcpServerSources?.custom, "project");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("Agent Studio selectors show highlighted tool and MCP details in a right pane", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-tool-details-"));
+	try {
+		await makeAgent(root, "alpha", "default: true");
+		let toolDetails = "";
+		let mcpDetails = "";
+		const runtime = boot(root, {
+			selectAnswers: ["Choose tools (1)", "Choose MCP servers (0)", "Back without applying"],
+			customActions: [
+				(component, _done) => component.handleInput("e"),
+				(component, _done) => {
+					toolDetails = component.render(100).join("\n");
+					component.handleInput("\u001b[B");
+					toolDetails += `\n${component.render(100).join("\n")}`;
+					component.handleInput("\u001b");
+				},
+				(component, _done) => {
+					mcpDetails = component.render(110).join("\n");
+					component.handleInput("\u001b");
+				},
+				(component, _done) => component.handleInput("\u001b"),
+			],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		assert.match(toolDetails, /Read file contents from disk\./);
+		assert.match(toolDetails, /Execute a shell command\./);
+		assert.match(toolDetails, /Choices \(1\/2\)/);
+		assert.doesNotMatch(toolDetails, /powershell/i);
+		assert.match(mcpDetails, /designhub/);
+		assert.match(mcpDetails, /local DesignHub editor/);
+		assert.match(mcpDetails, /proxy\. Requires DesignHub/);
+		assert.match(mcpDetails, /http:\/\/localhost:5101\/mcp/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
