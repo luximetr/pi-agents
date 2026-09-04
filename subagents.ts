@@ -41,6 +41,8 @@ export interface SubagentSnapshot {
 	currentToolArgs?: unknown;
 	partialText: string;
 	recentEvents: string[];
+	/** Cumulative child usage observed so far, for the live inspector. */
+	usage?: SubagentUsage;
 	stopReason?: SubagentStopReason;
 }
 
@@ -549,6 +551,22 @@ function createSubagentWorktree(cwd: string, branch: string, options: SubagentWo
 	}
 }
 
+function piInvocation(childArgs: string[], executable?: string): { command: string; args: string[] } {
+	const configured = executable ?? process.env.PI_CODING_AGENT_BIN;
+	if (configured) return { command: configured, args: childArgs };
+
+	// In npm installs process.execPath is usually node and argv[1] is pi's CLI
+	// script. Launching it through node is more reliable than assuming that the
+	// script is executable. Standalone binaries can launch themselves directly.
+	const currentScript = process.argv[1];
+	if (currentScript && !currentScript.startsWith("/$bunfs/root/") && existsSync(currentScript)) {
+		return { command: process.execPath, args: [currentScript, ...childArgs] };
+	}
+	const runtime = path.basename(process.execPath).toLowerCase();
+	if (/^(node|bun)(\.exe)?$/.test(runtime)) return { command: "pi", args: childArgs };
+	return { command: process.execPath, args: childArgs };
+}
+
 /** Run an isolated child pi session, forwarding live RPC progress and exposing a controllable handle. */
 export function runSubagent(
 	agentName: string,
@@ -588,10 +606,10 @@ export function runSubagent(
 			}
 		}
 
-		const executable = options.executable ?? process.env.PI_CODING_AGENT_BIN ?? process.argv[1] ?? "pi";
 		const childArgs = ["--mode", "rpc", "--no-session", "--agent", agentName];
 		if (options.model?.trim()) childArgs.push("--model", options.model.trim());
-		const child: ChildProcessWithoutNullStreams = spawn(executable, childArgs, {
+		const invocation = piInvocation(childArgs, options.executable);
+		const child: ChildProcessWithoutNullStreams = spawn(invocation.command, invocation.args, {
 			cwd: childCwd,
 			env: { ...process.env, PI_AGENTS_SUBAGENT_DEPTH: String(depth + 1) },
 			stdio: ["pipe", "pipe", "pipe"],
@@ -668,7 +686,7 @@ export function runSubagent(
 		};
 		const handle: RunningSubagentHandle = {
 			id: state.id,
-			snapshot: () => ({ ...state, recentEvents: [...state.recentEvents] }),
+			snapshot: () => ({ ...state, recentEvents: [...state.recentEvents], usage: state.usage ? { ...state.usage } : undefined }),
 			stop,
 			steer: (message: string) => {
 				const text = message.trim();
@@ -715,11 +733,24 @@ export function runSubagent(
 						state.partialText = text.slice(-MAX_PARTIAL_TEXT);
 					}
 					const usage = message?.usage;
-					if (usage) progress?.({ type: "stats", usage: {
-						provider: typeof message?.provider === "string" ? message.provider : undefined,
-						model: typeof message?.model === "string" ? message.model : undefined,
-						input: Number(usage.input ?? 0), output: Number(usage.output ?? 0), cacheRead: Number(usage.cacheRead ?? 0), cacheWrite: Number(usage.cacheWrite ?? 0), cost: Number(usage.cost?.total ?? 0),
-					} });
+					if (usage) {
+						const turnUsage: SubagentUsage = {
+							provider: typeof message?.provider === "string" ? message.provider : undefined,
+							model: typeof message?.model === "string" ? message.model : undefined,
+							input: Number(usage.input ?? 0), output: Number(usage.output ?? 0), cacheRead: Number(usage.cacheRead ?? 0), cacheWrite: Number(usage.cacheWrite ?? 0), cost: Number(usage.cost?.total ?? 0),
+						};
+						const previous = state.usage;
+						state.usage = {
+							provider: turnUsage.provider ?? previous?.provider,
+							model: turnUsage.model ?? previous?.model,
+							input: (previous?.input ?? 0) + turnUsage.input,
+							output: (previous?.output ?? 0) + turnUsage.output,
+							cacheRead: (previous?.cacheRead ?? 0) + turnUsage.cacheRead,
+							cacheWrite: (previous?.cacheWrite ?? 0) + turnUsage.cacheWrite,
+							cost: (previous?.cost ?? 0) + turnUsage.cost,
+						};
+						progress?.({ type: "stats", usage: turnUsage });
+					}
 					break;
 				}
 				case "tool_execution_start":
@@ -787,7 +818,6 @@ export function runSubagent(
 		};
 
 		options.onHandle?.(handle);
-		progress?.({ type: "started", agent: agentName });
 		child.stdout.on("data", (chunk: Buffer) => consume(chunk));
 		child.stdout.on("end", () => consume("", true));
 		child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });

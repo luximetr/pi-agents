@@ -131,6 +131,22 @@ test("agent custom tools are registered, activated, and wrap string results", as
 	}
 });
 
+test("parent prompts name allowed subagents and their runtime settings", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegation-prompt-"));
+	try {
+		await makeAgent(root, "lead", 'default: true, subagents: [{ name: "worker", model: "test/worker", timeoutSeconds: 90 }]');
+		await makeAgent(root, "worker");
+		const runtime = boot(root);
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		const result = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
+		assert.match(result.systemPrompt, /allowed subagents/);
+		assert.match(result.systemPrompt, /worker: worker \(model test\/worker, 90s deadline\)/);
+		assert.match(result.systemPrompt, /independent delegate calls together/);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("/agent none restores the toolset captured before activation", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-clear-"));
 	try {

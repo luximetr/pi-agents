@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +8,7 @@ import test from "node:test";
 import { discoverAgents, findMainCheckoutRoot } from "../agents.ts";
 import extension, { matchesDeniedPath } from "../index.ts";
 import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
-import { showSubagentInspector } from "../ui.ts";
+import { renderDelegateCall, renderDelegateResult, showSubagentInspector } from "../ui.ts";
 
 const noAbort = new AbortController().signal;
 
@@ -110,15 +110,19 @@ test("end to end: delegate launches an isolated child with the target agent", as
 		await chmod(fakePi, 0o755);
 		const progress: string[] = [];
 		let deadlineAt: number | undefined;
+		let runningHandle: RunningSubagentHandle | undefined;
 		const result = await runSubagent("worker", "inspect files", root, noAbort, {
 			executable: fakePi,
-			onHandle: (handle) => { if (handle) deadlineAt = handle.snapshot().deadlineAt; },
+			onHandle: (handle) => { if (handle) { runningHandle = handle; deadlineAt = handle.snapshot().deadlineAt; } },
 			onProgress: (event) => progress.push(event.type),
 		});
 		assert.equal(deadlineAt, undefined);
 		assert.ok(progress.includes("tool-start"));
 		assert.ok(progress.includes("text"));
 		assert.ok(progress.includes("stats"));
+		assert.deepEqual(runningHandle?.snapshot().usage, {
+			provider: "test", model: "test-model", input: 10, output: 5, cacheRead: 2, cacheWrite: 1, cost: 0.01,
+		});
 		assert.equal(result, "worker-result:inspect files");
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -235,6 +239,26 @@ test("subagent inspector renders live state and confirms a manual stop", async (
 	component.handleInput("y");
 	await inspector;
 	assert.equal(stopped, true);
+});
+
+test("delegate renderer keeps routine results compact and exposes worktree context", () => {
+	const theme: any = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
+	const call = renderDelegateCall({ agent: "worker", task: "Implement the parser", useWorktree: true }, theme).render(100).join("\n");
+	assert.match(call, /delegate → worker/);
+	assert.match(call, /isolated worktree/);
+
+	const output = Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n");
+	const component = renderDelegateResult({
+		content: [{ type: "text", text: `Result from worker:\n\n${output}\n\nBranch: pi-agents/worker/x\nWorktree: /tmp/worker-x` }],
+		details: { agent: "worker", status: "completed", branch: "pi-agents/worker/x", worktreePath: "/tmp/worker-x", statsLine: "stats: 1 call" },
+	}, { expanded: false }, theme);
+	const rendered = component.render(120).join("\n");
+	assert.match(rendered, /✓ worker completed/);
+	assert.match(rendered, /line 6/);
+	assert.doesNotMatch(rendered, /line 7/);
+	assert.match(rendered, /4 more lines/);
+	assert.match(rendered, /Worktree retained: \/tmp\/worker-x/);
+	assert.equal(rendered.match(/\/tmp\/worker-x/g)?.length, 1);
 });
 
 test("useWorktree runs the subagent on an automatically named branch", async () => {
@@ -395,6 +419,44 @@ test("end to end: configured subagent timeout returns control to the parent dele
 	} finally {
 		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
 		else process.env.PI_CODING_AGENT_BIN = previousBin;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("end to end: delegate truncates oversized child output and preserves the full result", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegate-output-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	const previousBin = process.env.PI_CODING_AGENT_BIN;
+	let fullOutputPath: string | undefined;
+	try {
+		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
+		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
+			export default { name: "lead", description: "Lead", default: true, subagents: ["worker"] };
+		`);
+		await mkdir(path.join(root, ".pi-agents", "worker"), { recursive: true });
+		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
+			export default { name: "worker", description: "Worker" };
+		`);
+		await writeFile(fakePi, `#!/usr/bin/env node
+			const text = Array.from({ length: 3000 }, (_, i) => "result-line-" + i + "-" + "x".repeat(20)).join("\\n");
+			process.stdout.write(JSON.stringify({ type: "message_end", message: { content: [{ type: "text", text }] } }) + "\\n");
+			process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+		`);
+		await chmod(fakePi, 0o755);
+		process.env.PI_CODING_AGENT_BIN = fakePi;
+		const { handlers, registered, ctx } = bootExtension(root);
+		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+		const delegate = registered.find((tool) => tool.name === "delegate")!;
+		const result = await delegate.execute("large-output", { agent: "worker", task: "produce a report" }, undefined, undefined, ctx);
+		fullOutputPath = result.details.fullOutputPath;
+		assert.equal(result.details.outputTruncated, true);
+		assert.match(String(result.content[0].text), /Output truncated/);
+		assert.ok(fullOutputPath && existsSync(fullOutputPath));
+		assert.match(readFileSync(fullOutputPath, "utf8"), /result-line-2999/);
+	} finally {
+		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
+		else process.env.PI_CODING_AGENT_BIN = previousBin;
+		if (fullOutputPath) await rm(path.dirname(fullOutputPath), { recursive: true, force: true });
 		await rm(root, { recursive: true, force: true });
 	}
 });

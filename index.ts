@@ -1,11 +1,22 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text, type KeyId } from "@earendil-works/pi-tui";
+import type { KeyId } from "@earendil-works/pi-tui";
 import { discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, loadConfig, readTrustDecision, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
-import { showAgentSelector, showSubagentInspector, showWorktreeManager, updateStatus, type WorktreeViewItem } from "./ui.ts";
+import {
+	renderDelegateCall,
+	renderDelegateResult,
+	showAgentSelector,
+	showSubagentInspector,
+	showWorktreeManager,
+	updateStatus,
+	type DelegateViewDetails,
+	type WorktreeViewItem,
+} from "./ui.ts";
 import {
 	DEFAULT_WORKTREE_RETENTION_DAYS,
 	deleteRetainedWorktree,
@@ -30,13 +41,9 @@ const DEFAULT_STALE_WARNING_MINUTES = 5;
 const DEFAULT_GRACEFUL_STOP_SECONDS = 5;
 const DELEGATE_TOOL = "delegate";
 
-type DelegateStatsDetails = {
+type DelegateStatsDetails = DelegateViewDetails & {
 	agent: string;
-	statsLine?: string;
-	status?: "completed" | "interrupted" | "timed_out" | "failed";
 	error?: boolean;
-	branch?: string;
-	worktreePath?: string;
 };
 
 type SubagentStats = {
@@ -135,9 +142,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function sessionSubagentStatsLine(): string | undefined {
-		if (sessionSubagentStats.calls === 0) return undefined;
-		const usage = formatSubagentUsage(sessionSubagentStats);
-		return `subagents: ${sessionSubagentStats.calls} call${sessionSubagentStats.calls === 1 ? "" : "s"} · ${usage}`;
+		const parts: string[] = [];
+		if (runningSubagents.size > 0) parts.push(`${runningSubagents.size} subagent${runningSubagents.size === 1 ? "" : "s"} running · f9 inspect`);
+		if (sessionSubagentStats.calls > 0) {
+			const usage = formatSubagentUsage(sessionSubagentStats);
+			parts.push(`${sessionSubagentStats.calls} call${sessionSubagentStats.calls === 1 ? "" : "s"}${usage ? ` · ${usage}` : ""}`);
+		}
+		return parts.length > 0 ? parts.join(" · ") : undefined;
 	}
 
 	function refreshStatus(ctx: ExtensionContext) {
@@ -214,6 +225,7 @@ export default function (pi: ExtensionAPI) {
 					baseDir: listing.baseDir,
 					items: listing.items.map<WorktreeViewItem>((item) => ({
 						branch: item.branch,
+						path: item.path,
 						agent: item.agent,
 						ageLabel: formatAge(now - (item.finishedAt ?? item.startedAt)),
 						dirty: item.dirty,
@@ -281,8 +293,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: DELEGATE_TOOL,
 		label: "Delegate",
-		description: "Delegate a focused task to an allowed subagent (optionally in an isolated git worktree) and receive its concise result.",
-		promptSnippet: "delegate: ask a specialist agent to complete an isolated task",
+		description: `Delegate a focused task to one of the current agent's allowed subagents. Independent delegate calls can run in parallel; useWorktree isolates file changes on a retained Git branch. Results are capped at ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; full oversized output is saved to a temporary file.`,
+		promptSnippet: "delegate: ask an allowed specialist to complete an isolated task",
+		promptGuidelines: [
+			"Use delegate only for focused tasks that benefit from a fresh specialist context; include relevant paths, constraints, and expected output in the task.",
+			"When several delegate tasks are independent, issue their delegate calls together so they can run in parallel.",
+			"Set delegate useWorktree to true for concurrent or experimental file changes; the result reports the retained branch and checkout.",
+		],
 		parameters: jsonSchemaToTypeBox({
 			type: "object",
 			properties: {
@@ -325,6 +342,7 @@ export default function (pi: ExtensionAPI) {
 				const MAX_PROGRESS_LINE_LENGTH = 160;
 				const progressLines: string[] = [];
 				let streamedText = "";
+				let progressPhase = "starting";
 				const boundProgressLines = (lines: string[]) => {
 					const bounded: string[] = [];
 					for (const line of lines) {
@@ -341,11 +359,24 @@ export default function (pi: ExtensionAPI) {
 					const allLines = [...progressLines, ...streamedText.split("\n")].filter(Boolean);
 					const bounded = boundProgressLines(allLines);
 					const summary = subagentStatsLine(callSubagentStats, Date.now() - startedAt);
-					const footer = [`agent: ${agentName}`, summary].filter(Boolean).join(" · ");
-					const progressText = [...bounded.slice(-(MAX_PROGRESS_LINES - 1)), footer].join("\n");
-					onUpdate?.({ content: [{ type: "text", text: progressText }], details: { agent: agentName, progress: true } });
+					const progressText = bounded.slice(-MAX_PROGRESS_LINES).join("\n") || "Starting child session…";
+					onUpdate?.({
+						content: [{ type: "text", text: progressText }],
+						details: {
+							agent: agentName,
+							task,
+							status: "running",
+							progress: true,
+							phase: progressPhase,
+							statsLine: summary,
+							branch: worktreeInfo?.branch,
+							worktreePath: worktreeInfo?.path,
+							useWorktree,
+						} satisfies DelegateStatsDetails,
+					});
 				};
-				const update = (line: string) => {
+				const update = (line: string, phase = line) => {
+					progressPhase = phase;
 					if (streamedText) {
 						progressLines.push(...streamedText.split("\n"));
 						streamedText = "";
@@ -371,29 +402,43 @@ export default function (pi: ExtensionAPI) {
 					onHandle: (handle) => {
 						if (handle) runningSubagents.set(handle.id, handle);
 						else runningSubagents.delete(String(toolCallId));
+						refreshStatus(ctx);
 					},
 					onProgress: (event) => {
 						switch (event.type) {
-							case "started": update(`▶ ${event.agent}: running`); break;
-							case "text": stream(event.delta); break;
+							case "started": update(`▶ ${event.agent}: running`, "running"); break;
+							case "text": progressPhase = "responding"; stream(event.delta); break;
 							case "stats": recordSubagentUsage(event.usage, callSubagentStats); refreshStatus(ctx); publish(); break;
-							case "tool-start": update(`→ ${event.tool}${formatArgs(event.args)}`); break;
-							case "tool-update": update(`  ${event.text}`); break;
-							case "tool-end": update(`${event.error ? "✗" : "✓"} ${event.tool}`); break;
-							case "finished": update(`✓ ${agentName}: finished`); break;
-							case "error": update(`✗ ${event.message}`); break;
+							case "tool-start": update(`→ ${event.tool}${formatArgs(event.args)}`, `using ${event.tool}`); break;
+							case "tool-update": update(`  ${event.text}`, "tool running"); break;
+							case "tool-end": update(`${event.error ? "✗" : "✓"} ${event.tool}`, event.error ? `${event.tool} failed` : "running"); break;
+							case "finished": update(`✓ ${agentName}: finished`, "finished"); break;
+							case "error": update(`✗ ${event.message}`, "error"); break;
 						}
 					},
 				});
+				const truncation = truncateHead(result, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+				let visibleResult = truncation.content;
+				let fullOutputPath: string | undefined;
+				if (truncation.truncated) {
+					const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-agents-output-"));
+					fullOutputPath = path.join(outputDir, `${agentName.replace(/[^a-zA-Z0-9._-]+/g, "-") || "subagent"}.md`);
+					await fs.promises.writeFile(fullOutputPath, result, { encoding: "utf8", mode: 0o600 });
+					visibleResult += `\n\n[Output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}). Full output: ${fullOutputPath}]`;
+				}
 				const location = worktreeInfo ? `\n\nBranch: ${worktreeInfo.branch}\nWorktree: ${worktreeInfo.path}` : "";
 				return {
-					content: [{ type: "text", text: `Result from ${agentName}:\n\n${result}${location}` }],
+					content: [{ type: "text", text: `Result from ${agentName}:\n\n${visibleResult}${location}` }],
 					details: {
 						agent: agentName,
+						task,
 						status: "completed",
 						statsLine: subagentStatsLine(callSubagentStats, Date.now() - startedAt),
 						branch: worktreeInfo?.branch,
 						worktreePath: worktreeInfo?.path,
+						useWorktree,
+						outputTruncated: truncation.truncated,
+						fullOutputPath,
 					} satisfies DelegateStatsDetails,
 				};
 			} catch (err) {
@@ -410,24 +455,21 @@ export default function (pi: ExtensionAPI) {
 					const location = worktreeInfo ? `\nWorktree preserved at: ${worktreeInfo.path}` : "";
 					return {
 						content: [{ type: "text", text: `Subagent ${agentName} ${reason}.${operation}\nLast activity: ${formatElapsed(Date.now() - snapshot.lastActivityAt)} ago.${partial}${location}\n\nChoose a different approach rather than blindly repeating the same delegation.` }],
-						details: { agent: agentName, status, error: true, branch: worktreeInfo?.branch, worktreePath: worktreeInfo?.path } satisfies DelegateStatsDetails,
+						details: { agent: agentName, task, status, error: true, branch: worktreeInfo?.branch, worktreePath: worktreeInfo?.path, useWorktree } satisfies DelegateStatsDetails,
 					};
 				}
 				const location = worktreeInfo ? `\nWorktree preserved at: ${worktreeInfo.path}` : "";
 				return {
 					content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}${location}` }],
-					details: { agent: agentName, status: "failed", error: true, branch: worktreeInfo?.branch, worktreePath: worktreeInfo?.path } satisfies DelegateStatsDetails,
+					details: { agent: agentName, task, status: "failed", error: true, branch: worktreeInfo?.branch, worktreePath: worktreeInfo?.path, useWorktree } satisfies DelegateStatsDetails,
 				};
 			}
 		},
-		renderResult(result, _options, theme) {
-			const text = result.content
-				.filter((part): part is { type: "text"; text: string } => part.type === "text")
-				.map((part) => part.text)
-				.join("\n");
-			const details = result.details as DelegateStatsDetails | undefined;
-			const stats = details?.statsLine ? `\n\n${theme.fg("muted", details.statsLine)}` : "";
-			return new Text(`${text}${stats}`, 0, 0);
+		renderCall(args, theme) {
+			return renderDelegateCall(args as { agent?: unknown; task?: unknown; useWorktree?: unknown }, theme);
+		},
+		renderResult(result, options, theme) {
+			return renderDelegateResult(result, options, theme);
 		},
 	});
 
@@ -721,9 +763,25 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Agent prompt injection ---
 
+	function delegationPrompt(agent: DiscoveredAgent): string | undefined {
+		if (!agent.subagents?.length) return undefined;
+		const lines = agent.subagents.map((childConfig) => {
+			const child = agents.find((candidate) => candidate.name === childConfig.name);
+			const runtime = [childConfig.model ? `model ${childConfig.model}` : "default model", childConfig.timeoutSeconds ? `${childConfig.timeoutSeconds}s deadline` : "no deadline"].join(", ");
+			return `- ${childConfig.name}: ${child?.description ?? "specialist agent"} (${runtime})`;
+		});
+		return [
+			"You may delegate focused work to these allowed subagents:",
+			...lines,
+			"Use a self-contained task with relevant paths and expected output. Issue independent delegate calls together to run them in parallel. Use useWorktree:true for isolated file-changing work; its branch and checkout are retained for review.",
+		].join("\n");
+	}
+
 	pi.on("before_agent_start", async (event) => {
 		const parts: string[] = [];
 		if (activeAgent?.systemPrompt) parts.push(activeAgent.systemPrompt);
+		const delegateGuide = activeAgent ? delegationPrompt(activeAgent) : undefined;
+		if (delegateGuide) parts.push(delegateGuide);
 		if (helpPending && GUIDE) {
 			helpPending = false;
 			parts.push(
