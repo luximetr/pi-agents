@@ -112,7 +112,7 @@ test("end to end: delegate launches an isolated child with the target agent", as
 		let deadlineAt: number | undefined;
 		const result = await runSubagent("worker", "inspect files", root, noAbort, {
 			executable: fakePi,
-			onHandle: (handle) => { if (handle) deadlineAt = handle.snapshot.deadlineAt; },
+			onHandle: (handle) => { if (handle) deadlineAt = handle.snapshot().deadlineAt; },
 			onProgress: (event) => progress.push(event.type),
 		});
 		assert.equal(deadlineAt, undefined);
@@ -534,7 +534,7 @@ test("depth guard rejects recursive delegation beyond the limit", async () => {
 	const previous = process.env.PI_AGENTS_SUBAGENT_DEPTH;
 	process.env.PI_AGENTS_SUBAGENT_DEPTH = String(MAX_SUBAGENT_DEPTH);
 	try {
-		await assert.rejects(runSubagent("worker", "task", process.cwd(), noAbort, process.execPath), /maximum subagent depth/);
+		await assert.rejects(runSubagent("worker", "task", process.cwd(), noAbort, { executable: process.execPath }), /maximum subagent depth/);
 	} finally {
 		if (previous === undefined) delete process.env.PI_AGENTS_SUBAGENT_DEPTH;
 		else process.env.PI_AGENTS_SUBAGENT_DEPTH = previous;

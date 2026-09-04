@@ -123,6 +123,8 @@ function resolveEnvRefs(value: string, missing: string[], env: Record<string, st
  */
 export class McpManager {
 	private connections = new Map<string, Connection>();
+	/** Tool names registered by this manager; reconnects refresh their schema and metadata. */
+	private registeredTools = new Set<string>();
 	/** In-flight connect promises, to dedupe concurrent activation. */
 	private pending = new Map<string, Promise<string[]>>();
 	private stderr = new Map<string, string>();
@@ -201,8 +203,12 @@ export class McpManager {
 			const toolNames: string[] = [];
 			for (const tool of tools) {
 				const prefixed = `${name}${TOOL_SEP}${tool.name}`;
-				if (!this.pi.getAllTools().some((t) => t.name === prefixed)) {
+				// A server can change its schema between reconnects (or two agents can
+				// define different endpoints under the same server name). Refresh tools
+				// previously owned by this manager, while leaving foreign collisions alone.
+				if (this.registeredTools.has(prefixed) || !this.pi.getAllTools().some((t) => t.name === prefixed)) {
 					this.registerTool(name, prefixed, tool);
+					this.registeredTools.add(prefixed);
 				}
 				toolNames.push(prefixed);
 			}

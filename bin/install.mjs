@@ -239,14 +239,20 @@ function installSamples(repo, dir, opts) {
   const srcDir = path.join(repo, ".pi-agents");
   if (!fs.existsSync(srcDir)) { out("no sample agents in repo (skipped)", C.yellow); return; }
   const destDir = opts.global ? path.join(userAgentDir(), "pi-agents") : path.join(dir, ".pi-agents");
-  const items = fs.readdirSync(srcDir).filter((n) => n !== ".env"); // never copy secrets
+  const isEnvFile = (file) => path.basename(file) === ".env" || path.basename(file).startsWith(".env.");
+  const items = fs.readdirSync(srcDir).filter((n) => !isEnvFile(n)); // never copy secrets
   let copied = 0, skipped = 0;
   for (const name of items) {
     const s = path.join(srcDir, name);
     const d = path.join(destDir, name);
     if (fs.existsSync(d) && !opts.force) { skipped++; continue; }
     fs.rmSync(d, { recursive: true, force: true });
-    if (fs.statSync(s).isDirectory()) fs.cpSync(s, d, { recursive: true });
+    if (fs.statSync(s).isDirectory()) {
+      // Agent-specific secrets may live below the root (for example
+      // .pi-agents/doc/.env), so filtering only srcDir's direct children is
+      // insufficient. Exclude every .env variant from recursive sample copies.
+      fs.cpSync(s, d, { recursive: true, filter: (source) => !isEnvFile(source) });
+    }
     else { fs.mkdirSync(path.dirname(d), { recursive: true }); fs.copyFileSync(s, d); }
     copied++;
   }
