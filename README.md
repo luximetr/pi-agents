@@ -119,9 +119,9 @@ If the main checkout was never trusted, the normal pi trust prompt applies in th
 | Manage retained worktrees | `/subagents worktrees` (list, delete, prune) |
 | Switch directly | `/agent dev`, `/agent none` |
 | Ask about the extension | `/agent:help <question>` (answered from the bundled guide) |
-| Picker | `/agent` |
+| Dashboard / picker | `/agent` or `f7`; type to filter, use `Tab`/`←→` to inspect overview, tools, MCP, and prompt |
 | Start with agent | `pi --agent dev` |
-| Active agent indicator | footer status line: `agent:dev`, tinted with the agent's color |
+| Active agent indicator | footer status line: `agent:dev · 7 tools · MCP:playwright`, tinted with the agent's color |
 
 The interactive agent's model and reasoning level are selected in pi itself (`/model`, thinking UI). A parent agent can select a fixed model and timeout for each delegated subagent as described below.
 
@@ -153,6 +153,11 @@ Agents live in `.pi-agents/` — project root (walked up to git root) and global
 export default {
   name: "doc",                                    // optional for single-file agents
   description: "Documentation agent: read-only, writes docs, READMEs.",
+  whenToUse: "Creating or reviewing user-facing documentation.", // optional dashboard metadata
+  capabilities: ["API docs", "README maintenance"],              // optional
+  limitations: ["Does not change runtime code"],                  // optional
+  examples: ["Document the authentication API"],                  // optional
+  promptSummary: "Precise technical writer; verifies examples.",  // optional
   color: "#bf5af2",                               // theme role or "#rrggbb"; auto-assigned by name when omitted
   tools: ["read", "grep", "find", "ls", "write", "edit", "bash"],  // tool allowlist
   deniedPaths: ["**/.env", "**/*.fig", "**/*.pen", "**/*.md"], // file-tool denylist
@@ -163,6 +168,8 @@ export default {
 ```
 
 Files are TypeScript loaded with [jiti](https://github.com/unjs/jiti) — you can use imports, helpers, or an async factory (`export default async () => ({...})`). Omit `tools` to keep the current toolset; pass `tools: []` to disable all built-in tools (the agent keeps only its MCP tools, if any). `deniedPaths` blocks matching paths for the built-in `read`, `write`, `edit`, `grep`, `find`, and `ls` tools. Patterns without `/` match any basename; other patterns are relative to the session cwd unless absolute. Bash is not restricted by this setting.
+
+The dashboard distinguishes declared tools from the effective active toolset, shows global/project provenance and overrides, reports MCP transport/connection state and discovered tools, and lets you page through the exact agent prompt. `whenToUse`, `capabilities`, `limitations`, `examples`, and `promptSummary` are optional user-facing dashboard metadata; they are not injected into the model prompt.
 
 #### Subagents and hierarchy
 
@@ -431,5 +438,5 @@ The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent insp
 ## Limitations / roadmap
 
 - MCP supports stdio and streamable HTTP transports (no SSE); server config is static (no dynamic add/remove at runtime)
-- Agents are discovered at session start; edits to `.pi-agents/` need `/reload` (or a new session) to take effect for shortcuts/commands — the picker always reads fresh definitions
+- Agents are discovered at session start; edits to `.pi-agents/` need `/reload` (or a new session) before the dashboard, shortcuts, and commands reflect them
 - Project-local installs (`pi install <repo> -l` / `pi-agents --local`) are recorded in `.pi/settings.json`, which git never checks out — freshly created worktrees of such a project have no extension. Use the default global install instead (the `.pi-agents/` configs remain per project)

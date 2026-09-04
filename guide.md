@@ -4,7 +4,7 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 
 ## Using the extension (quick start)
 
-- Switch agents: `f7` (picker), `f8` (rotate), or `/agent <name>` (`/agent none` clears). Inspect a running delegated subagent with `f9` or `/subagents`; `/subagents worktrees` manages retained delegation worktrees. Function-key shortcuts work through iTerm2 and herdr without terminal setting changes; configured aliases remain available too.
+- Switch agents: `f7` (dashboard/picker), `f8` (rotate), or `/agent <name>` (`/agent none` clears). In the dashboard, type to filter, use `↑↓` to choose an agent, and use `Tab` or `←→` to inspect its overview, effective tools, MCP status, and exact system prompt before activating it. Inspect a running delegated subagent with `f9` or `/subagents`; `/subagents worktrees` manages retained delegation worktrees. Function-key shortcuts work through iTerm2 and herdr without terminal setting changes; configured aliases remain available too.
 - Start with an agent from the CLI: `pi --agent dev`.
 - The active agent's system prompt is appended every turn; its tools are restricted to its allowlist (+ its MCP tools).
 - No agent selected = plain pi, unchanged.
@@ -30,6 +30,10 @@ Two layouts:
 export default {
   name: "browser",
   description: "Drives a browser via MCP.",
+  whenToUse: "Testing or inspecting a web application.", // optional dashboard metadata
+  capabilities: ["Browser navigation", "Screenshots"],  // optional
+  limitations: ["Does not modify application code"],    // optional
+  promptSummary: "Methodical browser operator.",         // optional
   tools: ["read", "bash"],            // allowlist; omit = keep current, [] = no tools
   subagents: ["developer"],            // optional delegation allowlist; object entries may set model/timeout
   mcp: ["playwright"],                // MCP servers to connect (opt-in!)
@@ -183,4 +187,4 @@ Per agent: a server can also be defined **inside the agent** (`mcpServers` in `a
 
 ## After editing .pi-agents/
 
-Agents are discovered at session start — run `/reload` (or start a new session) for changes to take effect; the `/agent` picker always reads fresh definitions.
+Agents are discovered at session start — run `/reload` (or start a new session) before the `/agent` dashboard reflects definition changes.

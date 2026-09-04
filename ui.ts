@@ -1,7 +1,8 @@
 import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
-import { Container, Input, Key, Markdown, SelectList, Spacer, Text, matchesKey, truncateToWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
-import type { DiscoveredAgent } from "./agents.ts";
+import { Container, Input, Key, Markdown, SelectList, Spacer, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
+import type { DiscoveredAgent, McpServerConfig } from "./agents.ts";
+import type { McpRuntimeStatus } from "./mcp.ts";
 import type { RunningSubagentHandle, SubagentSnapshot } from "./subagents.ts";
 
 /**
@@ -71,12 +72,24 @@ export function agentLabel(agent: DiscoveredAgent): string {
 }
 
 /** Footer status line showing the active agent and optional session subagent stats. */
-export function updateStatus(ctx: ExtensionContext, agent: DiscoveredAgent | undefined, subagentStats?: string) {
+export function updateStatus(
+	ctx: ExtensionContext,
+	agent: DiscoveredAgent | undefined,
+	subagentStats?: string,
+	capabilities?: { toolCount: number; mcpNames: string[] },
+) {
 	const agentStatus = agent
 		? colorize(ctx.ui.theme, agent, `agent:${agent.name}`)
 		: ctx.ui.theme.fg("muted", "agent:none · default pi");
+	const capabilityParts = agent && capabilities
+		? [
+			`${capabilities.toolCount} tool${capabilities.toolCount === 1 ? "" : "s"}`,
+			capabilities.mcpNames.length > 0 ? `MCP:${capabilities.mcpNames.join(",")}` : undefined,
+		].filter(Boolean)
+		: [];
+	const capabilityStatus = capabilityParts.length > 0 ? ctx.ui.theme.fg("muted", ` · ${capabilityParts.join(" · ")}`) : "";
 	const statsStatus = subagentStats ? ctx.ui.theme.fg("muted", ` · ${subagentStats}`) : "";
-	ctx.ui.setStatus("pi-agents", `${agentStatus}${statsStatus}`);
+	ctx.ui.setStatus("pi-agents", `${agentStatus}${capabilityStatus}${statsStatus}`);
 }
 
 export interface DelegateViewDetails {
@@ -500,85 +513,217 @@ export function showWorktreeManager(
 	}, { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%", anchor: "center", margin: 1 } });
 }
 
-/**
- * Opencode-style agent picker. Returns selected agent name, "(none)", or null (cancelled).
- */
-export function showAgentSelector(ctx: ExtensionContext, agents: DiscoveredAgent[], activeName: string | undefined): Promise<string | null> {
+export interface AgentSelectorOptions {
+	projectName: string;
+	projectRoot: string;
+	projectAgentsDir?: string;
+	trusted: boolean;
+	allTools: Array<{ name: string; description?: string }>;
+	activeTools: string[];
+	mcpServers: Record<string, McpServerConfig>;
+	mcpServerSources: Record<string, "global" | "project">;
+	mcpStatuses: Record<string, McpRuntimeStatus>;
+}
+
+type AgentDetailTab = "overview" | "tools" | "mcp" | "prompt";
+const AGENT_DETAIL_TABS: AgentDetailTab[] = ["overview", "tools", "mcp", "prompt"];
+const AGENT_DASHBOARD_HEIGHT = 18;
+
+function padToWidth(value: string, width: number): string {
+	const clipped = truncateToWidth(value, width, "");
+	return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
+}
+
+function pushWrapped(lines: string[], width: number, value: string, indent = 2): void {
+	const available = Math.max(1, width - indent);
+	for (const line of wrapTextWithAnsi(value, available)) lines.push(`${" ".repeat(indent)}${line}`);
+}
+
+function configuredServer(agent: DiscoveredAgent, name: string, options: AgentSelectorOptions): McpServerConfig | undefined {
+	return agent.mcpServers?.[name] ?? options.mcpServers[name];
+}
+
+function projectedTools(agent: DiscoveredAgent, agents: DiscoveredAgent[], options: AgentSelectorOptions): { names?: string[]; unknown: string[] } {
+	if (agent.tools === undefined) return { names: undefined, unknown: [] };
+	const known = new Set([...options.allTools.map((tool) => tool.name), ...Object.keys(agent.customTools ?? {})]);
+	const unknown = agent.tools.filter((name) => !known.has(name));
+	const base = agent.tools.filter((name) => known.has(name));
+	const custom = Object.keys(agent.customTools ?? {});
+	const delegates = agent.subagents?.some((child) => agents.some((candidate) => candidate.name === child.name)) ? ["delegate"] : [];
+	const mcp = (agent.mcp ?? []).flatMap((name) => options.mcpStatuses[name]?.toolNames ?? []);
+	return { names: [...new Set([...base, ...custom, ...delegates, ...mcp])], unknown };
+}
+
+function renderAgentDetails(
+	agent: DiscoveredAgent | undefined,
+	tab: AgentDetailTab,
+	width: number,
+	theme: Theme,
+	agents: DiscoveredAgent[],
+	activeName: string | undefined,
+	options: AgentSelectorOptions,
+): string[] {
+	const lines: string[] = [];
+	const tabs = AGENT_DETAIL_TABS.map((name) => name === tab ? theme.fg("accent", theme.bold(`[${name}]`)) : theme.fg("dim", name)).join("  ");
+	lines.push(` ${tabs}`);
+	if (!agent) {
+		lines.push(theme.fg("accent", theme.bold(" plain pi")));
+		pushWrapped(lines, width, "Default Pi system prompt and the toolset that was active before an agent was selected.");
+		return lines;
+	}
+
+	lines.push(` ${colorize(theme, agent, theme.bold(agent.name))}${agent.name === activeName ? theme.fg("success", "  ● active") : ""}`);
+	if (tab === "overview") {
+		pushWrapped(lines, width, agent.description);
+		if (agent.whenToUse) pushWrapped(lines, width, `${theme.fg("muted", "Use when: ")}${agent.whenToUse}`);
+		if (agent.capabilities?.length) pushWrapped(lines, width, `${theme.fg("muted", "Capabilities: ")}${agent.capabilities.join(" · ")}`);
+		if (agent.limitations?.length) pushWrapped(lines, width, `${theme.fg("muted", "Limitations: ")}${agent.limitations.join(" · ")}`);
+		if (agent.examples?.length) pushWrapped(lines, width, `${theme.fg("muted", "Examples: ")}${agent.examples.join(" · ")}`);
+		if (agent.subagents?.length) pushWrapped(lines, width, `${theme.fg("muted", "Delegates: ")}${agent.subagents.map((child) => child.name).join(", ")}`);
+		if (agent.deniedPaths?.length) pushWrapped(lines, width, `${theme.fg("muted", "Denied paths: ")}${agent.deniedPaths.join(", ")}`);
+		pushWrapped(lines, width, `${theme.fg("muted", "Source: ")}${agent.filePath} (${agent.source})`);
+		if (agent.overrides) pushWrapped(lines, width, `${theme.fg("warning", "Overrides: ")}${agent.overrides.filePath} (${agent.overrides.source})`);
+	} else if (tab === "tools") {
+		const projected = projectedTools(agent, agents, options);
+		const effective = agent.name === activeName ? options.activeTools : projected.names;
+		pushWrapped(lines, width, `${theme.fg("muted", "Declared: ")}${agent.tools === undefined ? "inherit current toolset" : agent.tools.length ? agent.tools.join(", ") : "no built-ins"}`);
+		pushWrapped(lines, width, `${theme.fg("muted", agent.name === activeName ? "Effective: " : "On activation: ")}${effective === undefined ? "current toolset + agent capabilities" : effective.length ? effective.join(", ") : "none"}`);
+		if (projected.unknown.length) pushWrapped(lines, width, theme.fg("warning", `Unknown: ${projected.unknown.join(", ")}`));
+		for (const [name, tool] of Object.entries(agent.customTools ?? {})) {
+			pushWrapped(lines, width, `${theme.fg("accent", `custom:${name}`)} — ${tool.description}`);
+		}
+		if (agent.mcp?.length) pushWrapped(lines, width, theme.fg("dim", "MCP tools are discovered when their server connects; cached names are included above."));
+	} else if (tab === "mcp") {
+		if (!agent.mcp?.length) {
+			pushWrapped(lines, width, "No MCP servers assigned to this agent.");
+		} else {
+			for (const name of agent.mcp) {
+				const server = configuredServer(agent, name, options);
+				const status = options.mcpStatuses[name] ?? { state: "disconnected", toolNames: [] };
+				const source = agent.mcpServers?.[name] ? "agent-local" : options.mcpServerSources[name] ?? "undefined";
+				const transport = server?.url ? "HTTP" : server?.command ? "stdio" : "missing definition";
+				const displayState = server ? status.state : "missing";
+				const stateColor = status.state === "connected" ? "success" : status.state === "failed" || !server ? "error" : "muted";
+				pushWrapped(lines, width, `${theme.fg("accent", name)} · ${transport} · ${source} · ${theme.fg(stateColor, displayState)}`);
+				if (status.toolNames.length) pushWrapped(lines, width, `Tools: ${status.toolNames.join(", ")}`, 4);
+				if (status.error) pushWrapped(lines, width, theme.fg("error", status.error), 4);
+			}
+		}
+	} else {
+		const source = agent.systemPromptPath ?? (agent.systemPrompt ? "inline in agent definition" : "no agent system prompt");
+		pushWrapped(lines, width, `${theme.fg("muted", "Source: ")}${source}`);
+		if (agent.promptSummary) pushWrapped(lines, width, `${theme.fg("muted", "Summary: ")}${agent.promptSummary}`);
+		const promptLines = (agent.systemPrompt ?? "This agent does not append a system prompt.")
+			.split("\n")
+			.flatMap((line) => wrapTextWithAnsi(line || " ", Math.max(1, width - 4)));
+		for (const line of promptLines) lines.push(`    ${theme.fg("text", line)}`);
+	}
+	return lines;
+}
+
+/** Agent dashboard and picker. Returns selected agent name, "(none)", or null (cancelled). */
+export function showAgentSelector(
+	ctx: ExtensionContext,
+	agents: DiscoveredAgent[],
+	activeName: string | undefined,
+	options: AgentSelectorOptions,
+): Promise<string | null> {
 	const items: SelectItem[] = [
-		...agents.map((agent) => {
-			const isActive = agent.name === activeName;
-			return {
-				value: agent.name,
-				label: isActive ? `● ${agent.name}` : `  ${agent.name}`,
-				description: `${agent.description}\n${agentLabel(agent)}`,
-			};
-		}),
-		{
-			value: "(none)",
-			label: activeName === undefined ? "● plain pi" : "  plain pi",
-			description: "Default prompt and tools · no active agent",
-		},
+		...agents.map((agent) => ({
+			value: agent.name,
+			label: agent.name === activeName ? `● ${agent.name}` : `  ${agent.name}`,
+			description: `${agent.description} · ${agentLabel(agent)}`,
+		})),
+		{ value: "(none)", label: activeName === undefined ? "● plain pi" : "  plain pi", description: "Default prompt and tools · no active agent" },
 	];
 
 	return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-		const container = new Container();
-		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-		container.addChild(new Text(
-			theme.fg("accent", theme.bold(`Agents · ${agents.length}`))
-			+ theme.fg("dim", `  ${activeName ? `active: ${activeName}` : "plain pi"}`),
-			1,
-			0,
-		));
-
-		// Colorize each agent's label with its own color; keep "(none)" plain.
 		const coloredItems = items.map((item) => {
-			if (item.value === "(none)") return item;
-			const agent = agents.find((a) => a.name === item.value);
+			const agent = agents.find((candidate) => candidate.name === item.value);
 			return agent ? { ...item, label: colorize(theme, agent, item.label) } : item;
 		});
-
 		const searchInput = new Input();
 		searchInput.focused = true;
-		container.addChild({
-			render: (width: number) => {
-				const [input = ""] = searchInput.render(Math.max(1, width - 11));
-				return [`${theme.fg("muted", " Filter  ")}${input}`];
-			},
-			invalidate: () => searchInput.invalidate(),
-		});
-
-		const selectList = new SelectList(coloredItems, Math.min(items.length, 10), {
+		const selectList = new SelectList(coloredItems, Math.min(items.length, 7), {
 			selectedPrefix: (text: string) => theme.fg("accent", text),
 			selectedText: (text: string) => theme.fg("accent", text),
 			description: (text: string) => theme.fg("muted", text),
 			scrollInfo: (text: string) => theme.fg("dim", text),
 			noMatch: (text: string) => theme.fg("warning", text),
-		});
+		}, { minPrimaryColumnWidth: 18, maxPrimaryColumnWidth: 28 });
 		const activeIndex = items.findIndex((item) => item.value === (activeName ?? "(none)"));
 		if (activeIndex >= 0) selectList.setSelectedIndex(activeIndex);
-
+		let tabIndex = 0;
+		let detailOffset = 0;
+		let maxDetailOffset = 0;
 		selectList.onSelect = (item) => done(item.value);
 		selectList.onCancel = () => done(null);
-
-		container.addChild(selectList);
-		container.addChild(new Text(theme.fg("dim", "type to filter · ↑↓ navigate · enter select · esc cancel"), 1, 0));
-		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
+		selectList.onSelectionChange = () => { detailOffset = 0; };
 
 		return {
 			get focused() { return searchInput.focused; },
 			set focused(value: boolean) { searchInput.focused = value; },
 			render(width: number) {
-				return container.render(width);
+				const selectedValue = selectList.getSelectedItem()?.value;
+				const selectedAgent = agents.find((agent) => agent.name === selectedValue);
+				const border = theme.fg("borderAccent", "─".repeat(Math.max(1, width)));
+				const scope = `${agents.filter((agent) => agent.source === "project").length} project + ${agents.filter((agent) => agent.source === "global").length} global`;
+				const lines = [
+					border,
+					truncateToWidth(`${theme.fg("accent", theme.bold(`Agents · ${options.projectName}`))}${theme.fg("dim", ` · ${scope} · ${options.trusted ? "trusted" : "untrusted"}`)}`, width),
+					truncateToWidth(theme.fg("dim", `${options.projectRoot}${options.projectAgentsDir ? ` · config ${options.projectAgentsDir}` : " · global agents only"}`), width),
+				];
+				const [input = ""] = searchInput.render(Math.max(1, width - 11));
+				lines.push(`${theme.fg("muted", " Filter  ")}${input}`);
+
+				// Keep the selector and inspector side by side at a fixed height so
+				// moving between differently-sized agent definitions never shifts the UI.
+				const usableWidth = Math.max(2, width - 3);
+				const desiredLeftWidth = Math.max(8, Math.min(30, Math.floor(usableWidth * 0.32)));
+				const leftWidth = Math.min(Math.max(1, usableWidth - 1), desiredLeftWidth);
+				const rightWidth = Math.max(1, usableWidth - leftWidth);
+				const leftPane = [
+					theme.fg("accent", theme.bold(" Agents")),
+					theme.fg("dim", " ↑↓ select"),
+					...selectList.render(leftWidth),
+				];
+				const details = renderAgentDetails(selectedAgent, AGENT_DETAIL_TABS[tabIndex], rightWidth, theme, agents, activeName, options);
+				const fixedDetailLines = details.slice(0, 2);
+				const detailBody = details.slice(2);
+				const bodyCapacity = Math.max(0, AGENT_DASHBOARD_HEIGHT - fixedDetailLines.length);
+				const needsScroll = detailBody.length > bodyCapacity;
+				const visibleBodyRows = Math.max(0, bodyCapacity - (needsScroll ? 1 : 0));
+				maxDetailOffset = Math.max(0, detailBody.length - visibleBodyRows);
+				detailOffset = Math.min(detailOffset, maxDetailOffset);
+				const rightPane = [...fixedDetailLines, ...detailBody.slice(detailOffset, detailOffset + visibleBodyRows)];
+				if (needsScroll) {
+					rightPane.push(theme.fg("dim", ` … ${detailOffset + 1}–${Math.min(detailOffset + visibleBodyRows, detailBody.length)} of ${detailBody.length} · PgUp/PgDn`));
+				}
+				const divider = theme.fg("borderMuted", " │ ");
+				for (let row = 0; row < AGENT_DASHBOARD_HEIGHT; row++) {
+					lines.push(`${padToWidth(leftPane[row] ?? "", leftWidth)}${divider}${padToWidth(rightPane[row] ?? "", rightWidth)}`);
+				}
+				lines.push(theme.fg("dim", " type to filter · ↑↓ agent · tab/←→ details · PgUp/PgDn scroll · enter activate · esc cancel"), border);
+				return lines.map((line) => truncateToWidth(line, width));
 			},
-			invalidate() {
-				container.invalidate();
-			},
+			invalidate() { searchInput.invalidate(); selectList.invalidate(); },
 			handleInput(data: string) {
-				if (matchesKey(data, Key.up) || matchesKey(data, Key.down) || matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+				if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+					tabIndex = (tabIndex + 1) % AGENT_DETAIL_TABS.length;
+					detailOffset = 0;
+				} else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+					tabIndex = (tabIndex - 1 + AGENT_DETAIL_TABS.length) % AGENT_DETAIL_TABS.length;
+					detailOffset = 0;
+				} else if (matchesKey(data, Key.pageDown)) {
+					detailOffset = Math.min(maxDetailOffset, detailOffset + 10);
+				} else if (matchesKey(data, Key.pageUp)) {
+					detailOffset = Math.max(0, detailOffset - 10);
+				} else if (matchesKey(data, Key.up) || matchesKey(data, Key.down) || matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
 					selectList.handleInput(data);
 				} else {
 					searchInput.handleInput(data);
 					selectList.setFilter(searchInput.getValue());
+					detailOffset = 0;
 				}
 				tui.requestRender();
 			},

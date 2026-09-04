@@ -97,6 +97,13 @@ interface Connection {
 	toolNames: string[];
 }
 
+export interface McpRuntimeStatus {
+	state: "disconnected" | "connecting" | "connected" | "failed";
+	/** Last discovered prefixed tool names, retained after disconnect for inspection. */
+	toolNames: string[];
+	error?: string;
+}
+
 /** Matches `${VAR}` env-var references in header values. */
 const ENV_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 
@@ -128,6 +135,9 @@ export class McpManager {
 	/** In-flight connect promises, to dedupe concurrent activation. */
 	private pending = new Map<string, Promise<string[]>>();
 	private stderr = new Map<string, string>();
+	/** Last capabilities and failures are retained so the dashboard remains useful after a switch. */
+	private lastTools = new Map<string, string[]>();
+	private failures = new Map<string, string>();
 	/** Unresolved ${VAR} env refs per server, warned once at activation. */
 	private envWarnings = new Map<string, string[]>();
 	private pi: ExtensionAPI;
@@ -170,10 +180,35 @@ export class McpManager {
 					this.envWarnings.delete(name);
 				}
 			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				this.failures.set(name, message);
 				if (!opts?.silent) ctx.ui.notify(`MCP server "${name}" failed to start: ${err}`, "error");
 			}
 		}
 		return tools;
+	}
+
+	/** Runtime state for configured/assigned servers, suitable for user-facing diagnostics. */
+	getStatuses(serverNames?: string[]): Record<string, McpRuntimeStatus> {
+		const names = serverNames ?? [...new Set([
+			...this.connections.keys(),
+			...this.pending.keys(),
+			...this.lastTools.keys(),
+			...this.failures.keys(),
+		])];
+		return Object.fromEntries(names.map((name) => {
+			const connection = this.connections.get(name);
+			const state: McpRuntimeStatus["state"] = connection
+				? "connected"
+				: this.pending.has(name)
+					? "connecting"
+					: this.failures.has(name) ? "failed" : "disconnected";
+			return [name, {
+				state,
+				toolNames: [...(connection?.toolNames ?? this.lastTools.get(name) ?? [])],
+				error: this.failures.get(name),
+			}];
+		}));
 	}
 
 	/** Connect a server once and register its tools; returns prefixed tool names. */
@@ -213,6 +248,8 @@ export class McpManager {
 				toolNames.push(prefixed);
 			}
 			this.connections.set(name, { client, transport, toolNames });
+			this.lastTools.set(name, [...toolNames]);
+			this.failures.delete(name);
 			return toolNames;
 		} catch (err) {
 			try {

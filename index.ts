@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, loadConfig, readTrustDecision, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, loadConfig, readTrustDecision, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import {
 	renderDelegateCall,
@@ -152,7 +152,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function refreshStatus(ctx: ExtensionContext) {
-		updateStatus(ctx, activeAgent, sessionSubagentStatsLine());
+		const assigned = activeAgent?.mcp ?? [];
+		const statuses = mcpManager.getStatuses(assigned);
+		const connectedMcp = assigned.filter((name) => statuses[name]?.state === "connected");
+		updateStatus(ctx, activeAgent, sessionSubagentStatsLine(), activeAgent ? {
+			toolCount: pi.getActiveTools().length,
+			mcpNames: connectedMcp,
+		} : undefined);
 	}
 
 	function recordSubagentUsage(usage: SubagentUsage, callStats?: SubagentStats) {
@@ -645,7 +651,23 @@ export default function (pi: ExtensionAPI) {
 			);
 			return;
 		}
-		const result = await showAgentSelector(ctx, agents, activeName);
+		const projectAgentsDir = findProjectAgentsDir(ctx.cwd) ?? undefined;
+		const projectRoot = findProjectRoot(ctx.cwd);
+		const serverNames = [...new Set([
+			...Object.keys(config.mcpServers ?? {}),
+			...agents.flatMap((agent) => [...(agent.mcp ?? []), ...Object.keys(agent.mcpServers ?? {})]),
+		])];
+		const result = await showAgentSelector(ctx, agents, activeName, {
+			projectName: path.basename(projectRoot) || projectRoot,
+			projectRoot,
+			projectAgentsDir,
+			trusted: ctx.isProjectTrusted ? ctx.isProjectTrusted() : true,
+			allTools: pi.getAllTools().map((tool) => ({ name: tool.name, description: tool.description })),
+			activeTools: pi.getActiveTools(),
+			mcpServers: config.mcpServers ?? {},
+			mcpServerSources: config.mcpServerSources ?? {},
+			mcpStatuses: mcpManager.getStatuses(serverNames),
+		});
 		if (result === null) return; // cancelled
 		if (result === "(none)") await clearAgent(ctx);
 		else await applyAgent(result, ctx);
@@ -848,6 +870,19 @@ export default function (pi: ExtensionAPI) {
 		if (selected) await applyAgent(selected, ctx, { silent: true });
 		else refreshStatus(ctx);
 		persistedName = activeName;
+
+		if (event.reason === "startup" && ctx.mode === "tui") {
+			const projectAgents = agents.filter((agent) => agent.source === "project").length;
+			const globalAgents = agents.length - projectAgents;
+			const projectRoot = findProjectRoot(ctx.cwd);
+			const selectedAgent = activeName ? agents.find((agent) => agent.name === activeName) : undefined;
+			const statuses = mcpManager.getStatuses(selectedAgent?.mcp ?? []);
+			const connected = Object.values(statuses).filter((status) => status.state === "connected").length;
+			ctx.ui.notify(
+				`pi-agents: ${path.basename(projectRoot) || projectRoot} · ${projectAgents} project + ${globalAgents} global agents · ${activeName ? `${activeName} active` : "plain pi"}${connected ? ` · ${connected} MCP connected` : ""}`,
+				"info",
+			);
+		}
 
 		// Best-effort retention: remove clean delegated worktrees past the
 		// configured age. Dirty worktrees and unmerged branches are never touched.

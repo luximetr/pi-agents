@@ -94,6 +94,11 @@ test("MCP stdio activation registers namespaced tools and forwards calls", async
 		);
 		assert.deepEqual(names, ["local__echo"]);
 		assert.match(notifications[0]?.message ?? "", /not defined/);
+		assert.deepEqual(manager.getStatuses(["local"]).local, {
+			state: "connected",
+			toolNames: ["local__echo"],
+			error: undefined,
+		});
 
 		const tool = tools.get("local__echo");
 		assert.ok(tool);
@@ -118,6 +123,11 @@ test("MCP disconnect deactivates previously registered tool executions", async (
 		await manager.activate(["local"], { local: { command: process.execPath, args: [server, "first"] } }, {}, ctx);
 		const tool = tools.get("local__echo");
 		await manager.disconnectAll();
+		assert.deepEqual(manager.getStatuses(["local"]).local, {
+			state: "disconnected",
+			toolNames: ["local__echo"],
+			error: undefined,
+		});
 		await assert.rejects(
 			tool.execute("call-2", { text: "hello" }, new AbortController().signal),
 			/not connected/,

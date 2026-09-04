@@ -78,8 +78,18 @@ export type SubagentDeclaration = string | SubagentConfig;
 export interface AgentConfig {
 	/** Unique agent name, used in UI and commands */
 	name: string;
-	/** One-line description shown in the picker */
+	/** One-line description shown in the picker. */
 	description: string;
+	/** Short user-facing explanation of the tasks this agent is best suited for. */
+	whenToUse?: string;
+	/** User-facing capability bullets shown in the agent dashboard. */
+	capabilities?: string[];
+	/** User-facing constraints or intentional non-goals shown in the dashboard. */
+	limitations?: string[];
+	/** Example requests that are a good fit for this agent. */
+	examples?: string[];
+	/** Concise user-facing summary of the system prompt; the full prompt remains inspectable. */
+	promptSummary?: string;
 	/**
 	 * UI color: a theme role (e.g. "success", "warning") or a hex color
 	 * ("#ff8800"). Omit for a stable color auto-assigned from the name.
@@ -119,7 +129,11 @@ export interface DiscoveredAgent extends Omit<AgentConfig, "subagents"> {
 	/** Normalized delegation entries. */
 	subagents?: SubagentConfig[];
 	filePath: string;
+	/** Resolved prompt file path, when the prompt was loaded from a file. */
+	systemPromptPath?: string;
 	source: "global" | "project";
+	/** Lower-priority definition hidden by this agent (normally a global agent overridden by a project agent). */
+	overrides?: { filePath: string; source: "global" | "project" };
 	dir: string;
 	/** Secrets from the agent dir's `.env` (gitignored), e.g. `.pi-agents/<name>/.env`. */
 	env?: Record<string, string>;
@@ -160,6 +174,8 @@ export interface PiAgentsConfig {
 	 * unless an agent requests it.
 	 */
 	mcpServers?: Record<string, McpServerConfig>;
+	/** Provenance for each merged MCP server definition (project definitions win). */
+	mcpServerSources?: Record<string, "global" | "project">;
 	/**
 	 * Secrets loaded from `.env` files (global `~/.pi/agent/pi-agents/.env` and
 	 * project `.pi-agents/.env`, project wins). Referenced from config as
@@ -215,8 +231,10 @@ function normalizeAgent(
 	const dir = path.dirname(filePath);
 
 	let systemPrompt: string | undefined = cfg.systemPrompt;
+	let systemPromptPath: string | undefined;
 	if (cfg.systemPromptFile) {
 		const promptPath = path.resolve(dir, cfg.systemPromptFile);
+		systemPromptPath = promptPath;
 		try {
 			systemPrompt = fs.readFileSync(promptPath, "utf-8");
 		} catch (err) {
@@ -237,6 +255,11 @@ function normalizeAgent(
 	return {
 		name,
 		description: cfg.description.trim(),
+		whenToUse: normalizeOptionalText(cfg.whenToUse),
+		capabilities: normalizeTextList(cfg.capabilities),
+		limitations: normalizeTextList(cfg.limitations),
+		examples: normalizeTextList(cfg.examples),
+		promptSummary: normalizeOptionalText(cfg.promptSummary),
 		color,
 		tools: Array.isArray(cfg.tools)
 			? (cfg.tools.map((t) => String(t).trim()).filter(Boolean) as ToolName[])
@@ -248,6 +271,8 @@ function normalizeAgent(
 		mcpServers,
 		env: Object.keys(agentEnv).length > 0 ? agentEnv : undefined,
 		systemPrompt: systemPrompt?.trim() ? systemPrompt : undefined,
+		systemPromptFile: normalizeOptionalText(cfg.systemPromptFile),
+		systemPromptPath,
 		customTools,
 		subagents: normalizeSubagents(cfg.subagents, filePath),
 		default: cfg.default === true,
@@ -255,6 +280,16 @@ function normalizeAgent(
 		source,
 		dir,
 	};
+}
+
+function normalizeOptionalText(raw: unknown): string | undefined {
+	return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+}
+
+function normalizeTextList(raw: unknown): string[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const values = raw.map(String).map((value) => value.trim()).filter(Boolean);
+	return values.length > 0 ? values : undefined;
 }
 
 /** Normalize legacy string entries and configured delegation objects. */
@@ -429,6 +464,17 @@ function mergeEnv(...sources: Array<Record<string, string> | undefined>): Record
 	return merged;
 }
 
+/** Resolve the workspace root for orientation UI (agent root, then Git root, then cwd). */
+export function findProjectRoot(cwd: string): string {
+	const agentsDir = findProjectAgentsDir(cwd);
+	if (agentsDir) return path.dirname(agentsDir);
+	try {
+		const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, stdio: "pipe", encoding: "utf8" }).trim();
+		if (root) return root;
+	} catch { /* not a Git repository */ }
+	return cwd;
+}
+
 /** Find nearest project .pi-agents dir walking up from cwd. */
 export function findProjectAgentsDir(cwd: string): string | null {
 	let current = cwd;
@@ -582,6 +628,9 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 	// checkout; the worktree's own .env (when present) still wins per key.
 	const mainAgentsDir = projectDir ? findMainCheckoutAgentsDir(cwd) : null;
 	const env = mergeEnv(globalConfig.env, mainAgentsDir ? loadEnvFile(mainAgentsDir) : undefined, projectConfig.env);
+	const mcpServerSources: Record<string, "global" | "project"> = {};
+	for (const name of Object.keys(globalConfig.mcpServers ?? {})) mcpServerSources[name] = "global";
+	for (const name of Object.keys(projectConfig.mcpServers ?? {})) mcpServerSources[name] = "project";
 	return {
 		defaultAgent: projectConfig.defaultAgent ?? globalConfig.defaultAgent,
 		keybindings: {
@@ -601,6 +650,7 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 			},
 		},
 		mcpServers: { ...globalConfig.mcpServers, ...projectConfig.mcpServers },
+		mcpServerSources,
 		env,
 	};
 }
@@ -659,7 +709,11 @@ export async function discoverAgents(cwd: string, opts?: DiscoverOptions): Promi
 			if (filePath) {
 				const fallback = envFallbackDir ? [path.join(envFallbackDir, path.basename(agentDir))] : undefined;
 				const agent = await loadAgentFile(filePath, source, undefined, fallback);
-				if (agent) byName.set(agent.name, agent);
+				if (agent) {
+					const previous = byName.get(agent.name);
+					if (previous) agent.overrides = { filePath: previous.filePath, source: previous.source };
+					byName.set(agent.name, agent);
+				}
 			}
 		}
 		// Single-file agents: <dir>/<name>.ts
@@ -667,7 +721,11 @@ export async function discoverAgents(cwd: string, opts?: DiscoverOptions): Promi
 			if (filePath.endsWith("config.json")) continue;
 			const fallbackName = path.basename(filePath).replace(/\.(ts|js|mjs)$/, "");
 			const agent = await loadAgentFile(filePath, source, fallbackName, envFallbackDir ? [envFallbackDir] : undefined);
-			if (agent) byName.set(agent.name, agent);
+			if (agent) {
+				const previous = byName.get(agent.name);
+				if (previous) agent.overrides = { filePath: previous.filePath, source: previous.source };
+				byName.set(agent.name, agent);
+			}
 		}
 	}
 

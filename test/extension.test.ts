@@ -13,12 +13,14 @@ async function makeAgent(root: string, name: string, extra = "") {
 	);
 }
 
-function boot(root: string, options?: { flag?: string; sessionFile?: string; trusted?: boolean }) {
+function boot(root: string, options?: { flag?: string; sessionFile?: string; trusted?: boolean; mode?: string }) {
 	const handlers = new Map<string, (event: any, ctx: any) => any>();
 	const commands = new Map<string, any>();
 	const activeToolsets: string[][] = [];
 	const notifications: Array<{ message: string; level: string }> = [];
 	const entries: Array<{ customType: string; data: unknown }> = [];
+	const statuses: string[] = [];
+	let customComponent: any;
 	const tools = new Map<string, any>([
 		["read", { name: "read" }],
 		["bash", { name: "bash" }],
@@ -33,22 +35,28 @@ function boot(root: string, options?: { flag?: string; sessionFile?: string; tru
 		getFlag: () => options?.flag,
 		appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
 		getAllTools: () => [...tools.values()],
-		getActiveTools: () => ["read", "bash"],
+		getActiveTools: () => [...(activeToolsets.at(-1) ?? ["read", "bash"])],
 		setActiveTools: (names: string[]) => activeToolsets.push([...names]),
 		exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 	};
 	extension(pi);
+	const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text, getColorMode: () => "truecolor" };
 	const ctx: any = {
 		cwd: root,
+		mode: options?.mode,
 		isProjectTrusted: () => options?.trusted ?? true,
 		sessionManager: { getSessionFile: () => options?.sessionFile },
 		ui: {
-			theme: { fg: (_role: string, text: string) => text, getColorMode: () => "truecolor" },
-			setStatus: () => {},
+			theme,
+			setStatus: (_key: string, value: string) => statuses.push(value),
 			notify: (message: string, level: string) => notifications.push({ message, level }),
+			custom: async (factory: any) => {
+				customComponent = factory({ requestRender: () => {} }, theme, {}, () => {});
+				return null;
+			},
 		},
 	};
-	return { handlers, commands, activeToolsets, notifications, entries, tools, ctx };
+	return { handlers, commands, activeToolsets, notifications, entries, tools, statuses, getCustomComponent: () => customComponent, ctx };
 }
 
 test("session startup activates config.defaultAgent", async () => {
@@ -156,6 +164,59 @@ test("/agent none restores the toolset captured before activation", async () => 
 		await runtime.commands.get("agent").handler("none", runtime.ctx);
 		assert.deepEqual(runtime.activeToolsets, [["read"], ["read", "bash"]]);
 		assert.deepEqual(runtime.entries.at(-1), { customType: "pi-agents-state", data: { name: null } });
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("startup shows a concise project summary and capability-rich footer", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-orientation-"));
+	try {
+		await makeAgent(root, "alpha", "default: true");
+		const runtime = boot(root, { mode: "tui" });
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		assert.ok(runtime.notifications.some((entry) => entry.message.includes("1 project + 0 global agents · alpha active")));
+		assert.match(runtime.statuses.at(-1) ?? "", /agent:alpha/);
+		assert.match(runtime.statuses.at(-1) ?? "", /· 1 tool/);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("agent picker renders an inspectable dashboard with metadata, MCP, tools, and prompt", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-dashboard-"));
+	try {
+		await makeAgent(root, "alpha", "default: true");
+		await mkdir(path.join(root, ".pi-agents", "beta"), { recursive: true });
+		await writeFile(path.join(root, ".pi-agents", "beta", "prompt.md"), "You are the exact beta prompt.\nSecond line.");
+		await writeFile(path.join(root, ".pi-agents", "beta", "agent.ts"), `export default {
+			name: "beta", description: "Browser specialist", whenToUse: "web checks",
+			capabilities: ["navigation", "screenshots"], limitations: ["read-only"],
+			tools: ["read", "missing_tool"], mcp: ["browser"], systemPromptFile: "./prompt.md"
+		};`);
+		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({
+			mcpServers: { browser: { command: "fake-browser-mcp" } },
+		}));
+		const runtime = boot(root);
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		const dashboard = runtime.getCustomComponent();
+		assert.ok(dashboard);
+		const initialHeight = dashboard.render(120).length;
+		dashboard.handleInput("\u001b[B"); // beta
+		const overviewLines = dashboard.render(120);
+		assert.equal(overviewLines.length, initialHeight);
+		assert.match(overviewLines.join("\n"), /Use when: web checks/);
+		dashboard.handleInput("\t"); // tools
+		const toolsView = dashboard.render(120).join("\n");
+		assert.match(toolsView, /Declared: read, missing_tool/);
+		assert.match(toolsView, /Unknown: missing_tool/);
+		dashboard.handleInput("\t"); // MCP
+		assert.match(dashboard.render(120).join("\n"), /browser · stdio · project · disconnected/);
+		dashboard.handleInput("\t"); // prompt
+		const promptView = dashboard.render(120).join("\n");
+		assert.match(promptView, /prompt\.md/);
+		assert.match(promptView, /You are the exact beta prompt/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
