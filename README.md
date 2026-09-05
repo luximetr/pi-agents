@@ -141,6 +141,8 @@ The MCP editor includes curated recipes for Playwright, iOS Simulator, pen.dev, 
 - `playwright`: pinned `@playwright/mcp@0.0.80`.
 - `ios-simulator`: pinned `ios-simulator-mcp@2.1.0`; requires Xcode/iOS Simulator.
 - `pen.dev`: connects to the Apple-silicon MCP server inside `/Applications/Pen.app`; keep Pen running.
+Use **Configure MCP credentials** in Studio to enter masked tokens for DocHub, DesignHub, or other HTTP servers with `${VAR}` header references. Credentials are saved immediately beside the edited agent’s definition (for example `.pi-agents/doc/.env` or `~/.pi/agent/pi-agents/doc/.env`), not in shared scope-level files, drafts, agent overrides, or session history. Files use owner-only permissions and a local Git ignore rule; tracked `.env` files are refused. Empty input or Escape leaves credentials unchanged. Saving refreshes only the edited agent’s credentials and reconnects its MCP servers immediately if it is active—no `/reload` needed. Other agents keep their own credentials. Session drafts are preserved; authentication failures are reported and can be retried by saving a corrected token. Shell values may override these settings.
+
 - `dochub`: connects to `http://localhost:3001/mcp`; set `DOCHUB_TOKEN` in the shell or `.pi-agents/.env`.
 - `designhub`: connects through the editor proxy at `http://localhost:5101/mcp`; set `DESIGNHUB_TOKEN` in the shell or `.pi-agents/.env`.
 

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, loadConfig, readTrustDecision, saveAgentOverride, saveDeclarativeAgent, type AgentOverride, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, loadConfig, parseEnvFile, readTrustDecision, saveAgentOverride, saveDeclarativeAgent, type AgentOverride, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import {
 	renderDelegateCall,
@@ -717,14 +717,30 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function reapplyAgent(name: string, ctx: ExtensionContext, opts?: { silent?: boolean }) {
-		if (activeName === name) await mcpManager.disconnectAll();
+		if (activeName === name) {
+			const oldMcpTools = new Set(Object.values(mcpManager.getStatuses()).flatMap(status => status.toolNames));
+			await mcpManager.disconnectAll();
+			// Inherited toolsets must not keep stale MCP tools after a failed reconnect.
+			pi.setActiveTools(pi.getActiveTools().filter(tool => !oldMcpTools.has(tool)));
+		}
 		await applyAgent(name, ctx, opts);
 	}
 
 	async function editAgent(name: string, ctx: ExtensionContext): Promise<void> {
 		const agent = agents.find((candidate) => candidate.name === name);
 		if (!agent) return;
-		const result = await showAgentStudio(ctx, agent, { ...selectorOptions(ctx), hasSessionDraft: studioDrafts.has(name) });
+		const result = await showAgentStudio(ctx, agent, {
+			...selectorOptions(ctx),
+			hasSessionDraft: studioDrafts.has(name),
+			onCredentialsSaved: async () => {
+				// Refresh only this agent's secrets, preserving worktree fallbacks and drafts.
+				const source = sourceAgents.find(candidate => candidate.name === name);
+				if (!source) throw new Error("Edited agent no longer exists");
+				source.env = { ...source.env, ...parseEnvFile(fs.readFileSync(path.join(source.dir, ".env"), "utf8")) };
+				rebuildEffectiveAgents();
+				if (activeName === name) await reapplyAgent(name, ctx);
+			},
+		});
 		if (!result) return;
 		if (result.action === "revert") {
 			persistStudioDraft(name, undefined);

@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import extension from "../index.ts";
+import { startAuthenticatedMcp } from "./http-mcp-fixture.ts";
+import { mcpToolName } from "../mcp.ts";
 import { discoverAgents, saveAgentOverride, saveDeclarativeAgent } from "../agents.ts";
 
 async function makeAgent(root: string, name: string, extra = "") {
@@ -67,6 +69,7 @@ function boot(root: string, options?: {
 			setStatus: (_key: string, value: string) => statuses.push(value),
 			notify: (message: string, level: string) => notifications.push({ message, level }),
 			select: async () => options?.selectAnswers?.shift(),
+			confirm: async () => true,
 			editor: async () => options?.editorAnswers?.shift(),
 			input: async () => options?.inputAnswers?.shift(),
 			custom: async (factory: any) => {
@@ -82,6 +85,84 @@ function boot(root: string, options?: {
 	};
 	return { handlers, commands, activeToolsets, notifications, entries, tools, statuses, getCustomComponent: () => customComponent, ctx };
 }
+
+test("Studio credential saves reconnect a real authenticated HTTP MCP without reload", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-auth-e2e-"));
+	const server = await startAuthenticatedMcp();
+	const selectAnswers: Array<string | undefined> = [];
+	const customActions: Array<(component: any, done: (value: any) => void) => void> = [];
+	const runtime = boot(root, {
+		mode: "tui", selectAnswers, customActions,
+		branchEntries: [{ type: "custom", customType: "pi-agents-studio-state", data: {
+			name: "alpha", override: { systemPrompt: "Keep this session draft" },
+		} }],
+	});
+	const toolName = mcpToolName("authenticated", "echo");
+	try {
+		await makeAgent(root, "alpha", 'default: true, tools: undefined, mcp: ["authenticated"]');
+		await makeAgent(root, "beta", 'mcp: ["authenticated"]');
+		const configFile = path.join(root, ".pi-agents", "config.json");
+		await writeFile(configFile, JSON.stringify({ mcpServers: { authenticated: {
+			url: server.url, headers: { Authorization: "Bearer ${PI_AGENTS_E2E_SECRET}" },
+		} } }));
+		const originalConfig = await readFile(configFile, "utf8");
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		assert.ok(!runtime.activeToolsets.at(-1)?.includes(toolName));
+		async function save(value: string, cancel = false) {
+			selectAnswers.push("Configure MCP credentials", "authenticated", "Back without applying");
+			customActions.push(
+				component => component.handleInput("e"),
+				component => {
+					component.handleInput(`\x1b[200~${value}\x1b[201~`);
+					assert.ok(!component.render(80).join("\n").includes(value));
+					component.handleInput(cancel ? "\x1b" : "\r");
+				},
+				component => component.handleInput("\x1b"),
+			);
+			await runtime.commands.get("agent").handler("", runtime.ctx);
+		}
+		async function call() {
+			const result = await runtime.tools.get(toolName).execute("test-call", {}, new AbortController().signal, undefined, runtime.ctx);
+			assert.equal(result.content[0].text, "authenticated");
+		}
+		await save("first-token");
+		assert.ok(runtime.activeToolsets.at(-1)?.includes(toolName));
+		await call();
+		assert.ok(server.requests.some(request => request.method === "tools/call" && request.authorization === "Bearer first-token"));
+		const beforeCancel = server.requests.length;
+		await save("cancelled-token", true);
+		assert.equal(server.requests.length, beforeCancel);
+		assert.ok(!(await readFile(path.join(root, ".pi-agents", "alpha", ".env"), "utf8")).includes("cancelled-token"));
+		server.setToken("rotated-token");
+		await save("rotated-token");
+		await call();
+		assert.ok(server.requests.some(request => request.method === "tools/call" && request.authorization === "Bearer rotated-token"));
+		await save("wrong-token");
+		assert.ok(!runtime.activeToolsets.at(-1)?.includes(toolName));
+		assert.ok(runtime.notifications.some(entry => entry.level === "error" && /failed to start/.test(entry.message)));
+		await save("rotated-token");
+		await call();
+		assert.equal(await readFile(configFile, "utf8"), originalConfig);
+		await assert.rejects(readFile(path.join(root, ".pi-agents", ".env")), { code: "ENOENT" });
+		const beforeSwitch = server.requests.length;
+		await runtime.commands.get("agent").handler("beta", runtime.ctx);
+		assert.ok(!runtime.activeToolsets.at(-1)?.includes(toolName));
+		const betaRequests = server.requests.slice(beforeSwitch).filter(request => request.method === "initialize");
+		assert.ok(betaRequests.length > 0);
+		assert.ok(betaRequests.every(request => request.authorization !== "Bearer rotated-token"));
+		await assert.rejects(readFile(path.join(root, ".pi-agents", "beta", ".env")), { code: "ENOENT" });
+		await runtime.commands.get("agent").handler("alpha", runtime.ctx);
+		await call();
+		const prompt = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
+		assert.match(prompt.systemPrompt, /Keep this session draft/);
+		const history = JSON.stringify({ entries: runtime.entries, notifications: runtime.notifications });
+		for (const secret of ["first-token", "rotated-token", "wrong-token", "cancelled-token"]) assert.ok(!history.includes(secret));
+	} finally {
+		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		await server.close();
+		await rm(root, { recursive: true, force: true });
+	}
+});
 
 test("session startup activates config.defaultAgent", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-default-"));

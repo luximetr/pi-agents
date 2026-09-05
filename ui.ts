@@ -3,6 +3,7 @@ import { getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, Input, Key, Markdown, SelectList, Spacer, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { BUILTIN_MCP_SERVER_DESCRIPTIONS, type AgentOverride, type DiscoveredAgent, type McpServerConfig } from "./agents.ts";
 import type { McpRuntimeStatus } from "./mcp.ts";
+import { configureCredentials } from "./credentials.ts";
 import type { RunningSubagentHandle, SubagentSnapshot } from "./subagents.ts";
 
 /**
@@ -738,7 +739,7 @@ async function showToggleEditor(
 export async function showAgentStudio(
 	ctx: ExtensionContext,
 	agent: DiscoveredAgent,
-	options: AgentSelectorOptions & { hasSessionDraft: boolean },
+	options: AgentSelectorOptions & { hasSessionDraft: boolean; onCredentialsSaved?: () => Promise<void> },
 ): Promise<AgentStudioResult> {
 	let tools = agent.tools === undefined ? [...options.activeTools] : [...agent.tools];
 	let inheritsTools = agent.tools === undefined;
@@ -753,6 +754,7 @@ export async function showAgentStudio(
 			promptLabel,
 			toolsLabel,
 			mcpLabel,
+			"Configure MCP credentials",
 			"Apply as session draft",
 			...(options.trusted ? ["Save project override"] : []),
 			"Save global override",
@@ -773,6 +775,16 @@ export async function showAgentStudio(
 				.map((tool) => ({ id: tool.name, label: tool.name, description: tool.description }));
 			tools = await showToggleEditor(ctx, `Tools · ${agent.name}`, choices, tools);
 			inheritsTools = false;
+			continue;
+		}
+		if (choice === "Configure MCP credentials") {
+			if (await configureCredentials(ctx, { ...options.mcpServers, ...agent.mcpServers }, agent, options.trusted)) {
+				try {
+					await options.onCredentialsSaved?.();
+				} catch {
+					ctx.ui.notify("Credential saved, but runtime refresh failed. Run /reload to retry.", "error");
+				}
+			}
 			continue;
 		}
 		if (choice === mcpLabel) {
