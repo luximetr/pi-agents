@@ -131,7 +131,7 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 `f7` is both the agent dashboard and the entry point to Agent Studio:
 
 - Press `r` on an agent to choose its new position and save the order globally or for this project. Project order takes precedence; unlisted agents follow alphabetically. Rotation uses the same order.
-- Press `Delete` on an agent to remove its entire folder, including prompts and `.env`, after confirmation. Standalone agents only have their source file removed. Config overrides are retained. Deleting the active agent restores plain pi; deleting a project override can reveal its global definition. Delegation references are not rewritten.
+- Press `Ctrl+D` (or `Delete`) on an agent to remove its entire folder, including prompts and `.env`, after confirmation. Standalone agents only have their source file removed. Config overrides are retained. Deleting the active agent restores plain pi; deleting a project override can reveal its global definition. Delegation references are not rewritten.
 - Reorder and delete refresh the dashboard and available agents immediately; no reload is needed.
 
 - Select an agent and press `e` to edit its description, color, prompt, built-in/extension tool allowlist, and MCP assignments. Tool and MCP selectors show details for the highlighted item in a right-side pane.

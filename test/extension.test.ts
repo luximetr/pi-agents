@@ -159,7 +159,7 @@ test("deleting a standalone agent preserves the shared agents directory", async 
 		await makeAgent(root, "beta");
 		const file = path.join(root, ".pi-agents", "agent.ts");
 		await writeFile(file, 'export default { name: "standalone", description: "Standalone", default: true };');
-		const runtime = boot(root, { customActions: [component => component.handleInput("\x1b[3~")] });
+		const runtime = boot(root, { customActions: [component => component.handleInput("\x04")] });
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("agent").handler("", runtime.ctx);
 		await assert.rejects(readFile(file), { code: "ENOENT" });

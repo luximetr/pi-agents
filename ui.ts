@@ -981,7 +981,7 @@ export function showAgentSelector(
 				}
 				lines.push(
 					theme.fg("dim", " type to filter · ↑↓ agent · tab/←→ details · enter activate · esc cancel"),
-					theme.fg("dim", " e edit · n new · r reorder · del delete"),
+					theme.fg("dim", " e edit · n new · r reorder · ctrl+d delete"),
 					border,
 				);
 				return lines.map((line) => truncateToWidth(line, width));
@@ -1003,7 +1003,7 @@ export function showAgentSelector(
 					if (selected && selected !== "(none)") done({ action: "edit", agent: selected });
 				} else if (data.toLowerCase() === "n") {
 					done({ action: "create" });
-				} else if (data.toLowerCase() === "r" || matchesKey(data, Key.delete)) {
+				} else if (data.toLowerCase() === "r" || matchesKey(data, Key.delete) || matchesKey(data, Key.ctrl("d"))) {
 					const selected = selectList.getSelectedItem()?.value;
 					if (selected && selected !== "(none)") done({ action: data.toLowerCase() === "r" ? "reorder" : "delete", agent: selected });
 				} else if (matchesKey(data, Key.up) || matchesKey(data, Key.down) || matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
