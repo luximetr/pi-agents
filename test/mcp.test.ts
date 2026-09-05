@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { McpManager } from "../mcp.ts";
+import { McpManager, mcpToolName } from "../mcp.ts";
 
 function mockPi() {
 	const tools = new Map<string, any>();
@@ -37,6 +37,7 @@ async function writeFakeMcpServer(root: string): Promise<string> {
 	const file = path.join(root, "fake-mcp.mjs");
 	await writeFile(file, `#!/usr/bin/env node
 const variant = process.argv[2] || "first";
+const toolNames = JSON.parse(process.argv[3] || '["echo"]');
 let buffer = "";
 const send = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
 process.stdin.on("data", chunk => {
@@ -56,8 +57,8 @@ process.stdin.on("data", chunk => {
     } else if (request.method === "tools/list") {
       const field = variant === "first" ? "text" : "count";
       const type = variant === "first" ? "string" : "integer";
-      send(request.id, { tools: [{
-        name: "echo",
+      send(request.id, { tools: toolNames.map(name => ({
+        name,
         description: variant + " echo",
         inputSchema: {
           type: "object",
@@ -65,11 +66,11 @@ process.stdin.on("data", chunk => {
           required: [field],
           additionalProperties: false
         }
-      }] });
+      })) });
     } else if (request.method === "tools/call") {
       send(request.id, {
         content: [{ type: "text", text: variant + ":" + JSON.stringify(request.params.arguments) }],
-        structuredContent: { variant }
+        structuredContent: { variant, toolName: request.params.name }
       });
     }
   }
@@ -156,6 +157,74 @@ test("MCP reconnect refreshes a same-named tool's schema and metadata", async ()
 		assert.equal("text" in refreshed.parameters.properties, false);
 		const result = await refreshed.execute("call-3", { count: 2 }, new AbortController().signal);
 		assert.equal(result.content[0].text, 'second:{"count":2}');
+	} finally {
+		await manager.disconnectAll();
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("MCP aliases are safe, bounded, stable, and distinguish normalized names", () => {
+	assert.equal(mcpToolName("playwright", "browser_navigate"), "playwright__browser_navigate");
+	assert.equal(mcpToolName("Server-1", "Tool_2"), "Server-1__Tool_2");
+	const pairs = [
+		["pen.dev", "get.editor/state"], ["pen_dev", "get.editor/state"],
+		["pen.dev", "get_editor_state"], ["pen_dev", "get_editor_state"],
+		["设计", "read file"], ["s".repeat(80), "t".repeat(80)],
+		["s".repeat(80), "t".repeat(79) + "x"],
+	];
+	const names = pairs.map(([server, tool]) => mcpToolName(server, tool));
+	assert.equal(new Set(names).size, pairs.length);
+	names.forEach((name, i) => {
+		assert.match(name, /^[a-zA-Z0-9_-]+$/);
+		assert.ok(name.length <= 64);
+		assert.equal(name, mcpToolName(pairs[i][0], pairs[i][1]));
+	});
+});
+
+test("MCP aliases forward original names and remain stable across reconnects", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-mcp-alias-"));
+	const { pi, tools } = mockPi();
+	const { ctx, notifications } = mockContext();
+	const manager = new McpManager(pi);
+	try {
+		const server = await writeFakeMcpServer(root);
+		const originals = ["get.editor/state", "get_editor_state", "echo"];
+		const config = { "pen.dev": { command: process.execPath, args: [server, "first", JSON.stringify(originals)] } };
+		const names = await manager.activate(["pen.dev"], config, {}, ctx);
+		assert.deepEqual(names, originals.map(name => mcpToolName("pen.dev", name)));
+		for (const [i, name] of names.entries()) {
+			const tool = tools.get(name);
+			assert.equal(tool.label, `pen.dev: ${originals[i]}`);
+			const result = await tool.execute("alias-call", { text: "hello" }, new AbortController().signal);
+			assert.equal(JSON.parse(result.content[1].text.replace("Structured content:\n", "")).toolName, originals[i]);
+			assert.deepEqual(result.details, { server: "pen.dev", tool: originals[i] });
+		}
+		await manager.disconnectAll();
+		assert.deepEqual(await manager.activate(["pen.dev"], config, {}, ctx), names);
+		assert.deepEqual(notifications, []);
+	} finally {
+		await manager.disconnectAll();
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("MCP refuses alias collisions with unrelated tools", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-mcp-collision-"));
+	const { pi, tools } = mockPi();
+	const { ctx, notifications } = mockContext();
+	const manager = new McpManager(pi);
+	const name = mcpToolName("pen.dev", "echo");
+	const foreign = { name };
+	tools.set(name, foreign);
+	try {
+		const server = await writeFakeMcpServer(root);
+		const names = await manager.activate(["pen.dev"], {
+			"pen.dev": { command: process.execPath, args: [server] },
+		}, {}, ctx);
+		assert.deepEqual(names, []);
+		assert.equal(tools.get(name), foreign);
+		assert.equal(manager.getStatuses(["pen.dev"])["pen.dev"].state, "failed");
+		assert.ok(notifications.some(entry => /name collision/.test(entry.message)));
 	} finally {
 		await manager.disconnectAll();
 		await rm(root, { recursive: true, force: true });

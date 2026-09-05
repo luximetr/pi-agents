@@ -3,6 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import * as fs from "node:fs";
+import { createHash } from "node:crypto";
 import https from "node:https";
 import type { IncomingHttpHeaders, OutgoingHttpHeaders } from "node:http";
 import * as path from "node:path";
@@ -14,6 +15,15 @@ import type { McpServerConfig } from "./agents.ts";
 
 /** Separator between server name and tool name in the registered pi tool name. */
 const TOOL_SEP = "__";
+
+/** Keep existing safe names; alias punctuation/long names for strict providers. */
+export function mcpToolName(serverName: string, toolName: string): string {
+	const raw = `${serverName}${TOOL_SEP}${toolName}`;
+	if (/^[a-zA-Z0-9_-]+$/.test(raw) && raw.length <= 64) return raw;
+	// Hash the pair, not the joined name, so normalization cannot merge identities.
+	const hash = createHash("sha256").update(JSON.stringify([serverName, toolName])).digest("hex").slice(0, 12);
+	return `${raw.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50)}__${hash}`;
+}
 
 /** Client version reported to MCP servers (kept in sync with package.json). */
 const CLIENT_VERSION = (() => {
@@ -131,7 +141,7 @@ function resolveEnvRefs(value: string, missing: string[], env: Record<string, st
 export class McpManager {
 	private connections = new Map<string, Connection>();
 	/** Tool names registered by this manager; reconnects refresh their schema and metadata. */
-	private registeredTools = new Set<string>();
+	private registeredTools = new Map<string, string>();
 	/** In-flight connect promises, to dedupe concurrent activation. */
 	private pending = new Map<string, Promise<string[]>>();
 	private stderr = new Map<string, string>();
@@ -237,14 +247,17 @@ export class McpManager {
 			const { tools } = await client.listTools();
 			const toolNames: string[] = [];
 			for (const tool of tools) {
-				const prefixed = `${name}${TOOL_SEP}${tool.name}`;
-				// A server can change its schema between reconnects (or two agents can
-				// define different endpoints under the same server name). Refresh tools
-				// previously owned by this manager, while leaving foreign collisions alone.
-				if (this.registeredTools.has(prefixed) || !this.pi.getAllTools().some((t) => t.name === prefixed)) {
-					this.registerTool(name, prefixed, tool);
-					this.registeredTools.add(prefixed);
+				const prefixed = mcpToolName(name, tool.name);
+				const identity = JSON.stringify([name, tool.name]);
+				const owner = this.registeredTools.get(prefixed);
+				// Reconnects refresh metadata, but never overwrite or activate an
+				// unrelated tool if an alias (or the namespace separator) collides.
+				if ((owner !== undefined && owner !== identity)
+					|| (owner === undefined && this.pi.getAllTools().some((t) => t.name === prefixed))) {
+					throw new Error(`MCP tool name collision: "${prefixed}" for ${identity}`);
 				}
+				this.registerTool(name, prefixed, tool);
+				this.registeredTools.set(prefixed, identity);
 				toolNames.push(prefixed);
 			}
 			this.connections.set(name, { client, transport, toolNames });

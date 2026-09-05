@@ -9,7 +9,7 @@ Opencode-style agents for [pi](https://github.com/earendil-dev/pi): define agent
 Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.2.6        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.2.7        # all projects (user scope)
 ```
 
 Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
@@ -20,7 +20,7 @@ To track the latest commit on `main` instead of a pinned release:
 pi install git:github.com/luximetr/pi-agents
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.2.6`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+To update an existing installation, run the same command with the desired ref (for example `@v0.2.7`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
 
 Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
 
@@ -418,7 +418,7 @@ Both `config.json` files are merged per server name — **project wins on collis
 
 Recommended layout for a reusable setup: define your shared servers **globally**, define the agents that use them **globally** too (`~/.pi/agent/pi-agents/browser/agent.ts` with `mcp: ["playwright"]`), and only put project-specific servers in the project's `config.json`. Agents and servers don't need to live in the same place — any agent can reference any merged server.
 
-MCP tools are registered as `<server>__<tool>`, e.g. `playwright__browser_navigate`, so tools from different servers never collide and the server is always identifiable in the tool name. Tool schemas come from the server (JSON Schema → TypeBox) and tool calls are forwarded with `client.callTool`. The tool allowlist and MCP tools are combined: `active = agent.tools (or current) ∪ agent.mcp tools`.
+MCP tools are registered as `<server>__<tool>`, e.g. `playwright__browser_navigate`. Names containing punctuation (such as a `pen.dev` server) or exceeding 64 characters are sanitized/shortened and given a stable hash suffix for provider compatibility. Existing safe names stay unchanged; original server/tool names are preserved in labels and MCP calls. Name collisions are reported rather than routing to an unrelated tool. Tool schemas come from the server (JSON Schema → TypeBox) and tool calls are forwarded with `client.callTool`. The tool allowlist and MCP tools are combined: `active = agent.tools (or current) ∪ agent.mcp tools`.
 
 Details:
 - Switching agents deactivates MCP tools and closes their connections, so agent-specific credentials cannot be reused by another agent. Servers are also shut down on session end (`session_shutdown`).
