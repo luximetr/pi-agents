@@ -803,6 +803,10 @@ export function saveAgentOverride(cwd: string, scope: "project" | "global", name
 	});
 }
 
+export function saveDefaultAgent(cwd: string, scope: "project" | "global", name: string): string {
+	return updateAgentsConfig(cwd, scope, raw => { raw.defaultAgent = name; });
+}
+
 export function saveAgentOrder(cwd: string, scope: "project" | "global", names: string[]): string {
 	return updateAgentsConfig(cwd, scope, raw => { raw.agentOrder = [...new Set(names)]; });
 }

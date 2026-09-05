@@ -794,7 +794,7 @@ export async function chooseAgentColor(ctx: ExtensionContext, current?: string):
 export async function showAgentStudio(
 	ctx: ExtensionContext,
 	agent: DiscoveredAgent,
-	options: AgentSelectorOptions & { agents?: readonly DiscoveredAgent[]; hasSessionDraft: boolean; onCredentialsSaved?: () => Promise<void>; onTestMcp?: (name: string) => Promise<string | void> },
+	options: AgentSelectorOptions & { agents?: readonly DiscoveredAgent[]; hasSessionDraft: boolean; onSetDefault?: () => Promise<void>; onCredentialsSaved?: () => Promise<void>; onTestMcp?: (name: string) => Promise<string | void> },
 ): Promise<AgentStudioResult> {
 	let tools = agent.tools === undefined ? [...options.activeTools] : [...agent.tools];
 	let inheritsTools = agent.tools === undefined;
@@ -820,6 +820,7 @@ export async function showAgentStudio(
 			item(StudioAction.Tools, inheritsTools ? "inherited" : String(tools.length)),
 			item(StudioAction.Mcp, String(mcp.length)),
 			item(StudioAction.Subagents, String(subagents?.length ?? 0)),
+			...(options.onSetDefault ? [item(StudioAction.Default)] : []),
 			item(StudioAction.Apply),
 			...(options.trusted ? [item(StudioAction.SaveProject)] : []),
 			item(StudioAction.SaveGlobal),
@@ -828,6 +829,10 @@ export async function showAgentStudio(
 		];
 		const choice = await selectMenu(ctx, `Agent Studio · ${agent.name}`, actions);
 		if (!choice || choice === StudioAction.Back) return null;
+		if (choice === StudioAction.Default) {
+			await options.onSetDefault?.();
+			continue;
+		}
 		if (choice === StudioAction.Description) {
 			const edited = await editAgentField(ctx, AgentField.Description, currentDraft(), available);
 			if (edited?.trim()) description = edited.trim();

@@ -142,6 +142,8 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 - **Apply as session draft** tests changes immediately without touching the source definition. Drafts are stored in session history, survive resume/tree navigation, are marked `◆ draft` in the dashboard, and are inherited by delegated children.
 - **Save project/global override** persists the effective description/color/prompt/tools/MCP/subagent selection in `config.json` under `agentOverrides`. Code-backed `agent.ts` files are never rewritten.
 - **Revert session draft** returns to the saved source and overlays.
+- **Set as default agent** saves a project/global startup default immediately, without activating the agent or applying pending edits. Project defaults take precedence over global defaults; resumed sessions keep their own agent selection.
+- **`/new` preserves your current agent, model, reasoning level, and unsaved Studio drafts** across session replacement (including plain Pi mode). Model inheritance requires the model and its credentials to remain available; reasoning is clamped to the model's supported levels. This does not change Pi's model defaults for a fresh launch.
 
 Use **Manage subagents** to add existing agents, remove assignments, or set each child's optional model and timeout in seconds. Blank settings restore the default model or no deadline. **Done** keeps changes in the Studio draft; Escape discards changes made in the subagent menu. Then apply or save the draft. Create new child agents from the dashboard first.
 

@@ -51,6 +51,7 @@ function boot(root: string, options?: {
 		registerShortcut: () => {},
 		registerCommand: (name: string, command: any) => commands.set(name, command),
 		getFlag: () => options?.flag,
+		getThinkingLevel: () => "high",
 		appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
 		getAllTools: () => [...tools.values()],
 		getActiveTools: () => [...(activeToolsets.at(-1) ?? ["read", "bash"])],
@@ -91,7 +92,7 @@ function boot(root: string, options?: {
 			},
 		},
 	};
-	return { handlers, commands, activeToolsets, notifications, entries, tools, statuses, getCustomComponent: () => customComponent, ctx };
+	return { pi, handlers, commands, activeToolsets, notifications, entries, tools, statuses, getCustomComponent: () => customComponent, ctx };
 }
 
 test("dashboard reorder and whole-folder deletion take effect without reload", async () => {
@@ -296,6 +297,50 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 		await server.close();
 		await rm(root, { recursive: true, force: true });
 	}
+});
+
+test("Studio sets a startup default without activating or discarding edits", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-default-ui-"));
+	try {
+		await makeAgent(root, "alpha", "default: true");
+		await makeAgent(root, "beta");
+		const runtime = boot(root, {
+			selectAnswers: ["Set as default agent", "Project (commit with this repository)", "Back without applying"],
+			customActions: [(_component, done) => done({ action: "edit", agent: "beta" })],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		assert.equal((await discoverAgents(root)).config.defaultAgent, "beta");
+		assert.equal((runtime.entries.at(-1)?.data as any).name, "alpha");
+		const fresh = boot(root);
+		await fresh.handlers.get("session_start")?.({ reason: "startup" }, fresh.ctx);
+		assert.equal((fresh.entries.at(-1)?.data as any).name, "beta");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("/new inherits agent, model, reasoning and drafts across extension replacement only once", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-new-settings-"));
+	try {
+		await makeAgent(root, "alpha", "default: true");
+		await makeAgent(root, "beta");
+		const old = boot(root, { branchEntries: [{ type: "custom", customType: "pi-agents-studio-state", data: { name: "beta", override: { systemPrompt: "Unsaved prompt" } } }] });
+		old.ctx.model = { provider: "test", id: "chosen" };
+		await old.handlers.get("session_start")?.({ reason: "startup" }, old.ctx);
+		await old.commands.get("agent").handler("beta", old.ctx);
+		await old.handlers.get("session_shutdown")?.({ reason: "new" }, old.ctx);
+		const next = boot(root, { flag: "alpha" });
+		const changes: unknown[] = [];
+		next.ctx.modelRegistry = { find: (provider: string, id: string) => ({ provider, id }) };
+		next.pi.setModel = async (model: unknown) => { changes.push(model); return true; };
+		next.pi.setThinkingLevel = (level: string) => changes.push(level);
+		await next.handlers.get("session_start")?.({ reason: "new" }, next.ctx);
+		assert.deepEqual(changes, [{ provider: "test", id: "chosen" }, "high"]);
+		assert.equal((next.entries.find(entry => entry.customType === "pi-agents-state")?.data as any).name, "beta");
+		assert.equal((next.entries.find(entry => entry.customType === "pi-agents-studio-state")?.data as any).override.systemPrompt, "Unsaved prompt");
+		const fresh = boot(root);
+		await fresh.handlers.get("session_start")?.({ reason: "startup" }, fresh.ctx);
+		assert.equal((fresh.entries.at(-1)?.data as any).name, "alpha");
+	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("subagent editor validates timeouts and cancels without mutating existing settings", async () => {

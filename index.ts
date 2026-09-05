@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, saveAgentOrder, saveAgentOverride, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, saveAgentOrder, saveAgentOverride, saveDefaultAgent, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
+import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
 import { AgentField, AgentScope, AuthoringMethod, CREATE_MENU, SCOPE_MENU, selectMenu } from "./studio-menu.ts";
@@ -741,6 +742,18 @@ export default function (pi: ExtensionAPI) {
 			...selectorOptions(ctx),
 			hasSessionDraft: studioDrafts.has(name),
 			agents,
+			onSetDefault: async () => {
+				const trusted = ctx.isProjectTrusted ? ctx.isProjectTrusted() : true;
+				const scope = await selectMenu(ctx, `Default agent · ${name}`, SCOPE_MENU.filter(item => trusted || item.id === AgentScope.Global));
+				if (!scope) return;
+				try {
+					const configPath = saveDefaultAgent(ctx.cwd, scope, name);
+					config = loadConfig(ctx.cwd, { includeProject: trusted });
+					ctx.ui.notify(`Default agent "${name}" saved to ${configPath}.${config.defaultAgent !== name ? ` Project default "${config.defaultAgent}" takes precedence here.` : ""}`, "info");
+				} catch (err) {
+					ctx.ui.notify(`Could not save default agent: ${err instanceof Error ? err.message : String(err)}`, "error");
+				}
+			},
 			onTestMcp: async (serverName) => {
 				const current = agents.find(candidate => candidate.name === name);
 				const server = current?.mcpServers?.[serverName] ?? config.mcpServers?.[serverName];
@@ -1048,6 +1061,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		sessionCwd = ctx.cwd;
+		const handoff = event.reason === "new" ? takeSessionHandoff(ctx.cwd, event.previousSessionFile) : undefined;
 		sessionSubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 		// Project agents/config are project code: only load them when pi trusts
 		// this project (the extension itself is installed globally).
@@ -1058,6 +1072,17 @@ export default function (pi: ExtensionAPI) {
 		const result = await discoverAgents(ctx.cwd, { includeProject: trusted });
 		sourceAgents = result.agents;
 		restoreStudioDrafts(ctx);
+		if (handoff) {
+			for (const [name, override] of Object.entries(handoff.drafts)) {
+				studioDrafts.set(name, override);
+				pi.appendEntry(STUDIO_STATE_ENTRY, { name, override });
+			}
+			if (handoff.model) {
+				const model = ctx.modelRegistry.find(handoff.model.provider, handoff.model.id);
+				if (!model || !await pi.setModel(model)) ctx.ui.notify(`Could not inherit model ${handoff.model.provider}/${handoff.model.id}; keeping Pi's selected model.`, "warning");
+			}
+			if (handoff.thinkingLevel !== undefined) pi.setThinkingLevel(handoff.thinkingLevel);
+		}
 		rebuildEffectiveAgents();
 		config = result.config;
 		activeName = undefined;
@@ -1072,16 +1097,16 @@ export default function (pi: ExtensionAPI) {
 		// Restore this session first. A newly-created session has no entries, so
 		// inherit the selection from the session it replaced (the OpenCode-style
 		// behavior expected from /new and /clone).
-		let restored = readPersistedName(ctx.sessionManager.getSessionFile());
+		let restored = handoff ? handoff.name : readPersistedName(ctx.sessionManager.getSessionFile());
 		if (restored === undefined && (event.reason === "new" || event.reason === "fork")) {
 			restored = readPersistedName(event.previousSessionFile);
 		}
 
-		// Priority: --agent flag > persisted > config.defaultAgent > agent.default > first agent
+		// /new keeps the live selection; otherwise --agent > persisted > configured default > source default > first.
 
 		const flag = pi.getFlag("agent");
 		let selected: string | undefined;
-		if (typeof flag === "string" && flag.trim()) {
+		if (!handoff && typeof flag === "string" && flag.trim()) {
 			if (agents.some((a) => a.name === flag.trim())) selected = flag.trim();
 			else ctx.ui.notify(`Unknown agent "${flag}". Available: ${agents.map((a) => a.name).join(", ")}`, "warning");
 		} else if (restored !== undefined) {
@@ -1139,7 +1164,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// Close MCP server processes when the session ends.
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (event, ctx) => {
+		if (event.reason === "new") {
+			storeSessionHandoff(ctx.cwd, ctx.sessionManager.getSessionFile(), {
+				name: activeName ?? null,
+				model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined,
+				thinkingLevel: pi.getThinkingLevel?.(),
+				drafts: Object.fromEntries(studioDrafts),
+			});
+		}
 		for (const handle of runningSubagents.values()) handle.stop("session");
 		runningSubagents.clear();
 		await mcpManager.disconnectAll();
