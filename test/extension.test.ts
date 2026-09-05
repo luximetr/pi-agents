@@ -93,6 +93,82 @@ function boot(root: string, options?: {
 	return { handlers, commands, activeToolsets, notifications, entries, tools, statuses, getCustomComponent: () => customComponent, ctx };
 }
 
+test("dashboard reorder and whole-folder deletion take effect without reload", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-manage-"));
+	try {
+		await makeAgent(root, "alpha", "default: true");
+		await makeAgent(root, "beta");
+		await writeFile(path.join(root, ".pi-agents", "alpha", ".env"), "SECRET=keep\n");
+		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({ custom: "preserved" }));
+		const runtime = boot(root, {
+			selectAnswers: ["2 · beta", "Project (commit with this repository)"],
+			customActions: [(component) => component.handleInput("r")],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		const saved = JSON.parse(await readFile(path.join(root, ".pi-agents", "config.json"), "utf8"));
+		assert.deepEqual(saved.agentOrder, ["beta", "alpha"]);
+		assert.equal(saved.custom, "preserved");
+		assert.deepEqual((await discoverAgents(root)).agents.filter(a => ["alpha", "beta"].includes(a.name)).map(a => a.name), ["beta", "alpha"]);
+
+		const originalCustom = runtime.ctx.ui.custom;
+		runtime.ctx.ui.custom = async (factory: any) => {
+			let selected: unknown;
+			const component = factory({ requestRender() {} }, runtime.ctx.ui.theme, {}, (value: unknown) => { selected = value; });
+			component.handleInput("\x1b[A");
+			component.handleInput("\r");
+			assert.equal(selected, "beta", "reordered list is live without restarting the session");
+			return null;
+		};
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		let confirmed = false;
+		runtime.ctx.ui.confirm = async (_title: string, message: string) => {
+			assert.match(message, /ALL its contents/);
+			assert.match(message, /credentials/);
+			return confirmed;
+		};
+		let sendDelete = true;
+		runtime.ctx.ui.custom = async (factory: any) => {
+			if (!sendDelete) return null;
+			sendDelete = false;
+			return new Promise(resolve => {
+				const component = factory({ requestRender() {} }, runtime.ctx.ui.theme, {}, resolve);
+				component.handleInput("\x1b[3~");
+			});
+		};
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await readFile(path.join(root, ".pi-agents", "alpha", "agent.ts"));
+		confirmed = true;
+		sendDelete = true;
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await assert.rejects(readFile(path.join(root, ".pi-agents", "alpha", "agent.ts")), { code: "ENOENT" });
+		await assert.rejects(readFile(path.join(root, ".pi-agents", "alpha", ".env")), { code: "ENOENT" });
+		await readFile(path.join(root, ".pi-agents", "beta", "agent.ts"));
+		await runtime.commands.get("agent").handler("alpha", runtime.ctx);
+		assert.ok(runtime.notifications.some(item => /Unknown agent/.test(item.message)), "deleted agent is unavailable immediately");
+		assert.deepEqual(runtime.activeToolsets.at(-1), ["read", "bash"]);
+		runtime.ctx.ui.custom = originalCustom;
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("deleting a standalone agent preserves the shared agents directory", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delete-file-"));
+	try {
+		await makeAgent(root, "beta");
+		const file = path.join(root, ".pi-agents", "agent.ts");
+		await writeFile(file, 'export default { name: "standalone", description: "Standalone", default: true };');
+		const runtime = boot(root, { customActions: [component => component.handleInput("\x1b[3~")] });
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await assert.rejects(readFile(file), { code: "ENOENT" });
+		await readFile(path.join(root, ".pi-agents", "beta", "agent.ts"));
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("Studio credential saves reconnect a real authenticated HTTP MCP without reload", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-auth-e2e-"));
 	const server = await startAuthenticatedMcp();

@@ -625,7 +625,7 @@ function renderAgentDetails(
 	return lines;
 }
 
-export type AgentSelectorResult = string | { action: "edit"; agent: string } | { action: "create" } | null;
+export type AgentSelectorResult = string | { action: "edit" | "reorder" | "delete"; agent: string } | { action: "create" } | null;
 
 export type AgentStudioResult =
 	| { action: "apply" | "save-project" | "save-global"; override: AgentOverride }
@@ -979,7 +979,11 @@ export function showAgentSelector(
 				for (let row = 0; row < AGENT_DASHBOARD_HEIGHT; row++) {
 					lines.push(`${padToWidth(leftPane[row] ?? "", leftWidth)}${divider}${padToWidth(rightPane[row] ?? "", rightWidth)}`);
 				}
-				lines.push(theme.fg("dim", " type to filter · ↑↓ agent · tab/←→ details · enter activate · e edit · n new · esc cancel"), border);
+				lines.push(
+					theme.fg("dim", " type to filter · ↑↓ agent · tab/←→ details · enter activate · esc cancel"),
+					theme.fg("dim", " e edit · n new · r reorder · del delete"),
+					border,
+				);
 				return lines.map((line) => truncateToWidth(line, width));
 			},
 			invalidate() { searchInput.invalidate(); selectList.invalidate(); },
@@ -999,6 +1003,9 @@ export function showAgentSelector(
 					if (selected && selected !== "(none)") done({ action: "edit", agent: selected });
 				} else if (data.toLowerCase() === "n") {
 					done({ action: "create" });
+				} else if (data.toLowerCase() === "r" || matchesKey(data, Key.delete)) {
+					const selected = selectList.getSelectedItem()?.value;
+					if (selected && selected !== "(none)") done({ action: data.toLowerCase() === "r" ? "reorder" : "delete", agent: selected });
 				} else if (matchesKey(data, Key.up) || matchesKey(data, Key.down) || matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
 					selectList.handleInput(data);
 				} else {

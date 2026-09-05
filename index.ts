@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, loadConfig, parseAgentColor, parseEnvFile, readTrustDecision, saveAgentOverride, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, parseAgentColor, parseEnvFile, readTrustDecision, saveAgentOrder, saveAgentOverride, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
@@ -837,6 +837,51 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	async function manageAgent(action: "reorder" | "delete", name: string, ctx: ExtensionContext): Promise<void> {
+		const agent = agents.find(candidate => candidate.name === name);
+		if (!agent) return;
+		const trusted = ctx.isProjectTrusted ? ctx.isProjectTrusted() : true;
+		try {
+			if (action === "reorder") {
+				const position = await selectMenu(ctx, `Move "${name}" to position`, agents.map((candidate, index) => ({
+					id: String(index), label: `${index + 1} · ${candidate.name}${candidate.name === name ? " (current)" : ""}`,
+				})));
+				if (position === undefined || Number(position) === agents.indexOf(agent)) return;
+				const scope = await selectMenu(ctx, "Save agent order", SCOPE_MENU.filter(item => trusted || item.id === AgentScope.Global));
+				if (!scope) return;
+				const names = agents.filter(candidate => candidate.name !== name).map(candidate => candidate.name);
+				names.splice(Number(position), 0, name);
+				const saved = saveAgentOrder(ctx.cwd, scope, names);
+				ctx.ui.notify(`Agent order saved to ${saved}${scope === AgentScope.Global && trusted ? " (project order takes precedence)" : ""}`, "info");
+			} else {
+				if (agent.source === "project" && !trusted) throw new Error("Project is not trusted");
+				const dependents = agents.filter(candidate => candidate.subagents?.some(child => child.name === name)).map(candidate => candidate.name);
+				const root = agent.source === "global" ? getGlobalAgentsDir() : findProjectAgentsDir(ctx.cwd);
+				const folderBased = root !== null
+					&& path.resolve(path.dirname(agent.dir)) === path.resolve(root)
+					&& ["agent.ts", "index.ts", "agent.json"].includes(path.basename(agent.filePath));
+				const target = folderBased ? agent.dir : agent.filePath;
+				const message = `Permanently remove ${agent.source} ${folderBased ? "agent folder and ALL its contents (including prompts and credentials)" : "source file"}:\n${target}\nConfig overrides are kept.`
+					+ (agent.overrides ? `\nThe overridden ${agent.overrides.source} definition may become visible again.` : "")
+					+ (dependents.length ? `\nReferenced by: ${dependents.join(", ")}. These references are not changed.` : "")
+					+ (activeName === name ? "\nThe active agent will be cleared." : "");
+				if (!await ctx.ui.confirm(`Delete agent "${name}"?`, message)) return;
+				if (folderBased) fs.rmSync(target, { recursive: true });
+				else fs.unlinkSync(target);
+				if (activeName === name) await clearAgent(ctx, { silent: true });
+				persistStudioDraft(name, undefined);
+				ctx.ui.notify(`Deleted ${target}`, "info");
+			}
+			const discovered = await discoverAgents(ctx.cwd, { includeProject: trusted });
+			sourceAgents = discovered.agents;
+			config = discovered.config;
+			rebuildEffectiveAgents();
+			refreshStatus(ctx);
+		} catch (err) {
+			ctx.ui.notify(`Could not ${action} agent: ${err instanceof Error ? err.message : String(err)}`, "error");
+		}
+	}
+
 	/** Show the dashboard; Studio actions return to it after closing. */
 	async function showPicker(ctx: ExtensionContext) {
 		while (true) {
@@ -844,7 +889,8 @@ export default function (pi: ExtensionAPI) {
 			if (result === null) return;
 			if (typeof result === "object") {
 				if (result.action === "create") await createAgent(ctx);
-				else await editAgent(result.agent, ctx);
+				else if (result.action === "edit") await editAgent(result.agent, ctx);
+				else await manageAgent(result.action, result.agent, ctx);
 				continue;
 			}
 			if (result === "(none)") await clearAgent(ctx);

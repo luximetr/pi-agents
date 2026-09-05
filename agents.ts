@@ -156,6 +156,8 @@ export interface AgentOverride {
 
 export interface PiAgentsConfig {
 	defaultAgent?: string;
+	/** Picker and rotation order; unlisted agents follow alphabetically. */
+	agentOrder?: string[];
 	/** Declarative Agent Studio overlays, keyed by agent name. */
 	agentOverrides?: Record<string, AgentOverride>;
 	keybindings?: {
@@ -592,6 +594,7 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 		const mcpServers = normalizeMcpServers(parsed.mcpServers);
 		return {
 			defaultAgent: typeof parsed.defaultAgent === "string" ? parsed.defaultAgent : undefined,
+			agentOrder: Array.isArray(parsed.agentOrder) ? [...new Set(parsed.agentOrder.filter((name): name is string => typeof name === "string"))] : undefined,
 			agentOverrides: normalizeAgentOverrides(parsed.agentOverrides),
 			keybindings: keybindings
 				? {
@@ -715,6 +718,7 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 	for (const name of Object.keys(projectConfig.mcpServers ?? {})) mcpServerSources[name] = "project";
 	return {
 		defaultAgent: projectConfig.defaultAgent ?? globalConfig.defaultAgent,
+		agentOrder: projectConfig.agentOrder ?? globalConfig.agentOrder,
 		agentOverrides: mergeAgentOverrides(globalConfig.agentOverrides, projectConfig.agentOverrides),
 		keybindings: {
 			select: projectConfig.keybindings?.select ?? globalConfig.keybindings?.select,
@@ -788,6 +792,18 @@ export function applyAgentOverride(agent: DiscoveredAgent, override: AgentOverri
 
 /** Persist an Agent Studio overlay while preserving unrelated config.json fields. */
 export function saveAgentOverride(cwd: string, scope: "project" | "global", name: string, override: AgentOverride): string {
+	return updateAgentsConfig(cwd, scope, raw => {
+		const existing = raw.agentOverrides && typeof raw.agentOverrides === "object" && !Array.isArray(raw.agentOverrides)
+			? raw.agentOverrides as Record<string, unknown> : {};
+		raw.agentOverrides = { ...existing, [name]: override };
+	});
+}
+
+export function saveAgentOrder(cwd: string, scope: "project" | "global", names: string[]): string {
+	return updateAgentsConfig(cwd, scope, raw => { raw.agentOrder = [...new Set(names)]; });
+}
+
+function updateAgentsConfig(cwd: string, scope: "project" | "global", update: (raw: Record<string, unknown>) => void): string {
 	const dir = scope === "global" ? getGlobalAgentsDir() : (findProjectAgentsDir(cwd) ?? path.join(findProjectRoot(cwd), ".pi-agents"));
 	fs.mkdirSync(dir, { recursive: true });
 	const configPath = path.join(dir, "config.json");
@@ -804,10 +820,7 @@ export function saveAgentOverride(cwd: string, scope: "project" | "global", name
 		}
 		raw = parsed as Record<string, unknown>;
 	}
-	const existing = raw.agentOverrides && typeof raw.agentOverrides === "object" && !Array.isArray(raw.agentOverrides)
-		? raw.agentOverrides as Record<string, unknown>
-		: {};
-	raw.agentOverrides = { ...existing, [name]: override };
+	update(raw);
 	const tempPath = `${configPath}.tmp-${process.pid}`;
 	fs.writeFileSync(tempPath, `${JSON.stringify(raw, null, "\t")}\n`, { encoding: "utf8", mode: 0o600 });
 	fs.renameSync(tempPath, configPath);
@@ -898,7 +911,11 @@ export async function discoverAgents(cwd: string, opts?: DiscoverOptions): Promi
 	return {
 		agents: [...byName.values()]
 			.map((agent) => applyAgentOverride(agent, config.agentOverrides?.[agent.name]))
-			.sort((a, b) => a.name.localeCompare(b.name)),
+			.sort((a, b) => {
+				const order = config.agentOrder ?? [];
+				const rank = (name: string) => { const index = order.indexOf(name); return index < 0 ? order.length : index; };
+				return rank(a.name) - rank(b.name) || a.name.localeCompare(b.name);
+			}),
 		config,
 	};
 }
