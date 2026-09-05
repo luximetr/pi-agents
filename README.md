@@ -130,10 +130,13 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 
 `f7` is both the agent dashboard and the entry point to Agent Studio:
 
-- Select an agent and press `e` to edit its prompt, built-in/extension tool allowlist, and MCP assignments. Tool and MCP selectors show details for the highlighted item in a right-side pane.
-- Press `n` to create a project or global agent interactively. Studio-created agents use a declarative `agent.json`; no TypeScript is generated.
+- Select an agent and press `e` to edit its description, color, prompt, built-in/extension tool allowlist, and MCP assignments. Tool and MCP selectors show details for the highlighted item in a right-side pane.
+- Press `n` to create a project or global agent manually or **Describe with AI**. Review/edit the AI draft as JSON, choose its color, and confirm before anything is saved. Manual creation uses the same assisted description and prompt editors. Studio-created agents use a declarative `agent.json`; no TypeScript is generated.
+- Open **Edit description** or **Edit prompt** to edit normally or press **F2** for AI help with that field’s current text, including unsaved edits. Suggestions appear in the same editor for review and further editing. **F3** restores the pre-AI text; **Enter/Ctrl+S** accepts the field into the Studio draft; **Escape** discards the field edits. Use **Shift+Enter** for newlines. There are no separate top-level AI refinement actions.
+- Assistance is a neutral, tool-free Pi model request using the current provider/model, authentication, and reasoning level—not the active agent’s persona. It receives only the editable draft and available tool/MCP names, never agent `.env` values, MCP headers, or conversation history. PM, developer, documentation, designer, and dev-lead patterns guide the assistant internally; there is no template-selection menu. Requests are cancellable and time out after two minutes; normal provider usage charges apply.
+- **Color** offers automatic coloring, named palette colors, or a custom `#rrggbb`/theme role. Color and description edits also work as session drafts and saved overrides.
 - **Apply as session draft** tests changes immediately without touching the source definition. Drafts are stored in session history, survive resume/tree navigation, are marked `◆ draft` in the dashboard, and are inherited by delegated children.
-- **Save project/global override** persists the effective prompt/tools/MCP selection in `config.json` under `agentOverrides`. Code-backed `agent.ts` files are never rewritten.
+- **Save project/global override** persists the effective description/color/prompt/tools/MCP selection in `config.json` under `agentOverrides`. Code-backed `agent.ts` files are never rewritten.
 - **Revert session draft** returns to the saved source and overlays.
 
 The MCP editor includes curated recipes for Playwright, iOS Simulator, pen.dev, local DocHub, and local DesignHub. They remain disconnected until assigned to an agent. Project/global `mcpServers` with the same name override the bundled recipe.
@@ -141,7 +144,9 @@ The MCP editor includes curated recipes for Playwright, iOS Simulator, pen.dev, 
 - `playwright`: pinned `@playwright/mcp@0.0.80`.
 - `ios-simulator`: pinned `ios-simulator-mcp@2.1.0`; requires Xcode/iOS Simulator.
 - `pen.dev`: connects to the Apple-silicon MCP server inside `/Applications/Pen.app`; keep Pen running.
-Use **Configure MCP credentials** in Studio to enter masked tokens for DocHub, DesignHub, or other HTTP servers with `${VAR}` header references. Credentials are saved immediately beside the edited agent’s definition (for example `.pi-agents/doc/.env` or `~/.pi/agent/pi-agents/doc/.env`), not in shared scope-level files, drafts, agent overrides, or session history. Files use owner-only permissions and a local Git ignore rule; tracked `.env` files are refused. Empty input or Escape leaves credentials unchanged. Saving refreshes only the edited agent’s credentials and reconnects its MCP servers immediately if it is active—no `/reload` needed. Other agents keep their own credentials. Session drafts are preserved; authentication failures are reported and can be retried by saving a corrected token. Shell values may override these settings.
+Use **Manage MCP servers** in Studio to browse servers on the left and inspect the selected server’s details and settings on the right. Press Enter or Tab to focus its **Enable/Disable server**, **Manage credentials**, and **Test connection** actions; use ↑↓ and Enter to choose an action. Escape returns to the server list, then to Studio. Space toggles enablement directly from the list. Credential entry and testing return to the same server’s settings, with test results shown inline. **Test connection** initializes an isolated MCP client and discovers tools with a 10-second timeout; it does not enable the server, register tools, or change the active agent. Tests report missing credentials, connection failures, or the discovered tool count without exposing tokens.
+
+Use the selected server’s **Manage credentials** action to enter masked tokens for DocHub, DesignHub, or other HTTP servers with `${VAR}` header references. Credentials are saved immediately beside the edited agent’s definition (for example `.pi-agents/doc/.env` or `~/.pi/agent/pi-agents/doc/.env`), not in shared scope-level files, drafts, agent overrides, or session history. Files use owner-only permissions and a local Git ignore rule; tracked `.env` files are refused. Empty input or Escape leaves credentials unchanged. Saving refreshes only the edited agent’s credentials and reconnects its MCP servers immediately if it is active—no `/reload` needed. Other agents keep their own credentials. Session drafts are preserved; authentication failures are reported and can be retried by saving a corrected token. Shell values may override these settings.
 
 - `dochub`: connects to `http://localhost:3001/mcp`; set `DOCHUB_TOKEN` in the shell or `.pi-agents/.env`.
 - `designhub`: connects through the editor proxy at `http://localhost:5101/mcp`; set `DESIGNHUB_TOKEN` in the shell or `.pi-agents/.env`.
@@ -468,7 +473,7 @@ The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent insp
 
 ## Limitations / roadmap
 
-- Agent Studio currently edits prompts, tool allowlists, and MCP assignments; metadata, delegation relationships, policies, and executable custom-tool code still use the source definition.
+- Agent Studio edits descriptions, colors, prompts, tool allowlists, and MCP assignments; other metadata, delegation relationships, policies, and executable custom-tool code still use the source definition.
 - MCP supports stdio and streamable HTTP transports (no SSE); custom server definitions are still configured statically, while the bundled Playwright, iOS Simulator, pen.dev, DocHub, and DesignHub recipes can be assigned in Studio.
 - External edits to `.pi-agents/` need `/reload` (or a new session); Studio drafts and saves are applied immediately.
 - Project-local installs (`pi install <repo> -l` / `pi-agents --local`) are recorded in `.pi/settings.json`, which git never checks out — freshly created worktrees of such a project have no extension. Use the default global install instead (the `.pi-agents/` configs remain per project)

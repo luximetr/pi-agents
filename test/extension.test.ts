@@ -6,6 +6,9 @@ import test from "node:test";
 import extension from "../index.ts";
 import { startAuthenticatedMcp } from "./http-mcp-fixture.ts";
 import { mcpToolName } from "../mcp.ts";
+import { STUDIO_LABELS, StudioAction } from "../studio-menu.ts";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+initTheme("dark", false);
 import { discoverAgents, saveAgentOverride, saveDeclarativeAgent } from "../agents.ts";
 
 async function makeAgent(root: string, name: string, extra = "") {
@@ -75,7 +78,11 @@ function boot(root: string, options?: {
 			custom: async (factory: any) => {
 				let finish!: (value: any) => void;
 				const completion = new Promise<any>((resolve) => { finish = resolve; });
-				customComponent = factory({ requestRender: () => {} }, theme, {}, finish);
+				customComponent = factory({ requestRender: () => {}, terminal: { rows: 40, columns: 120 } }, theme, {}, finish);
+				if (customComponent.signal) {
+					const loader = customComponent;
+					return completion.finally(() => loader.dispose());
+				}
 				const action = options?.customActions?.shift();
 				if (!action) return null;
 				action(customComponent, finish);
@@ -109,23 +116,72 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		assert.ok(!runtime.activeToolsets.at(-1)?.includes(toolName));
 		async function save(value: string, cancel = false) {
-			selectAnswers.push("Configure MCP credentials", "authenticated", "Back without applying");
+			selectAnswers.push("Manage MCP servers (1)", "Back without applying");
 			customActions.push(
 				component => component.handleInput("e"),
+				component => {
+					const details = component.render(120).join("\n");
+					assert.match(details, /authenticated/);
+					assert.match(details, /Disable server/);
+					assert.match(details, /Manage credentials/);
+					assert.match(details, /Test connection/);
+					component.handleInput("\r"); // selected server settings
+					component.handleInput("\r"); // disable
+					assert.match(component.render(120).join("\n"), /Enable server/);
+					component.handleInput("\r"); // restore draft assignment
+					component.handleInput("\x1b[B"); // credentials
+					component.handleInput("\r");
+				},
 				component => {
 					component.handleInput(`\x1b[200~${value}\x1b[201~`);
 					assert.ok(!component.render(80).join("\n").includes(value));
 					component.handleInput(cancel ? "\x1b" : "\r");
 				},
+				component => {
+					assert.match(component.render(120).join("\n"), /› Manage credentials/);
+					component.handleInput("\x1b");
+					component.handleInput("\x1b");
+				},
 				component => component.handleInput("\x1b"),
 			);
 			await runtime.commands.get("agent").handler("", runtime.ctx);
 		}
+		async function testConnection(expected: RegExp) {
+			const toolsBefore = [...runtime.tools.keys()];
+			const activeBefore = [...runtime.activeToolsets.at(-1)!];
+			const entriesBefore = runtime.entries.length;
+			const notificationsBefore = runtime.notifications.length;
+			selectAnswers.push("Manage MCP servers (1)", "Back without applying");
+			customActions.push(
+				component => component.handleInput("e"),
+				component => {
+					component.handleInput("\r");
+					component.handleInput("\x1b[B");
+					component.handleInput("\x1b[B");
+					component.handleInput("\r");
+				},
+				component => {
+					const details = component.render(160).join(" ").replace(/\s+/g, " ");
+					assert.match(details, expected);
+					assert.match(details, /› Test connection/);
+					component.handleInput("\x1b");
+					component.handleInput("\x1b");
+				},
+				component => component.handleInput("\x1b"),
+			);
+			await runtime.commands.get("agent").handler("", runtime.ctx);
+			assert.ok(runtime.notifications.slice(notificationsBefore).some(entry => expected.test(entry.message)));
+			assert.deepEqual([...runtime.tools.keys()], toolsBefore);
+			assert.deepEqual(runtime.activeToolsets.at(-1), activeBefore);
+			assert.equal(runtime.entries.length, entriesBefore);
+		}
+		await testConnection(/Missing credentials/);
 		async function call() {
 			const result = await runtime.tools.get(toolName).execute("test-call", {}, new AbortController().signal, undefined, runtime.ctx);
 			assert.equal(result.content[0].text, "authenticated");
 		}
 		await save("first-token");
+		await testConnection(/connection successful; 1 tools discovered/);
 		assert.ok(runtime.activeToolsets.at(-1)?.includes(toolName));
 		await call();
 		assert.ok(server.requests.some(request => request.method === "tools/call" && request.authorization === "Bearer first-token"));
@@ -138,6 +194,7 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 		await call();
 		assert.ok(server.requests.some(request => request.method === "tools/call" && request.authorization === "Bearer rotated-token"));
 		await save("wrong-token");
+		await testConnection(/Connection or tool discovery failed/);
 		assert.ok(!runtime.activeToolsets.at(-1)?.includes(toolName));
 		assert.ok(runtime.notifications.some(entry => entry.level === "error" && /failed to start/.test(entry.message)));
 		await save("rotated-token");
@@ -162,6 +219,164 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 		await server.close();
 		await rm(root, { recursive: true, force: true });
 	}
+});
+
+test("Studio routes renamed labels by ID and persists description and color overrides", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-ids-"));
+	const oldLabel = STUDIO_LABELS[StudioAction.Description];
+	STUDIO_LABELS[StudioAction.Description] = "Change agent summary";
+	try {
+		await makeAgent(root, "alpha", "default: true");
+		const runtime = boot(root, {
+			selectAnswers: ["Change agent summary", "Color (automatic)", "Custom hex/theme role", "Save project override"],
+			inputAnswers: ["invalid-color", "#ABCDEF"], editorAnswers: ["Refined responsibility"],
+			customActions: [component => component.handleInput("e"), component => component.handleInput("\x1b")],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		const discovered = await discoverAgents(root);
+		assert.equal(discovered.agents.find(agent => agent.name === "alpha")?.description, "Refined responsibility");
+		assert.equal(discovered.agents.find(agent => agent.name === "alpha")?.color, "#abcdef");
+		assert.ok(runtime.notifications.some(entry => /six-digit hex/.test(entry.message)));
+	} finally {
+		STUDIO_LABELS[StudioAction.Description] = oldLabel;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+function enableStudioAI(runtime: ReturnType<typeof boot>, response: string) {
+	const requests: any[] = [];
+	runtime.ctx.model = { provider: "studio-test", id: "selected-model" };
+	runtime.ctx.thinkingLevel = "high";
+	runtime.ctx.modelRegistry = {
+		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "provider-secret" }),
+		getProvider: () => ({ streamSimple: (model: any, context: any, options: any) => {
+			requests.push({ model, context, options });
+			return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: response }] }) };
+		} }),
+	};
+	return requests;
+}
+
+test("Studio creates a reviewed AI draft with color using the selected model and reasoning", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-ai-create-"));
+	const generated = { name: "planner", description: "Plan outcomes", color: "#ff9f0a", tools: ["read"], mcp: [], systemPrompt: "Clarify scope and acceptance criteria." };
+	try {
+		const runtime = boot(root, {
+			mode: "tui",
+			selectAnswers: ["Project (commit with this repository)", "Describe with AI", "Orange (#ff9f0a)", "Back without applying"],
+			inputAnswers: ["Create a PM who clarifies product scope"],
+			editorAnswers: [JSON.stringify({ ...generated, description: "Reviewed product planner" })],
+			customActions: [component => component.handleInput("n"), component => component.handleInput("\x1b")],
+		});
+		const requests = enableStudioAI(runtime, JSON.stringify(generated));
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		const saved = JSON.parse(await readFile(path.join(root, ".pi-agents", "planner", "agent.json"), "utf8"));
+		assert.equal(saved.description, "Reviewed product planner");
+		assert.equal(saved.color, generated.color);
+		assert.equal(requests.length, 1);
+		assert.equal(requests[0].model.id, "selected-model");
+		assert.equal(requests[0].options.reasoning, "high");
+		assert.match(requests[0].context.systemPrompt, /PM: clarify outcomes/);
+		assert.ok(!JSON.stringify(runtime.entries).includes("planner")); // no activation
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Studio AI prompt help reviews a draft without exposing credentials or changing other fields", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-ai-edit-"));
+	try {
+		await makeAgent(root, "alpha", 'default: true, color: "#4cc2ff", systemPrompt: "Original prompt"');
+		await writeFile(path.join(root, ".pi-agents", "alpha", ".env"), "DOCHUB_TOKEN=private-agent-secret\n");
+		const source = await readFile(path.join(root, ".pi-agents", "alpha", "agent.ts"), "utf8");
+		const runtime = boot(root, {
+			mode: "tui", selectAnswers: ["Edit prompt (1 lines)", "Apply as session draft"],
+			inputAnswers: ["Make the prompt test-driven"],
+			customActions: [
+				component => component.handleInput("e"),
+				component => {
+					assert.match(component.render(120).join("\n"), /F2 AI assistance/);
+					component.handleInput(" plus manual changes");
+					component.handleInput("\x1bOQ"); // F2: assist this field
+				},
+				component => {
+					assert.match(component.render(120).join("\n"), /Proposed: test first/);
+					component.handleInput("\x15"); // Ctrl+U: edit the suggestion before accepting
+					component.handleInput("Reviewed: write tests first.");
+					component.handleInput("\r");
+				},
+				component => component.handleInput("\x1b"),
+			],
+		});
+		const requests = enableStudioAI(runtime, "Proposed: test first.");
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		const prompt = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
+		assert.match(prompt.systemPrompt, /Reviewed: write tests first/);
+		assert.ok(!JSON.stringify(requests[0].context).includes("private-agent-secret"));
+		assert.match(requests[0].context.messages[0].content[0].text, /Original prompt plus manual changes/);
+		assert.equal(await readFile(path.join(root, ".pi-agents", "alpha", "agent.ts"), "utf8"), source);
+		const savedDraft = runtime.entries.find(entry => entry.customType === "pi-agents-studio-state")?.data as any;
+		assert.equal(savedDraft.override.color, "#4cc2ff");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+for (const outcome of ["save", "undo", "cancel", "cancel-request", "failure"] as const) {
+	test(`description editor keeps AI assistance field-local (${outcome})`, async () => {
+		const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-description-assist-"));
+		try {
+			await makeAgent(root, "alpha", 'default: true, systemPrompt: "Do not change this prompt"');
+			const runtime = boot(root, {
+				mode: "tui", selectAnswers: ["Edit description", "Apply as session draft"],
+				inputAnswers: [outcome === "cancel-request" ? undefined : "Make the description concise"],
+				customActions: [
+					component => component.handleInput("e"),
+					component => {
+						assert.match(component.render(120).join("\n"), /Description · alpha/);
+						component.handleInput(" manual edit");
+						component.handleInput("\x1bOQ");
+					},
+					component => {
+						assert.match(component.render(120).join("\n"), outcome === "cancel-request" || outcome === "failure" ? /alpha manual edit/ : /Suggested responsibility/);
+						if (outcome === "undo") {
+							component.handleInput("\x1bOR"); // F3: restore the pre-AI manual draft
+							assert.match(component.render(120).join("\n"), /alpha manual edit/);
+						}
+						component.handleInput(outcome === "cancel" ? "\x1b" : "\r");
+					},
+					component => component.handleInput("\x1b"),
+				],
+			});
+			const requests = enableStudioAI(runtime, "Suggested responsibility");
+			if (outcome === "failure") runtime.ctx.modelRegistry.getProvider = () => ({ streamSimple: () => ({ result: async () => { throw new Error("private provider error"); } }) });
+			await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+			await runtime.commands.get("agent").handler("", runtime.ctx);
+			const override = (runtime.entries.find(entry => entry.customType === "pi-agents-studio-state")?.data as any).override;
+			assert.equal(override.description, outcome === "save" ? "Suggested responsibility" : outcome === "cancel" ? "alpha" : "alpha manual edit");
+			assert.equal(override.systemPrompt, "Do not change this prompt");
+			if (requests.length) {
+				assert.match(requests[0].context.systemPrompt, /revised description/);
+				assert.match(requests[0].context.messages[0].content[0].text, /alpha manual edit/);
+			}
+			if (outcome === "cancel-request") assert.equal(requests.length, 0);
+			assert.ok(!JSON.stringify(runtime.notifications).includes("private provider error"));
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+}
+
+test("cancelling AI draft review does not create an agent", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-ai-cancel-"));
+	try {
+		const runtime = boot(root, {
+			mode: "tui", selectAnswers: ["Project (commit with this repository)", "Describe with AI"],
+			inputAnswers: ["Create a developer"], editorAnswers: [undefined],
+			customActions: [component => component.handleInput("n"), component => component.handleInput("\x1b")],
+		});
+		enableStudioAI(runtime, JSON.stringify({ name: "dev", description: "Developer", systemPrompt: "Test changes" }));
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await assert.rejects(readFile(path.join(root, ".pi-agents", "dev", "agent.json")), { code: "ENOENT" });
+	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("session startup activates config.defaultAgent", async () => {
@@ -337,9 +552,9 @@ test("Agent Studio creates an agent from the empty dashboard", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-empty-create-"));
 	try {
 		const runtime = boot(root, {
-			selectAnswers: ["Project (commit with this repository)", "Back without applying"],
-			inputAnswers: ["new-agent", "Experiments with project tools"],
-			editorAnswers: ["Use the available tools carefully."],
+			selectAnswers: ["Project (commit with this repository)", "Create manually", "Purple (#bf5af2)", "Back without applying"],
+			inputAnswers: ["new-agent"],
+			editorAnswers: ["Experiments with project tools", "Use the available tools carefully."],
 			customActions: [
 				(component, _done) => component.handleInput("n"),
 				(component, _done) => component.handleInput("\u001b"),
@@ -349,6 +564,7 @@ test("Agent Studio creates an agent from the empty dashboard", async () => {
 		await runtime.commands.get("agent").handler("", runtime.ctx);
 		const created = JSON.parse(await readFile(path.join(root, ".pi-agents", "new-agent", "agent.json"), "utf8"));
 		assert.equal(created.description, "Experiments with project tools");
+		assert.equal(created.color, "#bf5af2");
 		assert.equal(created.systemPrompt, "Use the available tools carefully.");
 		assert.ok(runtime.notifications.some((entry) => /Created agent "new-agent"/.test(entry.message)));
 	} finally {
@@ -432,7 +648,7 @@ test("Agent Studio selectors show highlighted tool and MCP details in a right pa
 		let toolDetails = "";
 		let mcpDetails = "";
 		const runtime = boot(root, {
-			selectAnswers: ["Choose tools (1)", "Choose MCP servers (0)", "Back without applying"],
+			selectAnswers: ["Choose tools (1)", "Manage MCP servers (0)", "Back without applying"],
 			customActions: [
 				(component, _done) => component.handleInput("e"),
 				(component, _done) => {

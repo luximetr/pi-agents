@@ -80,6 +80,34 @@ process.stdin.on("data", chunk => {
 	return file;
 }
 
+test("MCP connection probes discover stdio tools without registering or activating them", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-mcp-probe-"));
+	const { pi, tools, registrations } = mockPi();
+	const manager = new McpManager(pi);
+	try {
+		const server = await writeFakeMcpServer(root);
+		assert.deepEqual(await manager.testConnection("probe", { command: process.execPath, args: [server] }, {}), { ok: true, toolCount: 1 });
+		assert.equal(tools.size, 0);
+		assert.deepEqual(registrations, []);
+		assert.deepEqual(manager.getStatuses(), {});
+	} finally {
+		await manager.disconnectAll();
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("MCP connection probes time out and terminate an unresponsive stdio server", async () => {
+	const { pi } = mockPi();
+	const manager = new McpManager(pi);
+	const start = Date.now();
+	const result = await manager.testConnection("stalled", {
+		command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"],
+	}, {}, 100);
+	assert.deepEqual(result, { ok: false, reason: "Connection test timed out." });
+	assert.ok(Date.now() - start < 5000);
+	assert.deepEqual(manager.getStatuses(), {});
+});
+
 test("MCP stdio activation registers namespaced tools and forwards calls", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-mcp-"));
 	const { pi, tools } = mockPi();

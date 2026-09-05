@@ -5,13 +5,17 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, loadConfig, parseEnvFile, readTrustDecision, saveAgentOverride, saveDeclarativeAgent, type AgentOverride, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, loadConfig, parseAgentColor, parseEnvFile, readTrustDecision, saveAgentOverride, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
+import { assistAgentDraft } from "./studio-assistance.ts";
+import { editAgentField } from "./studio-field-editor.ts";
+import { AgentField, AgentScope, AuthoringMethod, CREATE_MENU, SCOPE_MENU, selectMenu } from "./studio-menu.ts";
 import {
 	renderDelegateCall,
 	renderDelegateResult,
 	showAgentSelector,
 	showAgentStudio,
+	chooseAgentColor,
 	showSubagentInspector,
 	showWorktreeManager,
 	updateStatus,
@@ -299,6 +303,9 @@ export default function (pi: ExtensionAPI) {
 		if (!value || typeof value !== "object") return undefined;
 		const raw = value as Record<string, unknown>;
 		const result: AgentOverride = {};
+		if (typeof raw.description === "string" && raw.description.trim()) result.description = raw.description.trim();
+		if (raw.color === null) result.color = null;
+		else if (parseAgentColor(raw.color)) result.color = parseAgentColor(raw.color);
 		if (Array.isArray(raw.tools)) result.tools = raw.tools.map(String);
 		if (Array.isArray(raw.mcp)) result.mcp = raw.mcp.map(String);
 		if (raw.systemPrompt === null || typeof raw.systemPrompt === "string") result.systemPrompt = raw.systemPrompt;
@@ -732,6 +739,21 @@ export default function (pi: ExtensionAPI) {
 		const result = await showAgentStudio(ctx, agent, {
 			...selectorOptions(ctx),
 			hasSessionDraft: studioDrafts.has(name),
+			onTestMcp: async (serverName) => {
+				const current = agents.find(candidate => candidate.name === name);
+				const server = current?.mcpServers?.[serverName] ?? config.mcpServers?.[serverName];
+				if (!current || !server) {
+					ctx.ui.notify(`MCP "${serverName}" has no server definition.`, "error");
+					return;
+				}
+				ctx.ui.notify(`Testing MCP "${serverName}" (10s timeout)...`, "info");
+				const result = await mcpManager.testConnection(serverName, server, { ...config.env, ...current.env });
+				const message = result.ok
+					? `MCP "${serverName}": connection successful; ${result.toolCount} tools discovered.`
+					: `MCP "${serverName}": ${result.reason}`;
+				ctx.ui.notify(message, result.ok ? "info" : "error");
+				return message;
+			},
 			onCredentialsSaved: async () => {
 				// Refresh only this agent's secrets, preserving worktree fallbacks and drafts.
 				const source = sourceAgents.find(candidate => candidate.name === name);
@@ -768,23 +790,42 @@ export default function (pi: ExtensionAPI) {
 
 	async function createAgent(ctx: ExtensionContext): Promise<void> {
 		const trusted = ctx.isProjectTrusted ? ctx.isProjectTrusted() : true;
-		const scopes = trusted ? ["Project (commit with this repository)", "Global (all projects)"] : ["Global (all projects)"];
-		const selectedScope = await ctx.ui.select("Create agent · save location", scopes);
-		if (!selectedScope) return;
-		const scope = selectedScope.startsWith("Global") ? "global" : "project";
-		const name = (await ctx.ui.input("Agent name", "e.g. developer, browser-verifier"))?.trim();
-		if (!name) return;
-		if (agents.some((agent) => agent.name === name)) {
+		const scope = await selectMenu(ctx, "Create agent · save location", SCOPE_MENU.filter(item => trusted || item.id === AgentScope.Global));
+		if (!scope) return;
+		const method = await selectMenu(ctx, "Create agent", CREATE_MENU);
+		if (!method) return;
+		const available = {
+			tools: pi.getAllTools().map(tool => tool.name).filter(name => name !== DELEGATE_TOOL && name !== "powershell" && !name.includes("__")),
+			mcp: Object.keys(config.mcpServers ?? {}),
+		};
+		let draft: DeclarativeAgentInput;
+		if (method === AuthoringMethod.AI) {
+			const generated = await assistAgentDraft(ctx, { name: "", description: "", tools: [], mcp: [], systemPrompt: "" }, available);
+			if (!generated) return;
+			draft = generated;
+		} else {
+			const name = (await ctx.ui.input("Agent name", "e.g. developer, browser-verifier"))?.trim();
+			if (!name) return;
+			const tools = pi.getActiveTools().filter(tool => available.tools.includes(tool));
+			draft = { name, description: "", tools, mcp: [], systemPrompt: "" };
+			const description = (await editAgentField(ctx, AgentField.Description, draft, available))?.trim();
+			if (!description) return;
+			draft.description = description;
+			const prompt = await editAgentField(ctx, AgentField.SystemPrompt, draft, available);
+			if (prompt === undefined) return;
+			draft.systemPrompt = prompt;
+		}
+		const name = draft.name;
+		if (agents.some(agent => agent.name === name)) {
 			ctx.ui.notify(`Agent "${name}" already exists; select it and press e to edit`, "warning");
 			return;
 		}
-		const description = (await ctx.ui.input("Description", `What ${name} is responsible for`))?.trim();
-		if (!description) return;
-		const prompt = await ctx.ui.editor(`Initial system prompt · ${name}`, "");
-		const available = new Set(pi.getAllTools().map((tool) => tool.name));
-		const tools = pi.getActiveTools().filter((tool) => available.has(tool) && tool !== DELEGATE_TOOL && !tool.includes("__"));
+		const color = await chooseAgentColor(ctx, draft.color);
+		if (color === undefined) return;
+		draft.color = color ?? undefined;
+		if (!await ctx.ui.confirm(`Create agent "${name}"?`, `Save the reviewed ${scope} agent, then open Studio. This does not activate it.`)) return;
 		try {
-			const filePath = saveDeclarativeAgent(ctx.cwd, scope, { name, description, tools, mcp: [], systemPrompt: prompt });
+			const filePath = saveDeclarativeAgent(ctx.cwd, scope, draft);
 			const discovered = await discoverAgents(ctx.cwd, { includeProject: trusted });
 			sourceAgents = discovered.agents;
 			config = discovered.config;

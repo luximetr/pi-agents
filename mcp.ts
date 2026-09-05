@@ -276,6 +276,42 @@ export class McpManager {
 		}
 	}
 
+	/** Probe initialization and tool discovery without registering tools or touching live connections. */
+	async testConnection(name: string, cfg: McpServerConfig, env: Record<string, string>, timeoutMs = 10_000): Promise<{ ok: true; toolCount: number } | { ok: false; reason: string }> {
+		const missing: string[] = [];
+		if (cfg.url) for (const value of Object.values(cfg.headers ?? {})) resolveEnvRefs(value, missing, env);
+		if (missing.length) return { ok: false, reason: `Missing credentials: ${[...new Set(missing)].join(", ")}` };
+		const probe = new McpManager(this.pi);
+		const client = new Client({ name: "pi-agents-test", version: CLIENT_VERSION }, { capabilities: {} });
+		const controller = new AbortController();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const transport = cfg.url ? probe.makeHttpTransport(name, cfg, env) : probe.makeStdioTransport(name, cfg);
+			const timeout = new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => { controller.abort(); reject(new Error("timeout")); }, timeoutMs);
+			});
+			const toolCount = await Promise.race([timeout, (async () => {
+				await client.connect(transport, { signal: controller.signal, timeout: timeoutMs });
+				let count = 0;
+				let cursor: string | undefined;
+				do {
+					const result = await client.listTools(cursor ? { cursor } : undefined, { signal: controller.signal, timeout: timeoutMs });
+					count += result.tools.length;
+					cursor = result.nextCursor;
+				} while (cursor);
+				return count;
+			})()]);
+			return { ok: true, toolCount };
+		} catch {
+			// Servers can echo authorization headers in errors; never display raw errors.
+			return { ok: false, reason: controller.signal.aborted ? "Connection test timed out." : "Connection or tool discovery failed. Check credentials, server availability, and transport configuration." };
+		} finally {
+			clearTimeout(timer);
+			controller.abort();
+			try { await client.close(); } catch { /* already closed */ }
+		}
+	}
+
 	/** Build a stdio transport (command/args/env/cwd). */
 	private makeStdioTransport(name: string, cfg: McpServerConfig): StdioClientTransport {
 		const transport = new StdioClientTransport({

@@ -1,7 +1,9 @@
 import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, Input, Key, Markdown, SelectList, Spacer, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
-import { BUILTIN_MCP_SERVER_DESCRIPTIONS, type AgentOverride, type DiscoveredAgent, type McpServerConfig } from "./agents.ts";
+import { BUILTIN_MCP_SERVER_DESCRIPTIONS, parseAgentColor, type AgentOverride, type DiscoveredAgent, type McpServerConfig } from "./agents.ts";
+import { editAgentField } from "./studio-field-editor.ts";
+import { AgentField, COLOR_MENU, ColorAction, STUDIO_LABELS, StudioAction, selectMenu, type MenuItem } from "./studio-menu.ts";
 import type { McpRuntimeStatus } from "./mcp.ts";
 import { configureCredentials } from "./credentials.ts";
 import type { RunningSubagentHandle, SubagentSnapshot } from "./subagents.ts";
@@ -638,12 +640,16 @@ async function showToggleEditor(
 	title: string,
 	items: Array<{ id: string; label: string; description?: string }>,
 	initial: string[],
+	serverSettings?: { credentials: (name: string) => Promise<void>; test: (name: string) => Promise<string | void> },
 ): Promise<string[]> {
 	const enabled = new Set(initial);
-	await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-		const searchInput = new Input();
-		searchInput.focused = true;
-		let selectedId = items.find((item) => enabled.has(item.id))?.id ?? items[0]?.id;
+	const searchInput = new Input();
+	searchInput.focused = true;
+	let selectedId = items.find((item) => enabled.has(item.id))?.id ?? items[0]?.id;
+	let settingsFocused = false;
+	let settingIndex = 0;
+	const testResults = new Map<string, string>();
+	const show = () => ctx.ui.custom<"credentials" | "test" | undefined>((tui, theme, _kb, done) => {
 
 		const filteredItems = () => {
 			const query = searchInput.getValue().trim().toLowerCase();
@@ -695,6 +701,15 @@ async function showToggleEditor(
 						theme.fg(enabled.has(selected.id) ? "success" : "muted", ` ${enabled.has(selected.id) ? "✓ enabled" : "○ disabled"}`),
 						"",
 					);
+					if (serverSettings) {
+						const settings = [enabled.has(selected.id) ? "Disable server" : "Enable server", "Manage credentials", "Test connection"];
+						settings.forEach((label, index) => rightPane.push(
+							settingsFocused && settingIndex === index ? theme.fg("accent", ` › ${label}`) : `   ${label}`,
+						));
+						rightPane.push(theme.fg("dim", " Enable changes apply with the Studio draft."), "");
+						const result = testResults.get(selected.id);
+						if (result) pushWrapped(rightPane, rightWidth, result, 1);
+					}
 					for (const paragraph of (selected.description ?? "No description is registered for this item.").split("\n")) {
 						pushWrapped(rightPane, rightWidth, paragraph, 1);
 					}
@@ -705,15 +720,33 @@ async function showToggleEditor(
 				for (let row = 0; row < TOGGLE_EDITOR_HEIGHT; row++) {
 					lines.push(`${padToWidth(leftPane[row] ?? "", leftWidth)}${divider}${padToWidth(rightPane[row] ?? "", rightWidth)}`);
 				}
-				lines.push(theme.fg("dim", " type to filter · ↑↓ select · space/enter toggle · esc done"), border);
+				lines.push(theme.fg("dim", serverSettings
+					? settingsFocused ? " ↑↓ settings · enter select · tab/esc server list" : " type to filter · ↑↓ server · enter/tab settings · space toggle · esc done"
+					: " type to filter · ↑↓ select · space/enter toggle · esc done"), border);
 				return lines.map((line) => truncateToWidth(line, width));
 			},
 			invalidate() { searchInput.invalidate(); },
 			handleInput(data: string) {
 				const filtered = ensureSelection();
 				const index = Math.max(0, filtered.findIndex((item) => item.id === selectedId));
-				if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+				if (matchesKey(data, Key.ctrl("c"))) {
 					done(undefined);
+				} else if (matchesKey(data, Key.escape)) {
+					if (settingsFocused) settingsFocused = false;
+					else done(undefined);
+				} else if (serverSettings && matchesKey(data, Key.tab)) {
+					if (selectedId) settingsFocused = !settingsFocused;
+				} else if (settingsFocused) {
+					if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
+						settingIndex = (settingIndex + (matchesKey(data, Key.up) ? 2 : 1)) % 3;
+					} else if (matchesKey(data, Key.enter) && selectedId) {
+						if (settingIndex === 0) {
+							if (enabled.has(selectedId)) enabled.delete(selectedId);
+							else enabled.add(selectedId);
+						} else done(settingIndex === 1 ? "credentials" : "test");
+					}
+				} else if (serverSettings && matchesKey(data, Key.enter)) {
+					if (selectedId) settingsFocused = true;
 				} else if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
 					if (filtered.length > 0) {
 						const offset = matchesKey(data, Key.up) ? -1 : 1;
@@ -732,43 +765,82 @@ async function showToggleEditor(
 			},
 		};
 	});
+	while (true) {
+		const action = await show();
+		if (!action || !selectedId || !serverSettings) break;
+		const result = await serverSettings[action](selectedId);
+		if (action === "credentials") testResults.delete(selectedId);
+		else if (result) testResults.set(selectedId, result);
+	}
 	return items.map((item) => item.id).filter((id) => enabled.has(id));
+}
+
+export async function chooseAgentColor(ctx: ExtensionContext, current?: string): Promise<string | null | undefined> {
+	const choice = await selectMenu(ctx, `Agent color · ${current ?? "automatic"}`, COLOR_MENU);
+	if (!choice) return undefined;
+	if (choice === ColorAction.Automatic) return null;
+	if (choice !== ColorAction.Custom) return COLOR_MENU.find(item => item.id === choice)?.color;
+	while (true) {
+		const value = await ctx.ui.input("Color: #rrggbb or theme role", current ?? "#4cc2ff, accent, success, warning");
+		if (value === undefined) return undefined;
+		const color = parseAgentColor(value);
+		if (color) return color;
+		ctx.ui.notify("Use a six-digit hex color or valid theme role.", "warning");
+	}
 }
 
 /** Interactive live-draft editor for the fields that can safely override code-backed agents. */
 export async function showAgentStudio(
 	ctx: ExtensionContext,
 	agent: DiscoveredAgent,
-	options: AgentSelectorOptions & { hasSessionDraft: boolean; onCredentialsSaved?: () => Promise<void> },
+	options: AgentSelectorOptions & { hasSessionDraft: boolean; onCredentialsSaved?: () => Promise<void>; onTestMcp?: (name: string) => Promise<string | void> },
 ): Promise<AgentStudioResult> {
 	let tools = agent.tools === undefined ? [...options.activeTools] : [...agent.tools];
 	let inheritsTools = agent.tools === undefined;
 	let mcp = [...(agent.mcp ?? [])];
 	let systemPrompt = agent.systemPrompt ?? "";
+	let description = agent.description;
+	let color = agent.color;
+	const available = {
+		tools: [...new Set([...options.allTools.map(tool => tool.name).filter(name => name !== "delegate" && name !== "powershell" && !name.includes("__")), ...Object.keys(agent.customTools ?? {})])],
+		mcp: [...new Set([...Object.keys(options.mcpServers), ...Object.keys(agent.mcpServers ?? {})])],
+	};
+	const currentDraft = () => ({ name: agent.name, description, color, tools: inheritsTools ? undefined : tools, mcp, systemPrompt });
 
 	while (true) {
-		const promptLabel = `Edit prompt (${systemPrompt ? `${systemPrompt.split("\n").length} lines` : "empty"})`;
-		const toolsLabel = `Choose tools (${inheritsTools ? "inherited" : tools.length})`;
-		const mcpLabel = `Choose MCP servers (${mcp.length})`;
+		const item = (id: StudioAction, suffix?: string): MenuItem<StudioAction> => ({
+			id, label: STUDIO_LABELS[id] + (suffix === undefined ? "" : ` (${suffix})`),
+		});
 		const actions = [
-			promptLabel,
-			toolsLabel,
-			mcpLabel,
-			"Configure MCP credentials",
-			"Apply as session draft",
-			...(options.trusted ? ["Save project override"] : []),
-			"Save global override",
-			...(options.hasSessionDraft ? ["Revert session draft"] : []),
-			"Back without applying",
+			item(StudioAction.Description),
+			item(StudioAction.Color, color ?? "automatic"),
+			item(StudioAction.Prompt, systemPrompt ? `${systemPrompt.split("\n").length} lines` : "empty"),
+			item(StudioAction.Tools, inheritsTools ? "inherited" : String(tools.length)),
+			item(StudioAction.Mcp, String(mcp.length)),
+			item(StudioAction.Apply),
+			...(options.trusted ? [item(StudioAction.SaveProject)] : []),
+			item(StudioAction.SaveGlobal),
+			...(options.hasSessionDraft ? [item(StudioAction.Revert)] : []),
+			item(StudioAction.Back),
 		];
-		const choice = await ctx.ui.select(`Agent Studio · ${agent.name}`, actions);
-		if (!choice || choice === "Back without applying") return null;
-		if (choice === promptLabel) {
-			const edited = await ctx.ui.editor(`System prompt · ${agent.name}`, systemPrompt);
+		const choice = await selectMenu(ctx, `Agent Studio · ${agent.name}`, actions);
+		if (!choice || choice === StudioAction.Back) return null;
+		if (choice === StudioAction.Description) {
+			const edited = await editAgentField(ctx, AgentField.Description, currentDraft(), available);
+			if (edited?.trim()) description = edited.trim();
+			continue;
+		}
+		if (choice === StudioAction.Color) {
+			const edited = await chooseAgentColor(ctx, color);
+			if (edited !== undefined) color = edited ?? undefined;
+			continue;
+		}
+		if (choice === StudioAction.Prompt) {
+			const edited = await editAgentField(ctx, AgentField.SystemPrompt, currentDraft(), available);
 			if (edited !== undefined) systemPrompt = edited;
 			continue;
 		}
-		if (choice === toolsLabel) {
+		if (choice === StudioAction.Tools) {
 			const ownCustom = new Set(Object.keys(agent.customTools ?? {}));
 			const choices = options.allTools
 				.filter((tool) => tool.name !== "delegate" && tool.name !== "powershell" && !tool.name.includes("__") && !ownCustom.has(tool.name))
@@ -777,17 +849,7 @@ export async function showAgentStudio(
 			inheritsTools = false;
 			continue;
 		}
-		if (choice === "Configure MCP credentials") {
-			if (await configureCredentials(ctx, { ...options.mcpServers, ...agent.mcpServers }, agent, options.trusted)) {
-				try {
-					await options.onCredentialsSaved?.();
-				} catch {
-					ctx.ui.notify("Credential saved, but runtime refresh failed. Run /reload to retry.", "error");
-				}
-			}
-			continue;
-		}
-		if (choice === mcpLabel) {
+		if (choice === StudioAction.Mcp) {
 			const names = [...new Set([...Object.keys(options.mcpServers), ...Object.keys(agent.mcpServers ?? {}), ...mcp])].sort();
 			const choices = names.map((name) => {
 				const source = agent.mcpServers?.[name] ? "agent-local" : options.mcpServerSources[name] ?? "unknown";
@@ -805,18 +867,33 @@ export async function showAgentStudio(
 				};
 			});
 			if (choices.length === 0) ctx.ui.notify("No MCP servers or built-in recipes are available.", "warning");
-			else mcp = await showToggleEditor(ctx, `MCP servers · ${agent.name}`, choices, mcp);
+			else mcp = await showToggleEditor(ctx, `MCP servers · ${agent.name}`, choices, mcp, {
+				credentials: async (name) => {
+					if (await configureCredentials(ctx, { ...options.mcpServers, ...agent.mcpServers }, agent, options.trusted, name)) {
+						try { await options.onCredentialsSaved?.(); }
+						catch { ctx.ui.notify("Credential saved, but runtime refresh failed. Run /reload to retry.", "error"); }
+					}
+				},
+				test: async (name) => {
+					try {
+						if (options.onTestMcp) return await options.onTestMcp(name);
+						else ctx.ui.notify("Connection testing is unavailable in this context.", "warning");
+					} catch { ctx.ui.notify("MCP connection test failed.", "error"); }
+				},
+			});
 			continue;
 		}
-		if (choice === "Revert session draft") return { action: "revert" };
+		if (choice === StudioAction.Revert) return { action: "revert" };
 		const override: AgentOverride = {
+			description,
+			color: color ?? null,
 			...(inheritsTools ? {} : { tools }),
 			mcp,
 			systemPrompt: systemPrompt.trim() ? systemPrompt : null,
 		};
-		if (choice === "Apply as session draft") return { action: "apply", override };
-		if (choice === "Save project override") return { action: "save-project", override };
-		if (choice === "Save global override") return { action: "save-global", override };
+		if (choice === StudioAction.Apply) return { action: "apply", override };
+		if (choice === StudioAction.SaveProject) return { action: "save-project", override };
+		if (choice === StudioAction.SaveGlobal) return { action: "save-global", override };
 	}
 }
 

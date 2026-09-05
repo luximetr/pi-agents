@@ -142,6 +142,10 @@ export interface DiscoveredAgent extends Omit<AgentConfig, "subagents"> {
 }
 
 export interface AgentOverride {
+	/** Replace the description shown in Studio and delegation help. */
+	description?: string;
+	/** Replace the display color; null restores automatic coloring. */
+	color?: string | null;
 	/** Replace the agent's declared base tool allowlist. Omit to keep the source definition. */
 	tools?: ToolName[];
 	/** Replace the agent's MCP assignments. */
@@ -357,12 +361,19 @@ const THEME_ROLES: ReadonlySet<string> = new Set([
  * Validate + normalize an agent `color`: a ThemeColor role or "#rrggbb" hex.
  * Returns undefined when absent (ui.ts auto-assigns) or invalid.
  */
-function normalizeColor(raw: unknown, filePath: string): string | undefined {
-	if (typeof raw !== "string" || !raw.trim()) return undefined;
+export function parseAgentColor(raw: unknown): string | undefined {
+	if (typeof raw !== "string") return undefined;
 	const value = raw.trim();
 	if (/^#[0-9a-fA-F]{6}$/.test(value)) return value.toLowerCase();
 	if (THEME_ROLES.has(value)) return value;
-	console.error(`pi-agents: ${filePath}: invalid "color" ${JSON.stringify(value)} — use a theme role or #rrggbb`);
+	return undefined;
+}
+
+function normalizeColor(raw: unknown, filePath: string): string | undefined {
+	if (typeof raw !== "string" || !raw.trim()) return undefined;
+	const value = parseAgentColor(raw);
+	if (value) return value;
+	console.error(`pi-agents: ${filePath}: invalid "color" ${JSON.stringify(raw)} — use a theme role or #rrggbb`);
 	return undefined;
 }
 
@@ -523,6 +534,9 @@ function normalizeAgentOverrides(raw: unknown): Record<string, AgentOverride> | 
 		if (!value || typeof value !== "object") continue;
 		const candidate = value as Record<string, unknown>;
 		const override: AgentOverride = {};
+		if (typeof candidate.description === "string" && candidate.description.trim()) override.description = candidate.description.trim();
+		if (candidate.color === null) override.color = null;
+		else if (parseAgentColor(candidate.color)) override.color = parseAgentColor(candidate.color);
 		if (Array.isArray(candidate.tools)) override.tools = candidate.tools.map(String).map((item) => item.trim()).filter(Boolean);
 		if (Array.isArray(candidate.mcp)) override.mcp = candidate.mcp.map(String).map((item) => item.trim()).filter(Boolean);
 		if (candidate.systemPrompt === null || typeof candidate.systemPrompt === "string") override.systemPrompt = candidate.systemPrompt;
@@ -761,6 +775,8 @@ export function getGlobalAgentsDir(): string {
 export function applyAgentOverride(agent: DiscoveredAgent, override: AgentOverride | undefined, studioDraft = false): DiscoveredAgent {
 	if (!override) return { ...agent, studioDraft: false };
 	const result: DiscoveredAgent = { ...agent, studioDraft };
+	if (override.description !== undefined) result.description = override.description;
+	if (override.color !== undefined) result.color = override.color === null ? undefined : parseAgentColor(override.color);
 	if (override.tools !== undefined) result.tools = [...override.tools];
 	if (override.mcp !== undefined) result.mcp = [...override.mcp];
 	if (override.systemPrompt !== undefined) {
@@ -801,6 +817,7 @@ export function saveAgentOverride(cwd: string, scope: "project" | "global", name
 export interface DeclarativeAgentInput {
 	name: string;
 	description: string;
+	color?: string;
 	tools?: ToolName[];
 	mcp?: string[];
 	systemPrompt?: string;
@@ -809,8 +826,9 @@ export interface DeclarativeAgentInput {
 /** Create a JSON-backed agent that Agent Studio can manage without rewriting TypeScript. */
 export function saveDeclarativeAgent(cwd: string, scope: "project" | "global", input: DeclarativeAgentInput): string {
 	const name = input.name.trim();
-	if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("agent name may contain only letters, numbers, dot, underscore, and hyphen");
+	if (!/^[A-Za-z0-9._-]+$/.test(name) || name === "." || name === "..") throw new Error("agent name may contain only letters, numbers, dot, underscore, and hyphen");
 	if (!input.description.trim()) throw new Error("agent description is required");
+	if (input.color !== undefined && !parseAgentColor(input.color)) throw new Error("color must be a theme role or #rrggbb");
 	const root = scope === "global" ? getGlobalAgentsDir() : (findProjectAgentsDir(cwd) ?? path.join(findProjectRoot(cwd), ".pi-agents"));
 	const dir = path.join(root, name);
 	fs.mkdirSync(dir, { recursive: true });
@@ -821,6 +839,7 @@ export function saveDeclarativeAgent(cwd: string, scope: "project" | "global", i
 	const data: DeclarativeAgentInput = {
 		name,
 		description: input.description.trim(),
+		...(input.color === undefined ? {} : { color: parseAgentColor(input.color) }),
 		...(input.tools === undefined ? {} : { tools: [...input.tools] }),
 		...(input.mcp === undefined ? {} : { mcp: [...input.mcp] }),
 		...(input.systemPrompt?.trim() ? { systemPrompt: input.systemPrompt } : {}),

@@ -84,15 +84,19 @@ export async function promptCredential(ctx: ExtensionContext, title: string): Pr
 	});
 }
 
-export async function configureCredentials(ctx: ExtensionContext, servers: Record<string, McpServerConfig>, agent: DiscoveredAgent, trusted: boolean): Promise<boolean | void> {
+export async function configureCredentials(ctx: ExtensionContext, servers: Record<string, McpServerConfig>, agent: DiscoveredAgent, trusted: boolean, selectedServer?: string): Promise<boolean | void> {
 	if (agent.source === "project" && !trusted) {
 		ctx.ui.notify("Trust this project before saving agent credentials.", "warning");
 		return;
 	}
 	const names = Object.keys(servers).filter(name => credentialVariables(servers[name]).length).sort();
 	if (!names.length) { ctx.ui.notify("No HTTP header environment references to configure.", "info"); return; }
-	const name = await ctx.ui.select("Configure MCP credentials", names);
+	const name = selectedServer ?? await ctx.ui.select("Configure MCP credentials", names);
 	if (!name) return;
+	if (!names.includes(name)) {
+		ctx.ui.notify(`MCP "${name}" has no HTTP header credential variables to configure.`, "info");
+		return;
+	}
 	const variables = credentialVariables(servers[name]);
 	const key = variables.length === 1 ? variables[0] : await ctx.ui.select("Credential variable", variables);
 	if (!key) return;
