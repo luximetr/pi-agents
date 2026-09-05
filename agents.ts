@@ -150,6 +150,8 @@ export interface AgentOverride {
 	tools?: ToolName[];
 	/** Replace the agent's MCP assignments. */
 	mcp?: string[];
+	/** Replace allowed child agents; an empty array disables delegation. */
+	subagents?: SubagentConfig[];
 	/** Replace the agent prompt; null explicitly clears it. */
 	systemPrompt?: string | null;
 }
@@ -312,7 +314,7 @@ function normalizeTextList(raw: unknown): string[] | undefined {
 }
 
 /** Normalize legacy string entries and configured delegation objects. */
-function normalizeSubagents(raw: unknown, filePath: string): SubagentConfig[] | undefined {
+export function normalizeSubagents(raw: unknown, filePath: string): SubagentConfig[] | undefined {
 	if (!Array.isArray(raw)) return undefined;
 	const subagents: SubagentConfig[] = [];
 	for (const entry of raw) {
@@ -541,6 +543,7 @@ function normalizeAgentOverrides(raw: unknown): Record<string, AgentOverride> | 
 		else if (parseAgentColor(candidate.color)) override.color = parseAgentColor(candidate.color);
 		if (Array.isArray(candidate.tools)) override.tools = candidate.tools.map(String).map((item) => item.trim()).filter(Boolean);
 		if (Array.isArray(candidate.mcp)) override.mcp = candidate.mcp.map(String).map((item) => item.trim()).filter(Boolean);
+		if (Array.isArray(candidate.subagents)) override.subagents = normalizeSubagents(candidate.subagents, `override ${name}`) ?? [];
 		if (candidate.systemPrompt === null || typeof candidate.systemPrompt === "string") override.systemPrompt = candidate.systemPrompt;
 		if (Object.keys(override).length > 0) overrides[name] = override;
 	}
@@ -783,6 +786,7 @@ export function applyAgentOverride(agent: DiscoveredAgent, override: AgentOverri
 	if (override.color !== undefined) result.color = override.color === null ? undefined : parseAgentColor(override.color);
 	if (override.tools !== undefined) result.tools = [...override.tools];
 	if (override.mcp !== undefined) result.mcp = [...override.mcp];
+	if (override.subagents !== undefined) result.subagents = override.subagents.map(entry => ({ ...entry }));
 	if (override.systemPrompt !== undefined) {
 		result.systemPrompt = override.systemPrompt === null || !override.systemPrompt.trim() ? undefined : override.systemPrompt;
 		result.systemPromptPath = undefined;

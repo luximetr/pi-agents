@@ -140,8 +140,10 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 - Assistance is a neutral, tool-free Pi model request using the current provider/model, authentication, and reasoning level—not the active agent’s persona. It receives only the editable draft and available tool/MCP names, never agent `.env` values, MCP headers, or conversation history. PM, developer, documentation, designer, and dev-lead patterns guide the assistant internally; there is no template-selection menu. Requests are cancellable and time out after two minutes; normal provider usage charges apply.
 - **Color** offers automatic coloring, named palette colors, or a custom `#rrggbb`/theme role. Color and description edits also work as session drafts and saved overrides.
 - **Apply as session draft** tests changes immediately without touching the source definition. Drafts are stored in session history, survive resume/tree navigation, are marked `◆ draft` in the dashboard, and are inherited by delegated children.
-- **Save project/global override** persists the effective description/color/prompt/tools/MCP selection in `config.json` under `agentOverrides`. Code-backed `agent.ts` files are never rewritten.
+- **Save project/global override** persists the effective description/color/prompt/tools/MCP/subagent selection in `config.json` under `agentOverrides`. Code-backed `agent.ts` files are never rewritten.
 - **Revert session draft** returns to the saved source and overlays.
+
+Use **Manage subagents** to add existing agents, remove assignments, or set each child's optional model and timeout in seconds. Blank settings restore the default model or no deadline. **Done** keeps changes in the Studio draft; Escape discards changes made in the subagent menu. Then apply or save the draft. Create new child agents from the dashboard first.
 
 The MCP editor includes curated recipes for Playwright, iOS Simulator, pen.dev, local DocHub, and local DesignHub. They remain disconnected until assigned to an agent. Project/global `mcpServers` with the same name override the bundled recipe.
 
@@ -477,7 +479,7 @@ The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent insp
 
 ## Limitations / roadmap
 
-- Agent Studio edits descriptions, colors, prompts, tool allowlists, and MCP assignments; other metadata, delegation relationships, policies, and executable custom-tool code still use the source definition.
+- Agent Studio edits descriptions, colors, prompts, tool allowlists, MCP assignments, and subagent delegation settings; other metadata, policies, and executable custom-tool code still use the source definition.
 - MCP supports stdio and streamable HTTP transports (no SSE); custom server definitions are still configured statically, while the bundled Playwright, iOS Simulator, pen.dev, DocHub, and DesignHub recipes can be assigned in Studio.
 - External edits to `.pi-agents/` need `/reload` (or a new session); Studio drafts and saves are applied immediately.
 - Project-local installs (`pi install <repo> -l` / `pi-agents --local`) are recorded in `.pi/settings.json`, which git never checks out — freshly created worktrees of such a project have no extension. Use the default global install instead (the `.pi-agents/` configs remain per project)

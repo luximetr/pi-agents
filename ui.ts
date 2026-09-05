@@ -3,6 +3,7 @@ import { getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, Input, Key, Markdown, SelectList, Spacer, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { BUILTIN_MCP_SERVER_DESCRIPTIONS, parseAgentColor, type AgentOverride, type DiscoveredAgent, type McpServerConfig } from "./agents.ts";
 import { editAgentField } from "./studio-field-editor.ts";
+import { editSubagents } from "./studio-subagents.ts";
 import { AgentField, COLOR_MENU, ColorAction, STUDIO_LABELS, StudioAction, selectMenu, type MenuItem } from "./studio-menu.ts";
 import type { McpRuntimeStatus } from "./mcp.ts";
 import { configureCredentials } from "./credentials.ts";
@@ -793,11 +794,12 @@ export async function chooseAgentColor(ctx: ExtensionContext, current?: string):
 export async function showAgentStudio(
 	ctx: ExtensionContext,
 	agent: DiscoveredAgent,
-	options: AgentSelectorOptions & { hasSessionDraft: boolean; onCredentialsSaved?: () => Promise<void>; onTestMcp?: (name: string) => Promise<string | void> },
+	options: AgentSelectorOptions & { agents?: readonly DiscoveredAgent[]; hasSessionDraft: boolean; onCredentialsSaved?: () => Promise<void>; onTestMcp?: (name: string) => Promise<string | void> },
 ): Promise<AgentStudioResult> {
 	let tools = agent.tools === undefined ? [...options.activeTools] : [...agent.tools];
 	let inheritsTools = agent.tools === undefined;
 	let mcp = [...(agent.mcp ?? [])];
+	let subagents = agent.subagents?.map(entry => ({ ...entry }));
 	let systemPrompt = agent.systemPrompt ?? "";
 	let description = agent.description;
 	let color = agent.color;
@@ -817,6 +819,7 @@ export async function showAgentStudio(
 			item(StudioAction.Prompt, systemPrompt ? `${systemPrompt.split("\n").length} lines` : "empty"),
 			item(StudioAction.Tools, inheritsTools ? "inherited" : String(tools.length)),
 			item(StudioAction.Mcp, String(mcp.length)),
+			item(StudioAction.Subagents, String(subagents?.length ?? 0)),
 			item(StudioAction.Apply),
 			...(options.trusted ? [item(StudioAction.SaveProject)] : []),
 			item(StudioAction.SaveGlobal),
@@ -847,6 +850,11 @@ export async function showAgentStudio(
 				.map((tool) => ({ id: tool.name, label: tool.name, description: tool.description }));
 			tools = await showToggleEditor(ctx, `Tools · ${agent.name}`, choices, tools);
 			inheritsTools = false;
+			continue;
+		}
+		if (choice === StudioAction.Subagents) {
+			const edited = await editSubagents(ctx, agent.name, options.agents ?? [], subagents ?? []);
+			if (edited !== undefined) subagents = edited;
 			continue;
 		}
 		if (choice === StudioAction.Mcp) {
@@ -888,6 +896,7 @@ export async function showAgentStudio(
 			description,
 			color: color ?? null,
 			...(inheritsTools ? {} : { tools }),
+			...(subagents === undefined ? {} : { subagents }),
 			mcp,
 			systemPrompt: systemPrompt.trim() ? systemPrompt : null,
 		};

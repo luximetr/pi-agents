@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, parseAgentColor, parseEnvFile, readTrustDecision, saveAgentOrder, saveAgentOverride, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, saveAgentOrder, saveAgentOverride, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
@@ -308,6 +308,7 @@ export default function (pi: ExtensionAPI) {
 		else if (parseAgentColor(raw.color)) result.color = parseAgentColor(raw.color);
 		if (Array.isArray(raw.tools)) result.tools = raw.tools.map(String);
 		if (Array.isArray(raw.mcp)) result.mcp = raw.mcp.map(String);
+		if (Array.isArray(raw.subagents)) result.subagents = normalizeSubagents(raw.subagents, "session draft") ?? [];
 		if (raw.systemPrompt === null || typeof raw.systemPrompt === "string") result.systemPrompt = raw.systemPrompt;
 		return Object.keys(result).length > 0 ? result : undefined;
 	}
@@ -655,7 +656,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			base = valid;
 		} else {
-			base = pi.getActiveTools();
+			base = pi.getActiveTools().filter(tool => tool !== DELEGATE_TOOL);
 		}
 		const allowedSubagents = (agent.subagents ?? []).filter((subagent) => agents.some((candidate) => candidate.name === subagent.name));
 		const unknownSubagents = (agent.subagents ?? []).filter((subagent) => !agents.some((candidate) => candidate.name === subagent.name));
@@ -739,6 +740,7 @@ export default function (pi: ExtensionAPI) {
 		const result = await showAgentStudio(ctx, agent, {
 			...selectorOptions(ctx),
 			hasSessionDraft: studioDrafts.has(name),
+			agents,
 			onTestMcp: async (serverName) => {
 				const current = agents.find(candidate => candidate.name === name);
 				const server = current?.mcpServers?.[serverName] ?? config.mcpServers?.[serverName];

@@ -7,6 +7,7 @@ import extension from "../index.ts";
 import { startAuthenticatedMcp } from "./http-mcp-fixture.ts";
 import { mcpToolName } from "../mcp.ts";
 import { STUDIO_LABELS, StudioAction } from "../studio-menu.ts";
+import { editSubagents } from "../studio-subagents.ts";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 initTheme("dark", false);
 import { discoverAgents, saveAgentOverride, saveDeclarativeAgent } from "../agents.ts";
@@ -295,6 +296,51 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 		await server.close();
 		await rm(root, { recursive: true, force: true });
 	}
+});
+
+test("subagent editor validates timeouts and cancels without mutating existing settings", async () => {
+	const current = [{ name: "missing", model: "old/model", timeoutSeconds: 20 }];
+	const runtime = boot("/tmp", {
+		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Set timeout (20s)", "Done"],
+		inputAnswers: ["-1"],
+	});
+	assert.deepEqual(await editSubagents(runtime.ctx, "parent", [], current), current);
+	assert.ok(runtime.notifications.some(item => item.message.includes("positive number")));
+	const cancelled = boot("/tmp", {
+		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Remove subagent", undefined],
+	});
+	assert.equal(await editSubagents(cancelled.ctx, "parent", [], current), undefined);
+	assert.equal(current.length, 1);
+});
+
+test("Studio adds configured subagents, restores drafts, and saves an empty delegation list", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-subagents-"));
+	try {
+		await makeAgent(root, "alpha", "default: true, tools: undefined");
+		await makeAgent(root, "beta");
+		const runtime = boot(root, {
+			selectAnswers: ["Manage subagents (0)", "Add subagent", "beta · beta", "1 · beta · default model · no timeout", "Set model (default)", "1 · beta · test/model · no timeout", "Set timeout (none)", "Done", "Apply as session draft"],
+			inputAnswers: ["test/model", "30"],
+			customActions: [component => component.handleInput("e")],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		assert.ok(runtime.activeToolsets.at(-1)?.includes("delegate"));
+		const draft = runtime.entries.find(entry => entry.customType === "pi-agents-studio-state")!;
+		assert.deepEqual((draft.data as any).override.subagents, [{ name: "beta", model: "test/model", timeoutSeconds: 30 }]);
+		saveAgentOverride(root, "project", "alpha", (draft.data as any).override);
+		assert.deepEqual((await discoverAgents(root)).agents.find(agent => agent.name === "alpha")?.subagents, (draft.data as any).override.subagents);
+		const restored = boot(root, {
+			branchEntries: [{ type: "custom", ...draft }],
+			selectAnswers: ["Manage subagents (1)", "1 · beta · test/model · 30s", "Remove subagent", "Done", "Save project override"],
+			customActions: [component => component.handleInput("e")],
+		});
+		await restored.handlers.get("session_start")?.({ reason: "startup" }, restored.ctx);
+		assert.ok(restored.activeToolsets.at(-1)?.includes("delegate"));
+		await restored.commands.get("agent").handler("", restored.ctx);
+		assert.ok(!restored.activeToolsets.at(-1)?.includes("delegate"));
+		assert.deepEqual((await discoverAgents(root)).agents.find(agent => agent.name === "alpha")?.subagents, []);
+	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("Studio routes renamed labels by ID and persists description and color overrides", async () => {
