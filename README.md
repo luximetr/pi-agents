@@ -138,10 +138,11 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 - Press `n` to create a project or global agent manually or **Describe with AI**. Review/edit the AI draft as JSON, choose its color, and confirm before anything is saved. Manual creation uses the same assisted description and prompt editors. Studio-created agents use a declarative `agent.json`; no TypeScript is generated.
 - Open **Edit description** or **Edit prompt** to edit normally or press **F2** for AI help with that field’s current text, including unsaved edits. Suggestions appear in the same editor for review and further editing. **F3** restores the pre-AI text; **Enter/Ctrl+S** accepts the field into the Studio draft; **Escape** discards the field edits. Use **Shift+Enter** for newlines. There are no separate top-level AI refinement actions.
 - Assistance is a neutral, tool-free Pi model request using the current provider/model, authentication, and reasoning level—not the active agent’s persona. It receives only the editable draft and available tool/MCP names, never agent `.env` values, MCP headers, or conversation history. PM, developer, documentation, designer, and dev-lead patterns guide the assistant internally; there is no template-selection menu. Requests are cancellable and time out after two minutes; normal provider usage charges apply.
-- **Color** offers automatic coloring, named palette colors, or a custom `#rrggbb`/theme role. Color and description edits also work as session drafts and saved overrides.
+- **Color** offers automatic coloring, named palette colors, or a custom `#rrggbb`/theme role. Color and description edits also work as session drafts.
 - **Apply as session draft** tests changes immediately without touching the source definition. Drafts are stored in session history, survive resume/tree navigation, are marked `◆ draft` in the dashboard, and are inherited by delegated children.
-- **Save project/global override** persists the effective description/color/prompt/tools/MCP/subagent selection in `config.json` under `agentOverrides`. Code-backed `agent.ts` files are never rewritten.
-- **Revert session draft** returns to the saved source and overlays.
+- **Save agent.ts** or **Save agent.json** writes edited fields directly to the definition currently backing the agent. Static TypeScript object exports are patched without replacing imports, comments, custom tools, or unrelated fields. A referenced `systemPromptFile` is updated directly. Existing saved overlays that affected the agent are folded into the source and removed.
+- Dynamic factory/computed definitions cannot be patched safely. Only those agents show explicit **Save project override (.pi-agents/config.json)** and **Save global override (~/.pi/agent/pi-agents/config.json)** actions, which persist editable fields under `agentOverrides`.
+- **Revert session draft** returns to the saved source and any saved overlays. The dashboard marks saved overlays and shows their global/project provenance.
 - **Set as default agent** saves a project/global startup default immediately, without activating the agent or applying pending edits. Project defaults take precedence over global defaults; resumed sessions keep their own agent selection.
 - **`/new` preserves your current agent, model, reasoning level, and unsaved Studio drafts** across session replacement (including plain Pi mode). Model inheritance requires the model and its credentials to remain available; reasoning is clamped to the model's supported levels. This does not change Pi's model defaults for a fresh launch.
 
@@ -159,7 +160,7 @@ Use the selected server’s **Manage credentials** action to enter masked tokens
 - `dochub`: connects to `http://localhost:3001/mcp`; set `DOCHUB_TOKEN` in the shell or `.pi-agents/.env`.
 - `designhub`: connects through the editor proxy at `http://localhost:5101/mcp`; set `DESIGNHUB_TOKEN` in the shell or `.pi-agents/.env`.
 
-This layered model keeps arbitrary TypeScript safe: `source definition + saved global/project override + session draft = effective agent`.
+Static TypeScript and declarative agents normally save directly to their source. The layered model remains available for dynamic definitions: `source definition + saved global/project override + session draft = effective agent`.
 
 ## Defining agents
 
@@ -189,7 +190,7 @@ Agents live in `.pi-agents/` — project root (walked up to git root) and global
 .pi-agents/browser/agent.json
 ```
 
-`agent.json` supports the normal serializable agent fields such as `name`, `description`, `tools`, `mcp`, and `systemPrompt`. Use `agent.ts` when imports, factories, or executable custom tools are needed.
+`agent.json` supports the normal serializable agent fields such as `name`, `description`, `tools`, `mcp`, and `systemPrompt`. Agent Studio saves edits directly to this file. Use `agent.ts` when imports, factories, or executable custom tools are needed. Studio patches static exported object definitions and their referenced prompt files directly; dynamic factories use clearly labeled config overrides.
 
 ### agent.ts
 
@@ -241,7 +242,7 @@ delegate(agent: "dev", task: "Implement the parser", useWorktree: true)
 delegate(agent: "doc", task: "Document the parser API", useWorktree: true)
 ```
 
-While the parent waits, the footer shows the running-child count and the `f9` hint. Press `f9` (or run `/subagents`) to open the live dashboard: it shows all running children, the selected child's current phase/tool, task, recent RPC activity, cumulative usage, elapsed/remaining time, and stale warnings. Use `↑↓`/`j k` to switch children, `s` to steer, or `x` to stop. A manual interruption or deadline returns diagnostic context to the parent so it can choose another approach. Delegate tool output stays compact by default; use Pi's tool-expand key to view the complete Markdown result. Model-visible results are capped at Pi's standard 2,000-line/50 KB tool limit; oversized full output is saved to a private temporary file and linked from the result. The agent cannot choose its deadline at call time: configure `timeoutSeconds` on the parent's subagent entry. Omit it to run without a deadline.
+While the parent waits, the delegation card shows the child's configured model (including a thinking-level suffix), and the footer shows the running-child count and the `f9` hint. Press `f9` (or run `/subagents`) to open the live dashboard: it shows all running children, each configured or actual model, the selected child's current phase/tool, task, recent RPC activity, cumulative usage, elapsed/remaining time, and stale warnings. Use `↑↓`/`j k` to switch children, `s` to steer, or `x` to stop. A manual interruption or deadline returns diagnostic context to the parent so it can choose another approach. Delegate tool output stays compact by default; use Pi's tool-expand key to view the complete Markdown result. Model-visible results are capped at Pi's standard 2,000-line/50 KB tool limit; oversized full output is saved to a private temporary file and linked from the result. The agent cannot choose its deadline at call time: configure `timeoutSeconds` on the parent's subagent entry. Omit it to run without a deadline.
 
 When `useWorktree: true` is provided, the extension creates a linked Git worktree on an automatically named branch such as `pi-agents/dev/m4abc123-a1b2c3d4` and starts the child there. The worktree directory is also generated automatically. The parent checkout never switches, so multiple delegations can run in parallel without sharing files or an index. Worktrees are retained after completion (and their generated branch and path are returned in the tool result), preserving both committed and uncommitted child changes. By default they live under Git's common directory at `.git/pi-agents-worktrees/`.
 
@@ -481,7 +482,7 @@ The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent insp
 
 ## Limitations / roadmap
 
-- Agent Studio edits descriptions, colors, prompts, tool allowlists, MCP assignments, and subagent delegation settings; other metadata, policies, and executable custom-tool code still use the source definition.
+- Agent Studio saves descriptions, colors, prompts, tool allowlists, MCP assignments, and subagent delegation settings directly to JSON definitions and static TypeScript object definitions. Dynamic/computed definitions use explicit saved overlays. Other metadata, policies, and executable custom-tool code remain untouched.
 - MCP supports stdio and streamable HTTP transports (no SSE); custom server definitions are still configured statically, while the bundled Playwright, iOS Simulator, pen.dev, DocHub, and DesignHub recipes can be assigned in Studio.
 - External edits to `.pi-agents/` need `/reload` (or a new session); Studio drafts and saves are applied immediately.
 - Project-local installs (`pi install <repo> -l` / `pi-agents --local`) are recorded in `.pi/settings.json`, which git never checks out — freshly created worktrees of such a project have no extension. Use the default global install instead (the `.pi-agents/` configs remain per project)

@@ -32,6 +32,8 @@ export interface SubagentSnapshot {
 	id: string;
 	agent: string;
 	task: string;
+	/** Configured child model pattern, including an optional thinking-level suffix. */
+	model?: string;
 	startedAt: number;
 	lastActivityAt: number;
 	deadlineAt?: number;
@@ -627,6 +629,7 @@ export function runSubagent(
 			id: options.id ?? `subagent-${nextSubagentId++}`,
 			agent: agentName,
 			task,
+			model: options.model?.trim() || undefined,
 			startedAt,
 			lastActivityAt: startedAt,
 			deadlineAt: timeoutSeconds === undefined ? undefined : startedAt + timeoutSeconds * 1000,

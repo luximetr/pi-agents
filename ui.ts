@@ -1,7 +1,7 @@
 import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, Input, Key, Markdown, SelectList, Spacer, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
-import { BUILTIN_MCP_SERVER_DESCRIPTIONS, parseAgentColor, type AgentOverride, type DiscoveredAgent, type McpServerConfig } from "./agents.ts";
+import { BUILTIN_MCP_SERVER_DESCRIPTIONS, canSaveAgentSource, parseAgentColor, type AgentOverride, type DiscoveredAgent, type McpServerConfig } from "./agents.ts";
 import { editAgentField } from "./studio-field-editor.ts";
 import { editSubagents } from "./studio-subagents.ts";
 import { AgentField, COLOR_MENU, ColorAction, STUDIO_LABELS, StudioAction, selectMenu, type MenuItem } from "./studio-menu.ts";
@@ -72,6 +72,7 @@ export function agentLabel(agent: DiscoveredAgent): string {
 	if (agent.subagents?.length) parts.push(`delegates: ${agent.subagents.map((child) => child.name).join(", ")}`);
 	if (agent.deniedPaths?.length) parts.push(`${agent.deniedPaths.length} path rule${agent.deniedPaths.length === 1 ? "" : "s"}`);
 	if (agent.studioDraft) parts.push("Studio draft");
+	if (agent.savedOverrideSources?.length) parts.push(`${agent.savedOverrideSources.join("+")} override`);
 	parts.push(agent.source);
 	return parts.join(" · ");
 }
@@ -100,6 +101,7 @@ export function updateStatus(
 export interface DelegateViewDetails {
 	agent?: string;
 	task?: string;
+	model?: string;
 	status?: "running" | "completed" | "interrupted" | "timed_out" | "failed";
 	statsLine?: string;
 	progress?: boolean;
@@ -130,13 +132,14 @@ function expandHint(): string {
 }
 
 /** Compact, scannable header for a delegation tool call. */
-export function renderDelegateCall(args: { agent?: unknown; task?: unknown; useWorktree?: unknown }, theme: Theme): Text {
+export function renderDelegateCall(args: { agent?: unknown; task?: unknown; useWorktree?: unknown; model?: unknown }, theme: Theme): Text {
 	const agent = typeof args.agent === "string" && args.agent.trim() ? args.agent.trim() : "…";
 	const task = typeof args.task === "string" && args.task.trim() ? args.task.trim() : "Waiting for task";
 	const mode = args.useWorktree === true ? "isolated worktree" : "current checkout";
+	const model = typeof args.model === "string" && args.model.trim() ? args.model.trim() : "default model";
 	return new Text(
 		`${theme.fg("toolTitle", theme.bold("delegate"))} ${theme.fg("muted", "→")} ${theme.fg("accent", agent)}`
-		+ ` ${theme.fg("dim", `· ${mode}`)}`
+		+ ` ${theme.fg("dim", `· ${model} · ${mode}`)}`
 		+ `\n${theme.fg("dim", task)}`,
 		0,
 		0,
@@ -162,6 +165,7 @@ export function renderDelegateResult(
 	const container = new Container();
 	container.addChild(new Text(
 		`${icon} ${theme.fg("toolTitle", theme.bold(agent))} ${theme.fg(statusColor, status.replace("_", " "))}`
+		+ theme.fg("muted", ` · ${details.model ?? "default model"}`)
 		+ (details.phase && status === "running" ? theme.fg("muted", ` · ${details.phase}`) : ""),
 		0,
 		0,
@@ -221,6 +225,11 @@ function elapsedLabel(ms: number): string {
 	return minutes ? `${minutes}m ${total % 60}s` : `${total}s`;
 }
 
+function snapshotModel(snapshot: SubagentSnapshot): string {
+	const actual = snapshot.usage?.model;
+	return actual ? [snapshot.usage?.provider, actual].filter(Boolean).join("/") : snapshot.model ?? "default model";
+}
+
 function snapshotUsage(snapshot: SubagentSnapshot): string {
 	const usage = snapshot.usage;
 	if (!usage) return "";
@@ -230,7 +239,6 @@ function snapshotUsage(snapshot: SubagentSnapshot): string {
 	if (usage.cacheRead) parts.push(`R${usage.cacheRead.toLocaleString()}`);
 	if (usage.cacheWrite) parts.push(`W${usage.cacheWrite.toLocaleString()}`);
 	if (usage.cost) parts.push(`$${usage.cost.toFixed(3)}`);
-	if (usage.model) parts.push([usage.provider, usage.model].filter(Boolean).join("/"));
 	return parts.join(" · ");
 }
 
@@ -300,7 +308,7 @@ export function showSubagentInspector(
 					const itemSnapshot = item.snapshot();
 					const marker = item.id === snapshot.id ? theme.fg("accent", "›") : " ";
 					const activity = itemSnapshot.currentTool ? ` · ${itemSnapshot.currentTool}` : ` · ${itemSnapshot.phase}`;
-					lines.push(`${marker} ${icon(itemSnapshot.status)} ${theme.fg("accent", itemSnapshot.agent)}${theme.fg("dim", ` · ${elapsedLabel(now - itemSnapshot.startedAt)}${activity}`)}`);
+					lines.push(`${marker} ${icon(itemSnapshot.status)} ${theme.fg("accent", itemSnapshot.agent)}${theme.fg("dim", ` · ${snapshotModel(itemSnapshot)} · ${elapsedLabel(now - itemSnapshot.startedAt)}${activity}`)}`);
 				}
 
 				const remaining = snapshot.deadlineAt === undefined
@@ -308,7 +316,7 @@ export function showSubagentInspector(
 					: snapshot.deadlineAt <= now ? "deadline reached" : `${elapsedLabel(snapshot.deadlineAt - now)} left`;
 				lines.push(
 					"",
-					`${icon(snapshot.status)} ${theme.fg("accent", theme.bold(snapshot.agent))} ${theme.fg("muted", `· ${snapshot.id}`)}`,
+					`${icon(snapshot.status)} ${theme.fg("accent", theme.bold(snapshot.agent))} ${theme.fg("muted", `· ${snapshotModel(snapshot)} · ${snapshot.id}`)}`,
 					`${theme.fg("muted", "Status")}  ${snapshot.status} · ${snapshot.phase} · ${elapsedLabel(now - snapshot.startedAt)} · ${remaining}`,
 					stale
 						? theme.fg("warning", `No RPC activity for ${elapsedLabel(idleMs)} — the child may be stalled`)
@@ -587,7 +595,8 @@ function renderAgentDetails(
 		if (agent.subagents?.length) pushWrapped(lines, width, `${theme.fg("muted", "Delegates: ")}${agent.subagents.map((child) => child.name).join(", ")}`);
 		if (agent.deniedPaths?.length) pushWrapped(lines, width, `${theme.fg("muted", "Denied paths: ")}${agent.deniedPaths.join(", ")}`);
 		pushWrapped(lines, width, `${theme.fg("muted", "Source: ")}${agent.filePath} (${agent.source})`);
-		if (agent.overrides) pushWrapped(lines, width, `${theme.fg("warning", "Overrides: ")}${agent.overrides.filePath} (${agent.overrides.source})`);
+		if (agent.savedOverrideSources?.length) pushWrapped(lines, width, `${theme.fg("warning", "Saved settings override: ")}${agent.savedOverrideSources.join(" + ")} config.json`);
+		if (agent.overrides) pushWrapped(lines, width, `${theme.fg("warning", "Shadows source: ")}${agent.overrides.filePath} (${agent.overrides.source})`);
 	} else if (tab === "tools") {
 		const projected = projectedTools(agent, agents, options);
 		const effective = agent.name === activeName ? options.activeTools : projected.names;
@@ -629,7 +638,7 @@ function renderAgentDetails(
 export type AgentSelectorResult = string | { action: "edit" | "reorder" | "delete"; agent: string } | { action: "create" } | null;
 
 export type AgentStudioResult =
-	| { action: "apply" | "save-project" | "save-global"; override: AgentOverride }
+	| { action: "apply" | "save-source" | "save-project" | "save-global"; override: AgentOverride }
 	| { action: "revert" }
 	| null;
 
@@ -790,7 +799,7 @@ export async function chooseAgentColor(ctx: ExtensionContext, current?: string):
 	}
 }
 
-/** Interactive live-draft editor for the fields that can safely override code-backed agents. */
+/** Interactive editor: static definitions save to source; dynamic definitions use explicit overlays. */
 export async function showAgentStudio(
 	ctx: ExtensionContext,
 	agent: DiscoveredAgent,
@@ -803,6 +812,8 @@ export async function showAgentStudio(
 	let systemPrompt = agent.systemPrompt ?? "";
 	let description = agent.description;
 	let color = agent.color;
+	const sourceIsEditable = canSaveAgentSource(agent);
+	const sourceFileName = agent.filePath.split(/[\\/]/).at(-1) ?? "agent source";
 	const available = {
 		tools: [...new Set([...options.allTools.map(tool => tool.name).filter(name => name !== "delegate" && name !== "powershell" && !name.includes("__")), ...Object.keys(agent.customTools ?? {})])],
 		mcp: [...new Set([...Object.keys(options.mcpServers), ...Object.keys(agent.mcpServers ?? {})])],
@@ -822,8 +833,12 @@ export async function showAgentStudio(
 			item(StudioAction.Subagents, String(subagents?.length ?? 0)),
 			...(options.onSetDefault ? [item(StudioAction.Default)] : []),
 			item(StudioAction.Apply),
-			...(options.trusted ? [item(StudioAction.SaveProject)] : []),
-			item(StudioAction.SaveGlobal),
+			...(sourceIsEditable
+				? [{ id: StudioAction.SaveSource, label: `Save ${sourceFileName} (${agent.source})` }]
+				: [
+					...(options.trusted ? [item(StudioAction.SaveProject)] : []),
+					item(StudioAction.SaveGlobal),
+				]),
 			...(options.hasSessionDraft ? [item(StudioAction.Revert)] : []),
 			item(StudioAction.Back),
 		];
@@ -906,6 +921,7 @@ export async function showAgentStudio(
 			systemPrompt: systemPrompt.trim() ? systemPrompt : null,
 		};
 		if (choice === StudioAction.Apply) return { action: "apply", override };
+		if (choice === StudioAction.SaveSource) return { action: "save-source", override };
 		if (choice === StudioAction.SaveProject) return { action: "save-project", override };
 		if (choice === StudioAction.SaveGlobal) return { action: "save-global", override };
 	}

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
+import * as ts from "typescript";
 import { getAgentDir, type AgentToolResult, type ExecOptions, type ExecResult, type ExtensionContext, type ThemeColor, type ToolExecutionMode } from "@earendil-works/pi-coding-agent";
 
 /** Pi's built-in tools (always available). */
@@ -129,14 +130,18 @@ export interface DiscoveredAgent extends Omit<AgentConfig, "subagents"> {
 	/** Normalized delegation entries. */
 	subagents?: SubagentConfig[];
 	filePath: string;
-	/** Resolved prompt file path, when the prompt was loaded from a file. */
+	/** Effective prompt file path; cleared when an overlay supplies an inline prompt. */
 	systemPromptPath?: string;
+	/** Prompt file declared by the source definition, retained across overlays for direct source saves. */
+	sourceSystemPromptPath?: string;
 	source: "global" | "project";
 	/** Lower-priority definition hidden by this agent (normally a global agent overridden by a project agent). */
 	overrides?: { filePath: string; source: "global" | "project" };
 	dir: string;
 	/** Secrets from the agent dir's `.env` (gitignored), e.g. `.pi-agents/<name>/.env`. */
 	env?: Record<string, string>;
+	/** Config scopes whose saved overlays contribute to this effective definition. */
+	savedOverrideSources?: Array<"global" | "project">;
 	/** True when the effective definition includes an unsaved session-scoped Agent Studio draft. */
 	studioDraft?: boolean;
 }
@@ -162,6 +167,8 @@ export interface PiAgentsConfig {
 	agentOrder?: string[];
 	/** Declarative Agent Studio overlays, keyed by agent name. */
 	agentOverrides?: Record<string, AgentOverride>;
+	/** Runtime provenance for merged overlays; not persisted to config.json. */
+	agentOverrideSources?: Record<string, Array<"global" | "project">>;
 	keybindings?: {
 		/** One key or several (fallbacks for terminals that don't send alt/ctrl+shift distinctly). */
 		select?: string | string[];
@@ -223,7 +230,9 @@ export interface McpServerConfig {
 	insecure?: boolean;
 }
 
-const jiti = createJiti(import.meta.url);
+// Agent definitions are editable at runtime; bypass module caching so Studio
+// source saves and /reload observe the latest file contents.
+const jiti = createJiti(import.meta.url, { moduleCache: false });
 
 /** Validate + normalize an agent config loaded from disk. */
 function normalizeAgent(
@@ -294,6 +303,7 @@ function normalizeAgent(
 		systemPrompt: systemPrompt?.trim() ? systemPrompt : undefined,
 		systemPromptFile: normalizeOptionalText(cfg.systemPromptFile),
 		systemPromptPath,
+		sourceSystemPromptPath: systemPromptPath,
 		customTools,
 		subagents: normalizeSubagents(cfg.subagents, filePath),
 		default: cfg.default === true,
@@ -719,10 +729,16 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 	for (const name of Object.keys(BUILTIN_MCP_SERVERS)) mcpServerSources[name] = "builtin";
 	for (const name of Object.keys(globalConfig.mcpServers ?? {})) mcpServerSources[name] = "global";
 	for (const name of Object.keys(projectConfig.mcpServers ?? {})) mcpServerSources[name] = "project";
+	const overrideNames = new Set([...Object.keys(globalConfig.agentOverrides ?? {}), ...Object.keys(projectConfig.agentOverrides ?? {})]);
+	const agentOverrideSources = Object.fromEntries([...overrideNames].map((name) => [name, [
+		...(globalConfig.agentOverrides?.[name] ? ["global" as const] : []),
+		...(projectConfig.agentOverrides?.[name] ? ["project" as const] : []),
+	]]));
 	return {
 		defaultAgent: projectConfig.defaultAgent ?? globalConfig.defaultAgent,
 		agentOrder: projectConfig.agentOrder ?? globalConfig.agentOrder,
 		agentOverrides: mergeAgentOverrides(globalConfig.agentOverrides, projectConfig.agentOverrides),
+		agentOverrideSources: overrideNames.size > 0 ? agentOverrideSources : undefined,
 		keybindings: {
 			select: projectConfig.keybindings?.select ?? globalConfig.keybindings?.select,
 			rotate: projectConfig.keybindings?.rotate ?? globalConfig.keybindings?.rotate,
@@ -778,10 +794,19 @@ export function getGlobalAgentsDir(): string {
 	return path.join(getAgentDir(), "pi-agents");
 }
 
-/** Apply a declarative Studio overlay without mutating the code-backed source definition. */
-export function applyAgentOverride(agent: DiscoveredAgent, override: AgentOverride | undefined, studioDraft = false): DiscoveredAgent {
+/** Apply a declarative Studio overlay without mutating the source definition. */
+export function applyAgentOverride(
+	agent: DiscoveredAgent,
+	override: AgentOverride | undefined,
+	studioDraft = false,
+	savedOverrideSources?: Array<"global" | "project">,
+): DiscoveredAgent {
 	if (!override) return { ...agent, studioDraft: false };
-	const result: DiscoveredAgent = { ...agent, studioDraft };
+	const result: DiscoveredAgent = {
+		...agent,
+		studioDraft,
+		...(savedOverrideSources ? { savedOverrideSources: [...savedOverrideSources] } : {}),
+	};
 	if (override.description !== undefined) result.description = override.description;
 	if (override.color !== undefined) result.color = override.color === null ? undefined : parseAgentColor(override.color);
 	if (override.tools !== undefined) result.tools = [...override.tools];
@@ -800,6 +825,21 @@ export function saveAgentOverride(cwd: string, scope: "project" | "global", name
 		const existing = raw.agentOverrides && typeof raw.agentOverrides === "object" && !Array.isArray(raw.agentOverrides)
 			? raw.agentOverrides as Record<string, unknown> : {};
 		raw.agentOverrides = { ...existing, [name]: override };
+	});
+}
+
+/** Remove one saved overlay without creating a config file when none exists. */
+export function removeAgentOverride(cwd: string, scope: "project" | "global", name: string): string | undefined {
+	const dir = scope === "global" ? getGlobalAgentsDir() : findProjectAgentsDir(cwd);
+	if (!dir) return undefined;
+	const configPath = path.join(dir, "config.json");
+	if (!fs.existsSync(configPath)) return undefined;
+	return updateAgentsConfig(cwd, scope, raw => {
+		if (!raw.agentOverrides || typeof raw.agentOverrides !== "object" || Array.isArray(raw.agentOverrides)) return;
+		const remaining = { ...(raw.agentOverrides as Record<string, unknown>) };
+		delete remaining[name];
+		if (Object.keys(remaining).length > 0) raw.agentOverrides = remaining;
+		else delete raw.agentOverrides;
 	});
 }
 
@@ -844,6 +884,197 @@ export interface DeclarativeAgentInput {
 	systemPrompt?: string;
 }
 
+function writeJsonAtomic(filePath: string, data: object): void {
+	const tempPath = `${filePath}.tmp-${process.pid}`;
+	fs.writeFileSync(tempPath, `${JSON.stringify(data, null, "\t")}\n`, { encoding: "utf8", mode: 0o600 });
+	fs.renameSync(tempPath, filePath);
+}
+
+type SourceEdit = { start: number; end: number; text: string };
+
+function unwrapExpression(expression: ts.Expression): ts.Expression {
+	let current = expression;
+	while (ts.isParenthesizedExpression(current) || ts.isAsExpression(current) || ts.isTypeAssertionExpression(current) || ts.isSatisfiesExpression(current)) {
+		current = current.expression;
+	}
+	return current;
+}
+
+function exportedAgentObject(sourceFile: ts.SourceFile): ts.ObjectLiteralExpression | undefined {
+	const exported = sourceFile.statements.find(ts.isExportAssignment);
+	if (!exported || exported.isExportEquals) return undefined;
+	const expression = unwrapExpression(exported.expression);
+	if (ts.isObjectLiteralExpression(expression)) return expression;
+	if (!ts.isIdentifier(expression)) return undefined;
+	for (const statement of sourceFile.statements) {
+		if (!ts.isVariableStatement(statement)) continue;
+		for (const declaration of statement.declarationList.declarations) {
+			if (!ts.isIdentifier(declaration.name) || declaration.name.text !== expression.text || !declaration.initializer) continue;
+			const initializer = unwrapExpression(declaration.initializer);
+			if (ts.isObjectLiteralExpression(initializer)) return initializer;
+		}
+	}
+	return undefined;
+}
+
+function propertyName(property: ts.ObjectLiteralElementLike): string | undefined {
+	const name = property.name;
+	if (!name) return undefined;
+	if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) return name.text;
+	return undefined;
+}
+
+function parseEditableSource(filePath: string): { source: string; object: ts.ObjectLiteralExpression } {
+	const source = fs.readFileSync(filePath, "utf8");
+	const sourceFile = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
+	const object = exportedAgentObject(sourceFile);
+	if (!object) throw new Error(`cannot safely edit ${filePath}: default export is not a static object literal`);
+	return { source, object };
+}
+
+/** Whether Agent Studio can update this definition directly without evaluating or rewriting executable logic. */
+export function canSaveAgentSource(agent: DiscoveredAgent): boolean {
+	if (agent.filePath.endsWith(".json")) return true;
+	try {
+		parseEditableSource(agent.filePath);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function tsString(value: string): string {
+	if (!value.includes("\n")) return JSON.stringify(value);
+	return `\`${value.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${")}\``;
+}
+
+function tsTools(entries: ToolName[], property: ts.ObjectLiteralElementLike | undefined, source: string): string {
+	const usesToolsEnum = !!property && ts.isPropertyAssignment(property) && /\bTools\s*\./.test(source.slice(property.initializer.getStart(), property.initializer.end));
+	if (!usesToolsEnum) return JSON.stringify(entries);
+	const builtins = new Set<string>(TOOLS);
+	return `[${entries.map(entry => builtins.has(entry) ? `Tools.${entry}` : JSON.stringify(entry)).join(", ")}]`;
+}
+
+function tsSubagents(entries: SubagentConfig[]): string {
+	return `[${entries.map((entry) => {
+		if (!entry.model && entry.timeoutSeconds === undefined) return JSON.stringify(entry.name);
+		const fields = [`name: ${JSON.stringify(entry.name)}`];
+		if (entry.model) fields.push(`model: ${JSON.stringify(entry.model)}`);
+		if (entry.timeoutSeconds !== undefined) fields.push(`timeoutSeconds: ${entry.timeoutSeconds}`);
+		return `{ ${fields.join(", ")} }`;
+	}).join(", ")}]`;
+}
+
+function lineIndent(source: string, position: number): string {
+	const start = source.lastIndexOf("\n", position - 1) + 1;
+	const prefix = source.slice(start, position);
+	return /^\s*$/.test(prefix) ? prefix : "";
+}
+
+function removePropertyEdit(source: string, property: ts.ObjectLiteralElementLike): SourceEdit {
+	let end = property.end;
+	while (end < source.length && (source[end] === " " || source[end] === "\t")) end++;
+	if (source[end] === ",") end++;
+	return { start: property.getFullStart(), end, text: "" };
+}
+
+function updateStaticAgentSource(agent: DiscoveredAgent, override: AgentOverride): void {
+	const { source, object } = parseEditableSource(agent.filePath);
+	const properties = new Map<string, ts.ObjectLiteralElementLike>();
+	for (const property of object.properties) {
+		const name = propertyName(property);
+		if (name) properties.set(name, property);
+	}
+	const desired = new Map<string, string | null>();
+	if (override.description !== undefined) desired.set("description", JSON.stringify(override.description.trim()));
+	if (override.color !== undefined) desired.set("color", override.color === null ? null : JSON.stringify(parseAgentColor(override.color)));
+	if (override.tools !== undefined) desired.set("tools", tsTools(override.tools, properties.get("tools"), source));
+	if (override.mcp !== undefined) desired.set("mcp", JSON.stringify(override.mcp));
+	if (override.subagents !== undefined) desired.set("subagents", tsSubagents(override.subagents));
+	if (override.systemPrompt !== undefined && !agent.sourceSystemPromptPath) {
+		desired.set("systemPrompt", override.systemPrompt === null ? null : tsString(override.systemPrompt));
+	}
+
+	const edits: SourceEdit[] = [];
+	const additions: Array<[string, string]> = [];
+	for (const [name, value] of desired) {
+		const property = properties.get(name);
+		if (value === null) {
+			if (property) edits.push(removePropertyEdit(source, property));
+			continue;
+		}
+		if (!property) {
+			additions.push([name, value]);
+			continue;
+		}
+		if (ts.isPropertyAssignment(property)) edits.push({ start: property.initializer.getStart(), end: property.initializer.end, text: value });
+		else edits.push({ start: property.getStart(), end: property.end, text: `${name}: ${value}` });
+	}
+
+	if (additions.length > 0) {
+		const closePosition = object.end - 1;
+		const closeLineStart = source.lastIndexOf("\n", closePosition - 1) + 1;
+		const closeOnOwnLine = /^\s*$/.test(source.slice(closeLineStart, closePosition));
+		const closeIndent = closeOnOwnLine ? source.slice(closeLineStart, closePosition) : lineIndent(source, object.getStart());
+		const firstProperty = object.properties[0];
+		const propertyIndent = firstProperty ? lineIndent(source, firstProperty.getStart()) || `${closeIndent}\t` : `${closeIndent}\t`;
+		const lines = additions.map(([name, value]) => `${propertyIndent}${name}: ${value},`).join("\n");
+		if (object.properties.length > 0) {
+			const last = object.properties[object.properties.length - 1];
+			if (!source.slice(last.end, closePosition).includes(",")) edits.push({ start: last.end, end: last.end, text: "," });
+		}
+		if (closeOnOwnLine) edits.push({ start: closeLineStart, end: closeLineStart, text: `${lines}\n` });
+		else edits.push({ start: closePosition, end: closePosition, text: `\n${lines}\n${closeIndent}` });
+	}
+
+	let updated = source;
+	for (const edit of edits.sort((a, b) => b.start - a.start)) updated = updated.slice(0, edit.start) + edit.text + updated.slice(edit.end);
+	if (updated !== source) {
+		const mode = fs.statSync(agent.filePath).mode & 0o777;
+		const tempPath = `${agent.filePath}.tmp-${process.pid}`;
+		fs.writeFileSync(tempPath, updated, { encoding: "utf8", mode });
+		fs.renameSync(tempPath, agent.filePath);
+	}
+}
+
+function updateJsonAgentSource(agent: DiscoveredAgent, override: AgentOverride): void {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(fs.readFileSync(agent.filePath, "utf8"));
+	} catch (err) {
+		throw new Error(`cannot save ${agent.filePath}: invalid JSON (${err})`);
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`cannot save ${agent.filePath}: expected a JSON object`);
+	const data = { ...(parsed as Record<string, unknown>) };
+	if (override.description !== undefined) data.description = override.description.trim();
+	if (override.color !== undefined) {
+		if (override.color === null) delete data.color;
+		else data.color = parseAgentColor(override.color);
+	}
+	if (override.tools !== undefined) data.tools = [...override.tools];
+	if (override.mcp !== undefined) data.mcp = [...override.mcp];
+	if (override.subagents !== undefined) data.subagents = override.subagents.map(entry => ({ ...entry }));
+	if (override.systemPrompt !== undefined && !agent.sourceSystemPromptPath) {
+		if (override.systemPrompt === null) delete data.systemPrompt;
+		else data.systemPrompt = override.systemPrompt;
+	}
+	writeJsonAtomic(agent.filePath, data);
+}
+
+/** Save Studio fields to the definition currently backing this agent and update its referenced prompt file. */
+export function saveAgentSource(agent: DiscoveredAgent, override: AgentOverride): string {
+	if (agent.filePath.endsWith(".json")) updateJsonAgentSource(agent, override);
+	else updateStaticAgentSource(agent, override);
+	if (override.systemPrompt !== undefined && agent.sourceSystemPromptPath) {
+		const prompt = override.systemPrompt === null ? "" : override.systemPrompt;
+		const mode = fs.existsSync(agent.sourceSystemPromptPath) ? fs.statSync(agent.sourceSystemPromptPath).mode & 0o777 : 0o600;
+		const tempPath = `${agent.sourceSystemPromptPath}.tmp-${process.pid}`;
+		fs.writeFileSync(tempPath, prompt, { encoding: "utf8", mode });
+		fs.renameSync(tempPath, agent.sourceSystemPromptPath);
+	}
+	return agent.filePath;
+}
+
 /** Create a JSON-backed agent that Agent Studio can manage without rewriting TypeScript. */
 export function saveDeclarativeAgent(cwd: string, scope: "project" | "global", input: DeclarativeAgentInput): string {
 	const name = input.name.trim();
@@ -865,9 +1096,7 @@ export function saveDeclarativeAgent(cwd: string, scope: "project" | "global", i
 		...(input.mcp === undefined ? {} : { mcp: [...input.mcp] }),
 		...(input.systemPrompt?.trim() ? { systemPrompt: input.systemPrompt } : {}),
 	};
-	const tempPath = `${filePath}.tmp-${process.pid}`;
-	fs.writeFileSync(tempPath, `${JSON.stringify(data, null, "\t")}\n`, { encoding: "utf8", mode: 0o600 });
-	fs.renameSync(tempPath, filePath);
+	writeJsonAtomic(filePath, data);
 	return filePath;
 }
 
@@ -918,7 +1147,7 @@ export async function discoverAgents(cwd: string, opts?: DiscoverOptions): Promi
 	const config = loadConfig(cwd, opts);
 	return {
 		agents: [...byName.values()]
-			.map((agent) => applyAgentOverride(agent, config.agentOverrides?.[agent.name]))
+			.map((agent) => applyAgentOverride(agent, config.agentOverrides?.[agent.name], false, config.agentOverrideSources?.[agent.name]))
 			.sort((a, b) => {
 				const order = config.agentOrder ?? [];
 				const rank = (name: string) => { const index = order.indexOf(name); return index < 0 ? order.length : index; };

@@ -10,7 +10,7 @@ import { STUDIO_LABELS, StudioAction } from "../studio-menu.ts";
 import { editSubagents } from "../studio-subagents.ts";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 initTheme("dark", false);
-import { discoverAgents, saveAgentOverride, saveDeclarativeAgent } from "../agents.ts";
+import { discoverAgents, saveAgentOverride, saveAgentSource, saveDeclarativeAgent } from "../agents.ts";
 
 async function makeAgent(root: string, name: string, extra = "") {
 	await mkdir(path.join(root, ".pi-agents", name), { recursive: true });
@@ -377,14 +377,17 @@ test("Studio adds configured subagents, restores drafts, and saves an empty dele
 		assert.deepEqual((await discoverAgents(root)).agents.find(agent => agent.name === "alpha")?.subagents, (draft.data as any).override.subagents);
 		const restored = boot(root, {
 			branchEntries: [{ type: "custom", ...draft }],
-			selectAnswers: ["Manage subagents (1)", "1 · beta · test/model · 30s", "Remove subagent", "Done", "Save project override"],
+			selectAnswers: ["Manage subagents (1)", "1 · beta · test/model · 30s", "Remove subagent", "Done", "Save agent.ts (project)"],
 			customActions: [component => component.handleInput("e")],
 		});
 		await restored.handlers.get("session_start")?.({ reason: "startup" }, restored.ctx);
 		assert.ok(restored.activeToolsets.at(-1)?.includes("delegate"));
 		await restored.commands.get("agent").handler("", restored.ctx);
 		assert.ok(!restored.activeToolsets.at(-1)?.includes("delegate"));
-		assert.deepEqual((await discoverAgents(root)).agents.find(agent => agent.name === "alpha")?.subagents, []);
+		assert.match(await readFile(path.join(root, ".pi-agents", "alpha", "agent.ts"), "utf8"), /subagents: \[\]/);
+		const savedConfig = JSON.parse(await readFile(path.join(root, ".pi-agents", "config.json"), "utf8"));
+		assert.equal(savedConfig.agentOverrides, undefined);
+		assert.deepEqual((await discoverAgents(root)).agents.find(agent => agent.name === "alpha")?.subagents ?? [], []);
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -395,7 +398,7 @@ test("Studio routes renamed labels by ID and persists description and color over
 	try {
 		await makeAgent(root, "alpha", "default: true");
 		const runtime = boot(root, {
-			selectAnswers: ["Change agent summary", "Color (automatic)", "Custom hex/theme role", "Save project override"],
+			selectAnswers: ["Change agent summary", "Color (automatic)", "Custom hex/theme role", "Save agent.ts (project)"],
 			inputAnswers: ["invalid-color", "#ABCDEF"], editorAnswers: ["Refined responsibility"],
 			customActions: [component => component.handleInput("e"), component => component.handleInput("\x1b")],
 		});
@@ -764,6 +767,121 @@ test("Agent Studio can create and discover a declarative JSON agent", async () =
 	}
 });
 
+test("direct JSON saves preserve metadata and update a referenced prompt file", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-json-prompt-"));
+	try {
+		const filePath = saveDeclarativeAgent(root, "project", { name: "alpha", description: "source" });
+		const promptPath = path.join(path.dirname(filePath), "prompt.md");
+		await writeFile(promptPath, "Source prompt\n");
+		await writeFile(filePath, JSON.stringify({
+			name: "alpha", description: "source", whenToUse: "Keep this metadata", systemPromptFile: "./prompt.md",
+		}, null, "\t"));
+		const agent = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
+		saveAgentSource(agent, { description: "updated", color: null, mcp: [], systemPrompt: "Updated prompt\n" });
+		const source = JSON.parse(await readFile(filePath, "utf8"));
+		assert.equal(source.description, "updated");
+		assert.equal(source.whenToUse, "Keep this metadata");
+		assert.equal(source.systemPromptFile, "./prompt.md");
+		assert.equal(source.systemPrompt, undefined);
+		assert.equal(await readFile(promptPath, "utf8"), "Updated prompt\n");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("direct TypeScript saves update the static agent object and its prompt file", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-ts-source-"));
+	try {
+		const dir = path.join(root, ".pi-agents", "alpha");
+		await mkdir(dir, { recursive: true });
+		const filePath = path.join(dir, "agent.ts");
+		const promptPath = path.join(dir, "prompt.md");
+		await writeFile(promptPath, "Source prompt\n");
+		await writeFile(filePath, `const cfg = {
+	name: "alpha",
+	// This executable field and comment must survive Studio saves.
+	description: "source",
+	color: "#ffffff",
+	tools: ["read"],
+	customTools: { ping: { description: "Ping", execute: () => "pong" } },
+	systemPromptFile: "./prompt.md",
+};
+export default cfg;
+`);
+		const agent = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
+		saveAgentSource(agent, {
+			description: "updated", color: null, tools: ["read", "grep"], mcp: ["playwright"],
+			subagents: [{ name: "beta", model: "openai-codex/gpt-5.3-codex-spark:high" }], systemPrompt: "Updated prompt\n",
+		});
+		const source = await readFile(filePath, "utf8");
+		assert.match(source, /description: "updated"/);
+		assert.doesNotMatch(source, /color:/);
+		assert.match(source, /tools: \["read","grep"\]/);
+		assert.match(source, /subagents: \[\{ name: "beta", model: "openai-codex\/gpt-5.3-codex-spark:high" \}\]/);
+		assert.match(source, /customTools: \{ ping:/);
+		assert.match(source, /This executable field and comment must survive/);
+		assert.match(source, /systemPromptFile: "\.\/prompt\.md"/);
+		assert.equal(await readFile(promptPath, "utf8"), "Updated prompt\n");
+		const updated = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
+		assert.equal(updated.description, "updated");
+		assert.deepEqual(updated.tools, ["read", "grep"]);
+		assert.equal(updated.subagents?.[0]?.model, "openai-codex/gpt-5.3-codex-spark:high");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Studio saves JSON-backed agent edits to agent.json and removes saved overlays", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-json-save-"));
+	try {
+		const filePath = saveDeclarativeAgent(root, "project", {
+			name: "alpha", description: "source description", tools: ["read"], mcp: [], systemPrompt: "Source prompt",
+		});
+		saveDeclarativeAgent(root, "project", { name: "beta", description: "beta", tools: ["read"] });
+		saveAgentOverride(root, "project", "alpha", { description: "saved description" });
+		const runtime = boot(root, {
+			flag: "alpha",
+			selectAnswers: [
+				"Manage subagents (0)", "Add subagent", "beta · beta",
+				"1 · beta · default model · no timeout", "Set model (default)", "Done",
+				"Save agent.json (project)",
+			],
+			inputAnswers: ["openai-codex/gpt-5.3-codex-spark:high"],
+			customActions: [component => component.handleInput("e")],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+
+		const source = JSON.parse(await readFile(filePath, "utf8"));
+		assert.equal(source.description, "saved description");
+		assert.deepEqual(source.subagents, [{ name: "beta", model: "openai-codex/gpt-5.3-codex-spark:high" }]);
+		const config = JSON.parse(await readFile(path.join(root, ".pi-agents", "config.json"), "utf8"));
+		assert.equal(config.agentOverrides, undefined);
+		const alpha = (await discoverAgents(root)).agents.find(agent => agent.name === "alpha");
+		assert.equal(alpha?.subagents?.[0]?.name, "beta");
+		assert.equal(alpha?.subagents?.[0]?.model, "openai-codex/gpt-5.3-codex-spark:high");
+		assert.equal(alpha?.savedOverrideSources, undefined);
+		assert.ok(runtime.notifications.some(entry => entry.message.includes(filePath)));
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("dynamic TypeScript definitions keep explicit config override saves", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-dynamic-ts-"));
+	try {
+		const dir = path.join(root, ".pi-agents", "dynamic");
+		await mkdir(dir, { recursive: true });
+		const filePath = path.join(dir, "agent.ts");
+		await writeFile(filePath, `export default () => ({ name: "dynamic", description: "source", tools: ["read"] });\n`);
+		const runtime = boot(root, {
+			flag: "dynamic",
+			selectAnswers: ["Edit description", "Save project override (.pi-agents/config.json)"],
+			editorAnswers: ["overridden"],
+			customActions: [component => component.handleInput("e")],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		assert.match(await readFile(filePath, "utf8"), /description: "source"/);
+		const config = JSON.parse(await readFile(path.join(root, ".pi-agents", "config.json"), "utf8"));
+		assert.equal(config.agentOverrides.dynamic.description, "overridden");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("project Studio overrides preserve config and expose curated MCP recipes", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-save-"));
 	try {
@@ -788,6 +906,7 @@ test("project Studio overrides preserve config and expose curated MCP recipes", 
 		assert.deepEqual(alpha?.mcp, ["playwright"]);
 		assert.equal(alpha?.systemPrompt, "saved Studio prompt");
 		assert.equal(alpha?.systemPromptPath, undefined);
+		assert.deepEqual(alpha?.savedOverrideSources, ["project"]);
 		assert.equal(discovered.config.mcpServerSources?.playwright, "builtin");
 		assert.deepEqual(discovered.config.mcpServers?.playwright.args, ["-y", "@playwright/mcp@0.0.80"]);
 		assert.equal(discovered.config.mcpServers?.["pen.dev"].command, "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/out/mcp-server-darwin-arm64");

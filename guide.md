@@ -12,14 +12,15 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 
 ## Agent Studio
 
-Open `f7`, select an agent, and press `e`. Studio can edit the effective system prompt, direct tool allowlist, and MCP assignments without modifying arbitrary TypeScript. Tool and MCP selectors show the highlighted item's description and connection details in a right-side pane.
+Open `f7`, select an agent, and press `e`. Studio can edit the effective system prompt, direct tool allowlist, MCP assignments, and subagents. Tool and MCP selectors show the highlighted item's description and connection details in a right-side pane.
 
 - **Apply as session draft**: activates immediately, persists in session history, follows session-tree navigation, and is inherited by delegated children. The dashboard marks it `◆ draft`.
-- **Save project override**: writes an `agentOverrides` entry to the project `.pi-agents/config.json` and applies it immediately.
-- **Save global override**: writes the same declarative overlay to the global config.
-- **Revert session draft**: restores the saved source/global/project composition.
+- **Save agent.ts** / **Save agent.json**: writes edits directly to the current agent source and removes saved overlays folded into it. Static TypeScript object exports retain imports, comments, custom tools, and unrelated fields; referenced prompt files are updated directly.
+- **Save project override (.pi-agents/config.json)**: for dynamic factory/computed definitions that cannot be patched safely, writes an `agentOverrides` entry to the project config and applies it immediately.
+- **Save global override (~/.pi/agent/pi-agents/config.json)**: writes the same dynamic-agent overlay to the global config.
+- **Revert session draft**: restores the saved source/global/project composition. The dashboard identifies active saved overlays and their scope.
 
-Press `n` in the dashboard to create a project or global JSON-backed agent interactively. It captures the current direct toolset as a starting point, then opens Studio. Use TypeScript definitions for imports, factories, and executable custom tools; Studio overlays never rewrite them.
+Press `n` in the dashboard to create a project or global JSON-backed agent interactively. It captures the current direct toolset as a starting point, then opens Studio. Studio saves later edits directly to `agent.json`. TypeScript definitions support imports, factories, and executable custom tools; Studio patches static object exports directly and offers explicit config overlays for dynamic definitions.
 
 The MCP selector always offers recipes shipped with the extension. They are opt-in and disconnected until assigned. A project/global server definition with the same name overrides its bundled recipe:
 
@@ -102,7 +103,7 @@ delegate(agent: "dev", task: "Implement the parser", useWorktree: true)
 delegate(agent: "doc", task: "Document the parser API", useWorktree: true)
 ```
 
-The agent cannot choose its deadline at call time. Configure `timeoutSeconds` on the parent's subagent entry, or omit it to run without a deadline. While the parent waits, the footer shows the running count and `f9` hint. `f9` or `/subagents` opens a live dashboard of all children with current tool, task, recent activity, cumulative usage, deadline, steering (`s`), and stop (`x`) controls; use `↑↓` or `j k` to select. Manual interruption and timeout return diagnostic context to the parent so it can change approach. Delegate results are compact by default; expand the tool row to read the complete Markdown output. Results over Pi's 2,000-line/50 KB tool limit are truncated for the parent context and saved in full to a private temporary file linked from the result.
+The agent cannot choose its deadline at call time. Configure `timeoutSeconds` on the parent's subagent entry, or omit it to run without a deadline. While the parent waits, the delegation card shows the configured model (including a thinking-level suffix) and the footer shows the running count and `f9` hint. `f9` or `/subagents` opens a live dashboard of all children with configured or actual model, current tool, task, recent activity, cumulative usage, deadline, steering (`s`), and stop (`x`) controls; use `↑↓` or `j k` to select. Manual interruption and timeout return diagnostic context to the parent so it can change approach. Delegate results are compact by default; expand the tool row to read the complete Markdown output. Results over Pi's 2,000-line/50 KB tool limit are truncated for the parent context and saved in full to a private temporary file linked from the result.
 
 When `useWorktree: true` is provided, the extension creates a linked Git worktree on an automatically named branch such as `pi-agents/dev/m4abc123-a1b2c3d4` and starts the child there. Its directory name is generated too. The parent checkout never switches, so delegations can run in parallel with separate files and indexes. Worktrees are retained after completion and their generated branches and paths are returned, preserving uncommitted as well as committed child changes. They default to `.git/pi-agents-worktrees/` in Git's common directory.
 
@@ -207,4 +208,4 @@ Per agent: a server can also be defined **inside the agent** (`mcpServers` in `a
 
 ## After editing .pi-agents/
 
-External source edits are discovered at session start — run `/reload` (or start a new session). Agent Studio applies its own session drafts and saved overlays immediately without reload.
+External source edits are discovered at session start — run `/reload` (or start a new session). Agent Studio applies its own direct source/prompt saves, session drafts, and saved dynamic-agent overlays immediately without reload.

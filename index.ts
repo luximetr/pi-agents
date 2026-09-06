@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, saveAgentOrder, saveAgentOverride, saveDefaultAgent, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
@@ -433,6 +433,7 @@ export default function (pi: ExtensionAPI) {
 						details: {
 							agent: agentName,
 							task,
+							model: [...callSubagentStats.models][0] ?? subagent.model,
 							status: "running",
 							progress: true,
 							phase: progressPhase,
@@ -501,6 +502,7 @@ export default function (pi: ExtensionAPI) {
 					details: {
 						agent: agentName,
 						task,
+						model: [...callSubagentStats.models][0] ?? subagent.model,
 						status: "completed",
 						statsLine: subagentStatsLine(callSubagentStats, Date.now() - startedAt),
 						branch: worktreeInfo?.branch,
@@ -524,18 +526,21 @@ export default function (pi: ExtensionAPI) {
 					const location = worktreeInfo ? `\nWorktree preserved at: ${worktreeInfo.path}` : "";
 					return {
 						content: [{ type: "text", text: `Subagent ${agentName} ${reason}.${operation}\nLast activity: ${formatElapsed(Date.now() - snapshot.lastActivityAt)} ago.${partial}${location}\n\nChoose a different approach rather than blindly repeating the same delegation.` }],
-						details: { agent: agentName, task, status, error: true, branch: worktreeInfo?.branch, worktreePath: worktreeInfo?.path, useWorktree } satisfies DelegateStatsDetails,
+						details: { agent: agentName, task, model: snapshot.usage?.model ? [snapshot.usage.provider, snapshot.usage.model].filter(Boolean).join("/") : subagent.model, status, error: true, branch: worktreeInfo?.branch, worktreePath: worktreeInfo?.path, useWorktree } satisfies DelegateStatsDetails,
 					};
 				}
 				const location = worktreeInfo ? `\nWorktree preserved at: ${worktreeInfo.path}` : "";
 				return {
 					content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}${location}` }],
-					details: { agent: agentName, task, status: "failed", error: true, branch: worktreeInfo?.branch, worktreePath: worktreeInfo?.path, useWorktree } satisfies DelegateStatsDetails,
+					details: { agent: agentName, task, model: subagent.model, status: "failed", error: true, branch: worktreeInfo?.branch, worktreePath: worktreeInfo?.path, useWorktree } satisfies DelegateStatsDetails,
 				};
 			}
 		},
 		renderCall(args, theme) {
-			return renderDelegateCall(args as { agent?: unknown; task?: unknown; useWorktree?: unknown }, theme);
+			const call = args as { agent?: unknown; task?: unknown; useWorktree?: unknown };
+			const name = typeof call.agent === "string" ? call.agent.trim() : "";
+			const model = activeAgent?.subagents?.find(candidate => candidate.name === name)?.model;
+			return renderDelegateCall({ ...call, model }, theme);
 		},
 		renderResult(result, options, theme) {
 			return renderDelegateResult(result, options, theme);
@@ -792,15 +797,21 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const scope = result.action === "save-global" ? "global" : "project";
-		const configPath = saveAgentOverride(ctx.cwd, scope, name, result.override);
+		let savedPath: string;
+		if (result.action === "save-source") {
+			savedPath = saveAgentSource(agent, result.override);
+			for (const scope of agent.savedOverrideSources ?? []) removeAgentOverride(ctx.cwd, scope, name);
+		} else {
+			const scope = result.action === "save-global" ? "global" : "project";
+			savedPath = saveAgentOverride(ctx.cwd, scope, name, result.override);
+		}
 		persistStudioDraft(name, undefined);
 		const discovered = await discoverAgents(ctx.cwd, { includeProject: ctx.isProjectTrusted ? ctx.isProjectTrusted() : true });
 		sourceAgents = discovered.agents;
 		config = discovered.config;
 		rebuildEffectiveAgents();
 		await reapplyAgent(name, ctx);
-		ctx.ui.notify(`Agent "${name}" saved to ${configPath}`, "info");
+		ctx.ui.notify(`Agent "${name}" saved to ${savedPath}`, "info");
 	}
 
 	async function createAgent(ctx: ExtensionContext): Promise<void> {

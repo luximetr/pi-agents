@@ -238,7 +238,7 @@ test("subagent inspector renders live state and confirms a manual stop", async (
 	const handle: RunningSubagentHandle = {
 		id: "call-inspect",
 		snapshot: () => ({
-			id: "call-inspect", agent: "worker", task: "run tests", startedAt: now - 10_000,
+			id: "call-inspect", agent: "worker", task: "run tests", model: "openai-codex/gpt-5.3-codex-spark:high", startedAt: now - 10_000,
 			lastActivityAt: now - 1_000, deadlineAt: now + 20_000, status: "running", phase: "tool execution",
 			currentTool: "bash", currentToolArgs: { command: "npm test" }, partialText: "testing...", recentEvents: ["→ bash"],
 		}),
@@ -258,7 +258,9 @@ test("subagent inspector renders live state and confirms a manual stop", async (
 	};
 	const inspector = showSubagentInspector(ctx, () => [handle], 5);
 	await new Promise((resolve) => setTimeout(resolve, 0));
-	assert.ok(component.render(100).join("\n").includes("Tool: bash"));
+	const inspectorText = component.render(100).join("\n");
+	assert.ok(inspectorText.includes("Tool: bash"));
+	assert.ok(inspectorText.includes("openai-codex/gpt-5.3-codex-spark:high"));
 	component.handleInput("x");
 	component.handleInput("y");
 	await inspector;
@@ -267,17 +269,18 @@ test("subagent inspector renders live state and confirms a manual stop", async (
 
 test("delegate renderer keeps routine results compact and exposes worktree context", () => {
 	const theme: any = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
-	const call = renderDelegateCall({ agent: "worker", task: "Implement the parser", useWorktree: true }, theme).render(100).join("\n");
+	const call = renderDelegateCall({ agent: "worker", task: "Implement the parser", useWorktree: true, model: "openai-codex/gpt-5.3-codex-spark:high" }, theme).render(100).join("\n");
 	assert.match(call, /delegate → worker/);
+	assert.match(call, /openai-codex\/gpt-5.3-codex-spark:high/);
 	assert.match(call, /isolated worktree/);
 
 	const output = Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n");
 	const component = renderDelegateResult({
 		content: [{ type: "text", text: `Result from worker:\n\n${output}\n\nBranch: pi-agents/worker/x\nWorktree: /tmp/worker-x` }],
-		details: { agent: "worker", status: "completed", branch: "pi-agents/worker/x", worktreePath: "/tmp/worker-x", statsLine: "stats: 1 call" },
+		details: { agent: "worker", model: "openai-codex/gpt-5.3-codex-spark:high", status: "completed", branch: "pi-agents/worker/x", worktreePath: "/tmp/worker-x", statsLine: "stats: 1 call" },
 	}, { expanded: false }, theme);
 	const rendered = component.render(120).join("\n");
-	assert.match(rendered, /✓ worker completed/);
+	assert.match(rendered, /✓ worker completed · openai-codex\/gpt-5.3-codex-spark:high/);
 	assert.match(rendered, /line 6/);
 	assert.doesNotMatch(rendered, /line 7/);
 	assert.match(rendered, /4 more lines/);
