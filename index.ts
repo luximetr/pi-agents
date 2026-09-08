@@ -8,6 +8,7 @@ import type { KeyId } from "@earendil-works/pi-tui";
 import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
+import messageTiming from "./message-timing.ts";
 import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } from "./subagent-observer.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
@@ -106,6 +107,10 @@ function normalizeShortcutKeys(value: string | string[] | undefined, fallback: s
 }
 
 export default function (pi: ExtensionAPI) {
+	// Kept in its own module so it can become a standalone package later, while
+	// loading automatically with pi-agents today (including legacy installs).
+	messageTiming(pi);
+
 	let agents: DiscoveredAgent[] = [];
 	/** Definitions after code-backed files and saved global/project overlays, before session drafts. */
 	let sourceAgents: DiscoveredAgent[] = [];

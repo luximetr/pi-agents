@@ -37,6 +37,7 @@ test("end to end: active agent blocks denied file-tool calls", async () => {
 		const pi: any = {
 			on: (name: string, handler: any) => handlers.set(name, handler),
 			registerTool: (tool: any) => registered.push(tool),
+			registerEntryRenderer: () => {},
 			registerFlag: () => {}, registerShortcut: () => {}, registerCommand: () => {},
 			getFlag: () => undefined, appendEntry: () => {},
 			getAllTools: () => [{ name: "read" }, { name: "bash" }, ...registered],
@@ -508,6 +509,7 @@ function bootExtension(root: string) {
 	const pi: any = {
 		on: (name: string, handler: any) => handlers.set(name, handler),
 		registerTool: (tool: any) => registered.push(tool),
+		registerEntryRenderer: () => {},
 		registerFlag: () => {}, registerShortcut: () => {}, registerCommand: () => {},
 		getFlag: () => undefined, appendEntry: () => {},
 		getAllTools: () => [{ name: "read" }, { name: "bash" }, ...registered],

@@ -9,5 +9,5 @@
     "allowImportingTsExtensions": true,
     "types": ["node"]
   },
-  "include": ["index.ts", "agents.ts", "mcp.ts", "ui.ts", ".pi-agents/**/*.ts", "test/**/*.ts"]
+  "include": ["index.ts", "agents.ts", "message-timing.ts", "mcp.ts", "ui.ts", ".pi-agents/**/*.ts", "test/**/*.ts"]
 }

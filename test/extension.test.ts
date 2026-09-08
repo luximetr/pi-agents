@@ -47,6 +47,7 @@ function boot(root: string, options?: {
 	const pi: any = {
 		on: (name: string, handler: any) => handlers.set(name, handler),
 		registerTool: (tool: any) => tools.set(tool.name, tool),
+		registerEntryRenderer: () => {},
 		registerFlag: () => {},
 		registerShortcut: () => {},
 		registerCommand: (name: string, command: any) => commands.set(name, command),

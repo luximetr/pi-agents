@@ -2,6 +2,8 @@
 
 Opencode-style agents for [pi](https://github.com/earendil-dev/pi): define agents **in code** and switch between them at any time. The active agent is always applied to your session — its tools are restricted and its system prompt is appended every turn. No agent selected = plain pi.
 
+The package also includes an independent message-timing module: every user message is followed by a dim `You · HH:MM:SS` label, every assistant turn is followed by `Assistant · HH:MM:SS`, the footer shows live elapsed time while Pi works, and a compact `took …` summary follows each completed task. These labels and summaries are TUI-only session entries and are never sent to the model. Pi does not expose native user/assistant message renderers (and its Markdown transformer provides a role but no message identity or timestamp), so the supported non-mutating layout places each label immediately after its message rather than inside the built-in bubble. The module lives in `message-timing.ts`, so it can be split into a standalone package later without coupling it to agent behavior.
+
 ## Install
 
 ### From GitHub (published) — recommended: global install
@@ -9,7 +11,7 @@ Opencode-style agents for [pi](https://github.com/earendil-dev/pi): define agent
 Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.3.2        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.3.3        # all projects (user scope)
 ```
 
 Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
@@ -20,7 +22,7 @@ To track the latest commit on `main` instead of a pinned release:
 pi install git:github.com/luximetr/pi-agents
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.3.2`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+To update an existing installation, run the same command with the desired ref (for example `@v0.3.3`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
 
 Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
 
