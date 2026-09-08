@@ -9,7 +9,7 @@ Opencode-style agents for [pi](https://github.com/earendil-dev/pi): define agent
 Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.2.9        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.3.0        # all projects (user scope)
 ```
 
 Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
@@ -20,7 +20,7 @@ To track the latest commit on `main` instead of a pinned release:
 pi install git:github.com/luximetr/pi-agents
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.2.9`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+To update an existing installation, run the same command with the desired ref (for example `@v0.3.0`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
 
 Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
 
@@ -91,6 +91,9 @@ ln -sf ../../agents.ts .pi/extensions/pi-agents/agents.ts
 ln -sf ../../mcp.ts .pi/extensions/pi-agents/mcp.ts
 ln -sf ../../ui.ts .pi/extensions/pi-agents/ui.ts
 ln -sf ../../subagents.ts .pi/extensions/pi-agents/subagents.ts
+ln -sf ../../subagent-observer.ts .pi/extensions/pi-agents/subagent-observer.ts
+ln -sf ../../subagent-transcript.ts .pi/extensions/pi-agents/subagent-transcript.ts
+ln -sf ../../subagent-explorer.ts .pi/extensions/pi-agents/subagent-explorer.ts
 ```
 
 Project-local extensions load only in **trusted** projects — pi will ask on first interactive start (or run `/trust`).
@@ -116,7 +119,7 @@ If the main checkout was never trusted, the normal pi trust prompt applies in th
 | Open Agent Studio / picker | `f7` (also accepts configured shortcuts) |
 | Edit or create an agent | In `f7`: select an agent and press `e`, or press `n` for a new JSON-backed agent |
 | Rotate to next agent | `f8` (cycles: plain pi → dev → doc → … → plain pi; also accepts configured shortcuts) |
-| Inspect running subagents | `f9` or `/subagents` |
+| Explore subagents and descendants (live + completed) | `f9` or `/subagents` |
 | Switch directly | `/agent dev`, `/agent none` |
 | Ask about the extension | `/agent:help <question>` (answered from the bundled guide) |
 | Dashboard / picker | `/agent` or `f7`; type to filter, use `Tab`/`←→` to inspect overview, tools, MCP, and prompt |
@@ -234,7 +237,17 @@ export default {
 
 This adds the `delegate` tool automatically. The active parent's system prompt also receives a concise roster of its allowed children (name, description, model, and deadline), so it can route work without guessing agent names. The child runs as a fresh, ephemeral `pi --mode rpc --no-session --agent <name>` session with the selected agent and returns its final answer to the parent, so the parent context stays small. When `model` is configured, the child is launched with `--model <value>`; otherwise Pi uses its normal default model selection. Model and timeout settings belong to the parent-to-child relationship, so different parents may configure the same child differently. Delegation is restricted to the declared allowlist and nested delegation is capped at four levels. Independent `delegate` calls in one response run in parallel. Set `PI_CODING_AGENT_BIN` if the `pi` executable is not the current process executable.
 
-While the parent waits, the delegation card shows the child's configured model (including a thinking-level suffix), and the footer shows the running-child count and the `f9` hint. Press `f9` (or run `/subagents`) to open the live dashboard: it shows all running children, each configured or actual model, the selected child's current phase/tool, task, recent RPC activity, cumulative usage, elapsed/remaining time, and stale warnings. Use `↑↓`/`j k` to switch children, `s` to steer, or `x` to stop. A manual interruption or deadline returns diagnostic context to the parent so it can choose another approach. Delegate tool output stays compact by default; use Pi's tool-expand key to view the complete Markdown result. Model-visible results are capped at Pi's standard 2,000-line/50 KB tool limit; oversized full output is saved to a private temporary file and linked from the result. The agent cannot choose its deadline at call time: configure `timeoutSeconds` on the parent's subagent entry. Omit it to run without a deadline.
+While the parent waits, the delegation card shows the child's configured model (including a thinking-level suffix). The footer counts active runs across the hierarchy and shows the `f9` hint. Press `f9` (or run `/subagents`) for **Agent Explorer**, a full-terminal overlay with a recursive run tree and live conversation pane. It includes grandchildren at every supported depth, unique run IDs for repeated agent names, configured/actual models, tasks, tool arguments/results, own usage, elapsed/remaining time, and stale warnings. Parents with active children show their delegation status rather than a misleading stale warning. Completed and failed runs stay selectable.
+
+- `↑↓` / `j k`: select runs in the tree. `←→`: collapse/expand or navigate parent/child.
+- `Enter`: focus the conversation at full width. `→`: dive into its first child; `←` / `Esc`: back. `Tab`: switch tree/conversation focus. Narrow terminals show one pane at a time.
+- `PgUp` / `PgDn`: scroll the conversation; `Home`: beginning; `End`: follow live output again. Scrolling up pauses auto-follow. Each run keeps its scroll position while navigating.
+- `e`: expand/collapse tool arguments and results. `s`: queue steering for the selected active run; its transcript reports RPC acceptance/rejection (acceptance is not immediate delivery).
+- `x`: confirm stopping the selected run **and its descendants**, not unrelated siblings. `Esc`: back/close; `f9`: close directly. Viewing or closing the explorer never interrupts a run or switches the main session.
+
+Observation uses a private local socket on macOS/Linux, independent of the child RPC pipes and model context; no Orca-specific integration is required. History is in memory for the current runtime: `/reload`, session replacement, and exit clear it. Each transcript retains up to 400 entries / 100,000 characters, with 16,000-character entry previews; up to 100 completed-run transcripts are retained alongside active runs. Omitted history is marked explicitly. Run metadata remains in the tree. Images appear as placeholders. No transcript files are written; observed tool output may contain sensitive content, so treat the viewer like the main chat.
+
+A manual interruption or deadline returns diagnostic context to the parent so it can choose another approach. Delegate tool output stays compact by default; use Pi's tool-expand key to view the complete Markdown result. Model-visible results are capped at Pi's standard 2,000-line/50 KB tool limit; oversized full output is saved to a private temporary file and linked from the result. The agent cannot choose its deadline at call time: configure `timeoutSeconds` on the parent's subagent entry. Omit it to run without a deadline.
 
 #### Typed tools
 

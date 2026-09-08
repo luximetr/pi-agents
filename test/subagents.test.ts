@@ -253,6 +253,7 @@ test("subagent inspector renders live state and confirms a manual stop", async (
 	assert.ok(inspectorText.includes("openai-codex/gpt-5.3-codex-spark:high"));
 	component.handleInput("x");
 	component.handleInput("y");
+	component.handleInput("\u001b");
 	await inspector;
 	assert.equal(stopped, true);
 });

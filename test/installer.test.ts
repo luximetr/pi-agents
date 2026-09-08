@@ -69,6 +69,16 @@ test("local installer passes -l and bundled samples rewrite repository imports",
 	}
 });
 
+test("legacy installer includes Agent Explorer modules", async () => {
+	const f = await fixture();
+	try {
+		await execFileAsync(process.execPath, [installer, "install", f.target, "--legacy"], { env: f.env });
+		for (const file of ["subagent-observer.ts", "subagent-transcript.ts", "subagent-explorer.ts"]) {
+			assert.equal(await realpath(path.join(f.target, ".pi", "extensions", "pi-agents", file)), path.join(await realpath(repoRoot), file));
+		}
+	} finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
 test("installer help does not invoke pi or require a target repository", async () => {
 	const f = await fixture();
 	try {

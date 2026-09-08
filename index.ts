@@ -8,6 +8,7 @@ import type { KeyId } from "@earendil-works/pi-tui";
 import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
+import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } from "./subagent-observer.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
 import { AgentField, AgentScope, AuthoringMethod, CREATE_MENU, SCOPE_MENU, selectMenu } from "./studio-menu.ts";
@@ -25,7 +26,6 @@ import {
 	formatArgs,
 	SubagentStoppedError,
 	runSubagent,
-	type RunningSubagentHandle,
 	type SubagentUsage,
 } from "./subagents.ts";
 
@@ -120,7 +120,10 @@ export default function (pi: ExtensionAPI) {
 	let persistedName: string | undefined;
 	let turnSubagentStats: SubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 	let sessionSubagentStats: SubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
-	const runningSubagents = new Map<string, RunningSubagentHandle>();
+	let observerContext: ExtensionContext | undefined;
+	const observer = new SubagentObserver(process.env[OBSERVER_ENV], () => {
+		if (observerContext) refreshStatus(observerContext);
+	});
 
 	function formatSubagentUsage(stats: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }): string {
 		const formatTokens = (count: number) => {
@@ -145,7 +148,9 @@ export default function (pi: ExtensionAPI) {
 
 	function sessionSubagentStatsLine(): string | undefined {
 		const parts: string[] = [];
-		if (runningSubagents.size > 0) parts.push(`${runningSubagents.size} subagent${runningSubagents.size === 1 ? "" : "s"} running · f9 inspect`);
+		const runs = observer.handles().map(handle => handle.snapshot());
+		const running = runs.filter(isActiveRun).length;
+		if (runs.length) parts.push(`${running} active / ${runs.length} runs · f9 explorer`);
 		if (sessionSubagentStats.calls > 0) {
 			const usage = formatSubagentUsage(sessionSubagentStats);
 			parts.push(`${sessionSubagentStats.calls} call${sessionSubagentStats.calls === 1 ? "" : "s"}${usage ? ` · ${usage}` : ""}`);
@@ -323,6 +328,11 @@ export default function (pi: ExtensionAPI) {
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
 			const timeoutSeconds = subagent.timeoutSeconds;
 			try {
+				observerContext = ctx;
+				let observerEndpoint: string | undefined;
+				try { observerEndpoint = await observer.start(); }
+				catch (error) { ctx.ui.notify(`Agent Explorer connection unavailable: ${error instanceof Error ? error.message : String(error)}. Direct runs remain inspectable.`, "warning"); }
+				const runId = newRunId();
 				const startedAt = Date.now();
 				turnSubagentStats.calls++;
 				sessionSubagentStats.calls++;
@@ -384,13 +394,15 @@ export default function (pi: ExtensionAPI) {
 				};
 				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
 					model: subagent.model,
-					id: String(toolCallId),
+					id: runId,
+					observerEndpoint,
+					parentRunId: process.env[RUN_ID_ENV],
+					onSnapshot: snapshot => observer.publish(snapshot),
 					timeoutSeconds,
 					gracefulStopSeconds: config.subagents?.gracefulStopSeconds ?? DEFAULT_GRACEFUL_STOP_SECONDS,
 					runtimeAgentOverrides: Object.fromEntries(studioDrafts),
 					onHandle: (handle) => {
-						if (handle) runningSubagents.set(handle.id, handle);
-						else runningSubagents.delete(String(toolCallId));
+						if (handle) observer.attach(handle);
 						refreshStatus(ctx);
 					},
 					onProgress: (event) => {
@@ -900,15 +912,16 @@ export default function (pi: ExtensionAPI) {
 	async function inspectSubagents(ctx: ExtensionContext) {
 		await showSubagentInspector(
 			ctx,
-			() => [...runningSubagents.values()],
+			() => observer.handles(),
 			config.subagents?.staleWarningMinutes ?? DEFAULT_STALE_WARNING_MINUTES,
+			"Main session",
 		);
 	}
 
-	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Inspect running subagents", inspectSubagents);
+	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Explore delegated agent runs", inspectSubagents);
 
 	pi.registerCommand("subagents", {
-		description: "Inspect running delegated subagents",
+		description: "Explore live and completed delegated agent runs",
 		handler: async (_args, ctx) => inspectSubagents(ctx),
 	});
 
@@ -1012,7 +1025,7 @@ export default function (pi: ExtensionAPI) {
 		// defaults + global config registered at load time.
 		registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.select, DEFAULT_SELECT_SHORTCUT), "Select agent", async (sc) => { await showPicker(sc); });
 		registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.rotate, DEFAULT_ROTATE_SHORTCUT), "Rotate agent", async (sc) => { await rotateAgent(sc); });
-		registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Inspect running subagents", inspectSubagents);
+		registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Explore delegated agent runs", inspectSubagents);
 
 		// Restore this session first. A newly-created session has no entries, so
 		// inherit the selection from the session it replaced (the OpenCode-style
@@ -1077,8 +1090,8 @@ export default function (pi: ExtensionAPI) {
 				drafts: Object.fromEntries(studioDrafts),
 			});
 		}
-		for (const handle of runningSubagents.values()) handle.stop("session");
-		runningSubagents.clear();
+		observerContext = undefined;
+		await observer.shutdown(config.subagents?.gracefulStopSeconds ?? DEFAULT_GRACEFUL_STOP_SECONDS);
 		await mcpManager.disconnectAll();
 	});
 
