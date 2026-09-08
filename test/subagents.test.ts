@@ -8,6 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import { discoverAgents, findMainCheckoutRoot } from "../agents.ts";
 import extension, { matchesDeniedPath } from "../index.ts";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
 import { renderDelegateCall, renderDelegateResult, showSubagentInspector } from "../ui.ts";
 
@@ -193,8 +194,11 @@ test("nested delegation fails visibly when a resumable participant is already bu
 		for (let i = 0; i < 200 && !existsSync(started); i++) await new Promise(resolve => setTimeout(resolve, 10));
 		assert.ok(existsSync(started));
 		process.env.PI_AGENTS_SUBAGENT_DEPTH = "1";
-		await assert.rejects(runSubagent("B", "nested A to B", root, noAbort, options), /already busy; nested delegation refuses to queue/);
+		const nested = runSubagent("B", "nested A to B", root, noAbort, options);
+		// runSubagent captures inherited depth synchronously; restore the process
+		// environment before awaiting so concurrent node:test cases cannot inherit it.
 		delete process.env.PI_AGENTS_SUBAGENT_DEPTH;
+		await assert.rejects(nested, /already busy; nested delegation refuses to queue/);
 		assert.equal(await topLevel, "done");
 	} finally {
 		if (previousDepth === undefined) delete process.env.PI_AGENTS_SUBAGENT_DEPTH;
@@ -296,18 +300,26 @@ test("resumable sessions reject malformed, truncated, and broken JSONL before la
 		const options = { executable: fakePi, lifecycle: "resumable" as const, rootSessionId, participantIdentity, participantSessionDir: sessionDir };
 		const header = JSON.stringify({ type: "session", version: 3, id: "session-id", timestamp: new Date().toISOString(), cwd: root });
 		const first = JSON.stringify({ type: "message", id: "a1b2c3d4", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: "hello", timestamp: Date.now() } });
-		await writeFile(sessionFile, `${header}\n${first}\n`);
+		const sdkDir = path.join(root, "sdk-session");
+		const sdkSession = SessionManager.create(root, sdkDir);
+		sdkSession.appendMessage({ role: "assistant", content: "normal SDK record", timestamp: Date.now() } as any);
+		sdkSession.appendCustomEntry("normal-sdk-record", { accepted: true });
+		const sdkContent = readFileSync(sdkSession.getSessionFile()!, "utf8");
+		assert.ok(sdkContent.endsWith("\n"), "installed SDK writes LF-framed records");
+		await writeFile(sessionFile, sdkContent);
 		assert.equal(await runSubagent("worker", "valid", root, noAbort, options), "ok");
 		assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 1);
 
 		for (const [name, content, pattern] of [
 			["malformed", `${header}\n{not-json}\n`, /malformed JSONL at line 2/],
-			["truncated", `${header}\n{\"type\":\"message\"`, /malformed JSONL at line 2/],
+			["truncated", `${header}\n{\"type\":\"message\"\n`, /malformed JSONL at line 2/],
+			["missing final LF", `${header}\n${first}`, /missing its final JSONL newline \(LF\)/],
 			["broken", `${header}\n${JSON.stringify({ type: "message", id: "deadbeef", parentId: "missing", timestamp: new Date().toISOString(), message: { role: "user", content: "lost" } })}\n`, /broken tree history at line 2/],
 			["missing context", `${header}\n${JSON.stringify({ type: "message", id: "deadbeef", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: null } })}\n`, /invalid message at line 2/],
 		] as const) {
 			await writeFile(sessionFile, content);
 			await assert.rejects(runSubagent("worker", name, root, noAbort, options), pattern);
+			assert.equal(readFileSync(sessionFile, "utf8"), content, "validation never mutates participant history");
 		}
 		assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 1, "invalid history never reaches Pi's permissive loader");
 	} finally {

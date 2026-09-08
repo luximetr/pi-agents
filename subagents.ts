@@ -222,8 +222,11 @@ async function validateParticipantSession(sessionFile: string): Promise<void> {
 	try { content = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
 	catch { throw new Error(`resumable participant session is not valid UTF-8: ${sessionFile}`); }
 	if (!content) throw new Error(`resumable participant session is empty: ${sessionFile}`);
+	// Pi's installed SDK appends complete records with LF framing. Without the
+	// final LF its next append joins two JSON objects into one corrupt record.
+	if (!content.endsWith("\n")) throw new Error(`resumable participant session is missing its final JSONL newline (LF): ${sessionFile}`);
 	const physicalLines = content.split("\n");
-	if (physicalLines.at(-1) === "") physicalLines.pop();
+	physicalLines.pop();
 	if (!physicalLines.length || physicalLines.some(line => !line.trim())) {
 		throw new Error(`resumable participant session contains an empty JSONL line: ${sessionFile}`);
 	}
@@ -283,10 +286,10 @@ function runSubagentProcess(
 	cwd: string,
 	signal: AbortSignal,
 	options: RunSubagentOptions = {},
-	timing?: { startedAt: number; deadlineAt?: number },
+	timing?: { startedAt: number; deadlineAt?: number; depth?: number },
 ): Promise<string> {
 	return new Promise((resolve, reject) => {
-		const depth = Number(process.env.PI_AGENTS_SUBAGENT_DEPTH ?? "0");
+		const depth = timing?.depth ?? Number(process.env.PI_AGENTS_SUBAGENT_DEPTH ?? "0");
 		if (depth >= MAX_SUBAGENT_DEPTH) {
 			reject(new Error(`maximum subagent depth (${MAX_SUBAGENT_DEPTH}) reached`));
 			return;
@@ -640,58 +643,105 @@ export async function runSubagent(
 	if (!options.rootSessionId || !options.participantIdentity) {
 		throw new Error("resumable subagent requires rootSessionId and participantIdentity");
 	}
-	const stoppedWhileQueued = (reason: ParticipantWaitFailure): SubagentStoppedError => {
-		const now = Date.now();
-		const timedOut = reason === "timeout";
-		return new SubagentStoppedError(timedOut ? "timeout" : "parent", {
-			id: options.id ?? `subagent-${nextSubagentId++}`,
-			parentRunId: options.parentRunId,
-			agent: agentName,
-			task,
-			model: options.model?.trim() || undefined,
-			startedAt,
-			lastActivityAt: startedAt,
-			deadlineAt,
-			endedAt: now,
-			status: "failed",
-			phase: timedOut ? "deadline exceeded while queued for resumable participant" : "cancelled while queued for resumable participant",
-			partialText: "",
-			recentEvents: [timedOut ? "⏱ deadline reached while queued" : "■ cancellation requested while queued"],
-			stopReason: timedOut ? "timeout" : "parent",
-		});
+	const id = options.id ?? `subagent-${nextSubagentId++}`;
+	const delegationDepth = Number(process.env.PI_AGENTS_SUBAGENT_DEPTH ?? "0");
+	const state: SubagentSnapshot = {
+		id, parentRunId: options.parentRunId, agent: agentName, task,
+		model: options.model?.trim() || undefined,
+		startedAt, lastActivityAt: startedAt, deadlineAt,
+		status: "running", phase: "queued for resumable participant",
+		partialText: "", recentEvents: ["… waiting for resumable participant"],
 	};
-	const key = participantKey(options.rootSessionId, options.participantIdentity);
-	const ancestry = process.env[RESUMABLE_ANCESTRY_ENV]?.split(",").filter(Boolean) ?? [];
-	if (ancestry.includes(key)) {
-		throw new Error(`resumable delegation cycle detected for agent "${agentName}"; refusing to wait on its own participant`);
+	let childHandle: RunningSubagentHandle | undefined;
+	let requestedStop: SubagentStopReason | undefined;
+	const waitController = new AbortController();
+	const snapshot = (): SubagentSnapshot => childHandle?.snapshot() ?? {
+		...state,
+		task: state.task.length > 16_000 ? `${state.task.slice(0, 16_000)}\n[Task preview truncated]` : state.task,
+		recentEvents: [...state.recentEvents],
+	};
+	const publish = () => {
+		try { options.onSnapshot?.(snapshot()); }
+		catch { /* Observation must never affect delegated execution. */ }
+	};
+	const requestStop = (reason: SubagentStopReason = "user") => {
+		if (childHandle) { childHandle.stop(reason); return; }
+		if (requestedStop || state.status === "failed") return;
+		requestedStop = reason;
+		state.stopReason = reason;
+		state.status = "stopping";
+		state.phase = reason === "timeout" ? "deadline exceeded while queued for resumable participant" : "stopping while queued for resumable participant";
+		state.lastActivityAt = Date.now();
+		state.recentEvents.push(reason === "timeout" ? "⏱ deadline reached while queued" : reason === "user" ? "■ stop requested by user while queued" : `■ ${reason} cancellation requested while queued`);
+		publish();
+		waitController.abort();
+	};
+	const handle: RunningSubagentHandle = { id, snapshot, stop: requestStop, steer: message => childHandle?.steer(message) ?? false };
+	const finishQueued = (reason: SubagentStopReason): SubagentStoppedError => {
+		state.stopReason = reason;
+		state.status = "failed";
+		state.endedAt = state.lastActivityAt = Date.now();
+		state.phase = reason === "timeout" ? "deadline exceeded while queued for resumable participant" : "cancelled while queued for resumable participant";
+		if (!requestedStop) state.recentEvents.push(reason === "timeout" ? "⏱ deadline reached while queued" : `■ ${reason} cancellation requested while queued`);
+		publish();
+		return new SubagentStoppedError(reason, snapshot());
+	};
+	const failQueued = (error: unknown) => {
+		state.status = "failed";
+		state.phase = "failed before child launch";
+		state.endedAt = state.lastActivityAt = Date.now();
+		state.recentEvents.push(`✗ ${error instanceof Error ? error.message : String(error)}`);
+		publish();
+	};
+
+	options.onHandle?.(handle);
+	publish();
+	const parentAbort = () => requestStop("parent");
+	signal.addEventListener("abort", parentAbort, { once: true });
+	if (signal.aborted) parentAbort();
+	let deadlineTimer: NodeJS.Timeout | undefined;
+	if (deadlineAt !== undefined) {
+		deadlineTimer = setTimeout(() => requestStop("timeout"), Math.max(0, deadlineAt - Date.now()));
+		deadlineTimer.unref?.();
 	}
-	const sessionDir = options.participantSessionDir ?? path.join(getAgentDir(), "pi-agents-subagent-sessions");
-	// Creating this boundary before launch makes storage failures explicit. Never
-	// fall back to --no-session, which would silently discard existing context.
-	await mkdir(sessionDir, { recursive: true, mode: 0o700 });
-	// mkdir's mode does not repair an existing directory. Participant transcripts
-	// are sensitive, so narrow both existing and newly created boundaries.
-	await chmod(sessionDir, 0o700);
-	const lockDir = path.join(sessionDir, ".locks");
-	await mkdir(lockDir, { recursive: true, mode: 0o700 });
-	await chmod(lockDir, 0o700);
-	let lock: ParticipantLock;
+	let lock: ParticipantLock | undefined;
+	let spawned = false;
 	try {
-		// A nested waiter can form A→B/B→A across concurrently started roots even
-		// though neither target appears in its own ancestry. Reject nested contention;
-		// independent top-level calls retain FIFO-ish polling serialization.
-		lock = await acquireParticipantLock(path.join(lockDir, key), signal, deadlineAt, Number(process.env.PI_AGENTS_SUBAGENT_DEPTH ?? "0") > 0);
+		const key = participantKey(options.rootSessionId, options.participantIdentity);
+		const ancestry = process.env[RESUMABLE_ANCESTRY_ENV]?.split(",").filter(Boolean) ?? [];
+		if (ancestry.includes(key)) throw new Error(`resumable delegation cycle detected for agent "${agentName}"; refusing to wait on its own participant`);
+		const sessionDir = options.participantSessionDir ?? path.join(getAgentDir(), "pi-agents-subagent-sessions");
+		// Never fall back to --no-session, which would silently discard context.
+		await mkdir(sessionDir, { recursive: true, mode: 0o700 });
+		await chmod(sessionDir, 0o700);
+		const lockDir = path.join(sessionDir, ".locks");
+		await mkdir(lockDir, { recursive: true, mode: 0o700 });
+		await chmod(lockDir, 0o700);
+		// Nested contention is rejected to avoid cross-root A→B/B→A deadlocks.
+		lock = await acquireParticipantLock(path.join(lockDir, key), waitController.signal, deadlineAt, delegationDepth > 0);
+		await validateParticipantSession(path.join(sessionDir, `${key}.jsonl`));
+		if (requestedStop) throw finishQueued(requestedStop);
+		if (signal.aborted) throw finishQueued("parent");
+		if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw finishQueued("timeout");
+
+		if (deadlineTimer) clearTimeout(deadlineTimer);
+		signal.removeEventListener("abort", parentAbort);
+		return await runSubagentProcess(agentName, task, cwd, signal, {
+			...options,
+			id,
+			onHandle: value => {
+				if (value) { childHandle = value; spawned = true; }
+			},
+		}, { startedAt, deadlineAt, depth: delegationDepth });
 	} catch (error) {
-		if (error instanceof ParticipantWaitError) throw stoppedWhileQueued(error.reason);
+		if (error instanceof SubagentStoppedError) throw error;
+		if (error instanceof ParticipantWaitError) throw finishQueued(error.reason === "timeout" ? "timeout" : requestedStop ?? "parent");
+		if (!spawned) failQueued(error);
 		throw error;
-	}
-	try {
-		const sessionFile = path.join(sessionDir, `${key}.jsonl`);
-		await validateParticipantSession(sessionFile);
-		if (signal.aborted) throw stoppedWhileQueued("cancelled");
-		if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw stoppedWhileQueued("timeout");
-		return await runSubagentProcess(agentName, task, cwd, signal, options, { startedAt, deadlineAt });
 	} finally {
-		await releaseParticipantLock(lock);
+		if (deadlineTimer) clearTimeout(deadlineTimer);
+		signal.removeEventListener("abort", parentAbort);
+		if (lock) await releaseParticipantLock(lock);
+		options.onHandle?.(undefined);
 	}
 }

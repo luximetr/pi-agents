@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +9,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { SubagentObserver, isActiveRun, newRunId } from "../subagent-observer.ts";
 import { buildRunTree, showSubagentInspector } from "../subagent-explorer.ts";
 import { MAX_TRANSCRIPT_CHARS, SubagentTranscript } from "../subagent-transcript.ts";
-import { runSubagent, type RunningSubagentHandle, type SubagentSnapshot } from "../subagents.ts";
+import { SubagentStoppedError, runSubagent, type RunningSubagentHandle, type SubagentSnapshot } from "../subagents.ts";
 
 const pause = (ms = 25) => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate: () => boolean, timeout = 8000) {
@@ -233,6 +234,109 @@ test("explorer supports bounded wide/narrow layouts, drill-down/back, scrolling 
 		assert.ok(component.render(12).length <= height);
 	} finally { component.handleInput("\u001b[20~"); }
 	await promise;
+});
+
+test("resumable queues are observable, controllable, retained, and transition under one run id", async () => {
+	const directory = await mkdtemp(path.join(os.tmpdir(), "pi-explorer-queue-"));
+	const executable = path.join(directory, "fake-pi.mjs");
+	const starts = path.join(directory, "starts.log");
+	const observer = new SubagentObserver();
+	const running: Promise<string>[] = [];
+	try {
+		await observer.start();
+		await writeFile(executable, `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+let buffer = "";
+let task = "";
+let finished = false;
+const finish = text => {
+ if (finished) return;
+ finished = true;
+ process.stdout.write(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text}]}}) + "\\n");
+ process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
+};
+process.stdin.on("data", chunk => {
+ buffer += String(chunk);
+ let newline;
+ while ((newline = buffer.indexOf("\\n")) !== -1) {
+  const line = buffer.slice(0, newline);
+  buffer = buffer.slice(newline + 1);
+  if (!line.trim()) continue;
+  const command = JSON.parse(line);
+  if (command.type === "prompt") {
+   task = command.message;
+   appendFileSync(${JSON.stringify(starts)}, task + "\\n");
+   setTimeout(() => finish("done:" + task), task.startsWith("holder") ? 180 : 500);
+  } else if (command.type === "steer") {
+   finish("done:" + task + ";steer:" + command.message);
+  }
+ }
+});`);
+		await chmod(executable, 0o755);
+		const base = { executable, lifecycle: "resumable" as const, rootSessionId: "root", participantIdentity: "worker", participantSessionDir: path.join(directory, "sessions") };
+		const startHolder = (task: string) => {
+			const promise = runSubagent("worker", task, directory, new AbortController().signal, base);
+			running.push(promise);
+			return promise;
+		};
+		const waitForStarts = (count: number) => until(() => {
+			try { return readFileSync(starts, "utf8").trim().split("\n").length >= count; } catch { return false; }
+		});
+		const observe = (id: string, task: string, extra: Record<string, unknown> = {}, owner = observer) => runSubagent("worker", task, directory, new AbortController().signal, {
+			...base, ...extra, id,
+			onHandle: handle => { if (handle) owner.attach(handle); },
+			onSnapshot: value => owner.publish(value),
+		});
+
+		const holder1 = startHolder("holder user");
+		await waitForStarts(1);
+		const userRun = observe("queued-user", "queued user");
+		await until(() => observer.handles().some(value => value.id === "queued-user" && value.snapshot().phase.includes("queued")));
+		const queuedUser = observer.handles().find(value => value.id === "queued-user")!;
+		assert.equal(queuedUser.steer("not yet"), false);
+		queuedUser.stop("user");
+		await assert.rejects(userRun, (error: unknown) => error instanceof SubagentStoppedError && error.reason === "user");
+		assert.equal(readFileSync(starts, "utf8").trim().split("\n").length, 1, "individual cancellation does not launch the waiter");
+		assert.equal(await holder1, "done:holder user", "individual cancellation does not stop the holder");
+
+		const holder2 = startHolder("holder timeout");
+		await waitForStarts(2);
+		await assert.rejects(observe("queued-timeout", "queued timeout", { timeoutSeconds: 0.05 }), (error: unknown) => error instanceof SubagentStoppedError && error.reason === "timeout");
+		const timedOut = observer.handles().find(value => value.id === "queued-timeout")!.snapshot();
+		assert.equal(timedOut.stopReason, "timeout");
+		assert.ok(timedOut.recentEvents.some(event => event.includes("deadline reached while queued")));
+		await holder2;
+
+		const holder3 = startHolder("holder transition");
+		await waitForStarts(3);
+		const transitionedRun = observe("stable-transition-id", "spawn after queue");
+		await until(() => observer.handles().some(value => value.id === "stable-transition-id" && value.snapshot().phase.includes("queued")));
+		const transitioning = observer.handles().find(value => value.id === "stable-transition-id")!;
+		assert.equal(transitioning.steer("not while queued"), false);
+		await waitForStarts(4);
+		assert.equal(transitioning.steer("after spawn"), true);
+		assert.equal(await transitionedRun, "done:spawn after queue;steer:after spawn");
+		const transitioned = observer.handles().find(value => value.id === "stable-transition-id")!.snapshot();
+		assert.equal(transitioned.status, "finished");
+		assert.equal(transitioned.id, "stable-transition-id");
+		await holder3;
+
+		const holder4 = startHolder("holder shutdown");
+		await waitForStarts(5);
+		const shutdownObserver = new SubagentObserver();
+		await shutdownObserver.start();
+		const shutdownRun = observe("queued-shutdown", "queued shutdown", {}, shutdownObserver);
+		await until(() => shutdownObserver.handles().some(value => value.id === "queued-shutdown"));
+		const shutdownRejected = assert.rejects(shutdownRun, (error: unknown) => error instanceof SubagentStoppedError && error.reason === "session");
+		await shutdownObserver.shutdown(0.05);
+		await shutdownRejected;
+		assert.equal(shutdownObserver.handles().find(value => value.id === "queued-shutdown")!.snapshot().stopReason, "session");
+		await holder4;
+	} finally {
+		await observer.shutdown(0.1);
+		await Promise.allSettled(running);
+		await rm(directory, { recursive: true, force: true });
+	}
 });
 
 test("real nested processes publish grandchildren, accept steering and retain final transcripts", async () => {
