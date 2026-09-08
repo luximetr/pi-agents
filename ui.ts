@@ -106,9 +106,6 @@ export interface DelegateViewDetails {
 	statsLine?: string;
 	progress?: boolean;
 	phase?: string;
-	branch?: string;
-	worktreePath?: string;
-	useWorktree?: boolean;
 	outputTruncated?: boolean;
 	fullOutputPath?: string;
 }
@@ -132,14 +129,13 @@ function expandHint(): string {
 }
 
 /** Compact, scannable header for a delegation tool call. */
-export function renderDelegateCall(args: { agent?: unknown; task?: unknown; useWorktree?: unknown; model?: unknown }, theme: Theme): Text {
+export function renderDelegateCall(args: { agent?: unknown; task?: unknown; model?: unknown }, theme: Theme): Text {
 	const agent = typeof args.agent === "string" && args.agent.trim() ? args.agent.trim() : "…";
 	const task = typeof args.task === "string" && args.task.trim() ? args.task.trim() : "Waiting for task";
-	const mode = args.useWorktree === true ? "isolated worktree" : "current checkout";
 	const model = typeof args.model === "string" && args.model.trim() ? args.model.trim() : "default model";
 	return new Text(
 		`${theme.fg("toolTitle", theme.bold("delegate"))} ${theme.fg("muted", "→")} ${theme.fg("accent", agent)}`
-		+ ` ${theme.fg("dim", `· ${model} · ${mode}`)}`
+		+ ` ${theme.fg("dim", `· ${model}`)}`
 		+ `\n${theme.fg("dim", task)}`,
 		0,
 		0,
@@ -175,12 +171,6 @@ export function renderDelegateResult(
 	if (status === "completed") {
 		const prefix = `Result from ${agent}:\n\n`;
 		if (body.startsWith(prefix)) body = body.slice(prefix.length);
-		if (details.branch && details.worktreePath) {
-			const suffix = `\n\nBranch: ${details.branch}\nWorktree: ${details.worktreePath}`;
-			if (body.endsWith(suffix)) body = body.slice(0, -suffix.length);
-		}
-	} else if (details.worktreePath) {
-		body = body.replace(`\nWorktree preserved at: ${details.worktreePath}`, "");
 	}
 	if (details.outputTruncated) {
 		const noticeStart = body.lastIndexOf("\n\n[Output truncated:");
@@ -206,15 +196,6 @@ export function renderDelegateResult(
 			0,
 			0,
 		));
-	}
-	if (details.worktreePath) {
-		container.addChild(new Text(
-			theme.fg("muted", status === "completed" ? "Worktree retained: " : "Worktree preserved: ")
-			+ theme.fg("accent", details.worktreePath),
-			0,
-			0,
-		));
-		if (details.branch) container.addChild(new Text(theme.fg("dim", `Branch: ${details.branch}`), 0, 0));
 	}
 	return container;
 }
@@ -250,7 +231,7 @@ export function showSubagentInspector(
 ): Promise<void> {
 	const initial = getHandles();
 	if (initial.length === 0) {
-		ctx.ui.notify("No subagents are running. Retained worktrees: /subagents worktrees", "info");
+		ctx.ui.notify("No subagents are running.", "info");
 		return Promise.resolve();
 	}
 
@@ -381,149 +362,6 @@ export function showSubagentInspector(
 			},
 		};
 	}, { overlay: true, overlayOptions: { width: "85%", minWidth: 54, maxHeight: "85%", anchor: "center", margin: 1 } });
-}
-
-/** One row of the retained-worktree manager (pre-formatted for display). */
-export interface WorktreeViewItem {
-	branch: string;
-	/** Checkout path, when it still exists. */
-	path?: string;
-	agent: string;
-	ageLabel: string;
-	/** undefined = unknowable (directory missing). */
-	dirty: boolean | undefined;
-	/** Branch holds commits not merged into the main checkout's HEAD. */
-	unmerged: boolean;
-	/** Manifest record whose directory is gone. */
-	stale: boolean;
-	status?: string;
-}
-
-export interface WorktreeManagerActions {
-	/** Delete one worktree; returns a human-readable outcome message. */
-	remove: (item: WorktreeViewItem) => Promise<string> | string;
-	/** Prune everything eligible under the retention policy; returns an outcome message. */
-	prune: () => Promise<string> | string;
-}
-
-/** Browse and garbage-collect retained subagent worktrees (`/subagents worktrees`). */
-export function showWorktreeManager(
-	ctx: ExtensionContext,
-	load: () => { baseDir: string; items: WorktreeViewItem[] },
-	actions: WorktreeManagerActions,
-): Promise<void> {
-	if (load().items.length === 0) {
-		ctx.ui.notify("No retained subagent worktrees.", "info");
-		return Promise.resolve();
-	}
-
-	return ctx.ui.custom<void>((tui, theme, _kb, done) => {
-		const first = load().items[0];
-		let selectedBranch = first.branch;
-		let mode: "normal" | "confirm-delete" | "confirm-prune" | "busy" = "normal";
-		let message = "";
-		const timer = setInterval(() => tui.requestRender(), 1000);
-		timer.unref?.();
-
-		const run = async (action: () => Promise<string> | string) => {
-			mode = "busy";
-			tui.requestRender();
-			try {
-				message = await action();
-			} catch (err) {
-				message = err instanceof Error ? err.message : String(err);
-			}
-			const remaining = load().items;
-			if (remaining.length === 0) {
-				clearInterval(timer);
-				done(undefined);
-				return;
-			}
-			if (!remaining.some((item) => item.branch === selectedBranch)) selectedBranch = remaining[0].branch;
-			mode = "normal";
-			tui.requestRender();
-		};
-
-		return {
-			get focused() { return false; },
-			set focused(_value: boolean) {},
-			render(width: number) {
-				const snapshot = load();
-				const items = snapshot.items;
-				const selected = items.find((item) => item.branch === selectedBranch) ?? items[0];
-				const border = theme.fg("borderAccent", "─".repeat(Math.max(1, width)));
-				const lines: string[] = [
-					border,
-					theme.fg("accent", theme.bold(`Retained Subagent Worktrees (${items.length})`)),
-					theme.fg("dim", snapshot.baseDir),
-					"",
-				];
-				for (const item of items) {
-					const marker = item.stale ? "!" : item.dirty ? "●" : "○";
-					const coloredMarker = item.stale || item.dirty ? theme.fg("warning", marker) : theme.fg("muted", marker);
-					const meta = [item.agent, item.ageLabel, item.status, item.unmerged ? "unmerged" : undefined, item.dirty === true ? "dirty" : undefined, item.stale ? "missing dir" : undefined]
-						.filter(Boolean).join(" · ");
-					const prefix = selected && item.branch === selected.branch ? theme.fg("accent", "› ") : "  ";
-					lines.push(`${prefix}${coloredMarker} ${item.branch}  ${theme.fg("dim", meta)}`);
-				}
-				if (selected) {
-					const safety = selected.dirty
-						? theme.fg("warning", "Protected: uncommitted changes (cannot delete)")
-						: selected.unmerged
-							? theme.fg("warning", "Checkout can be removed; unmerged branch will be kept")
-							: theme.fg("muted", "Safe to remove checkout and merged branch");
-					lines.push("", theme.fg("muted", "Selected"), `  ${theme.fg("accent", selected.branch)}`);
-					if (selected.path) lines.push(`  ${theme.fg("dim", selected.path)}`);
-					lines.push(`  ${safety}`);
-				}
-				lines.push("");
-				if (message) lines.push(theme.fg("muted", message), "");
-				switch (mode) {
-					case "confirm-delete": lines.push(theme.fg("warning", "Delete this worktree? Unmerged branches are kept · y confirm · n/esc cancel")); break;
-					case "confirm-prune": lines.push(theme.fg("warning", "Prune all clean worktrees past retention? y confirm · n/esc cancel")); break;
-					case "busy": lines.push(theme.fg("muted", "Working…")); break;
-					default: lines.push(theme.fg("dim", "↑↓/jk select · d delete · p prune past retention · esc close"));
-				}
-				lines.push(border);
-				return lines.map((line) => truncateToWidth(line, width));
-			},
-			invalidate() {},
-			dispose() { clearInterval(timer); },
-			handleInput(data: string) {
-				if (mode === "busy") return;
-				if (mode === "confirm-delete") {
-					if (data.toLowerCase() === "y") {
-						const item = load().items.find((entry) => entry.branch === selectedBranch);
-						if (item) void run(() => actions.remove(item));
-						else mode = "normal";
-					} else if (data.toLowerCase() === "n" || matchesKey(data, Key.escape)) mode = "normal";
-					tui.requestRender();
-					return;
-				}
-				if (mode === "confirm-prune") {
-					if (data.toLowerCase() === "y") void run(() => actions.prune());
-					else if (data.toLowerCase() === "n" || matchesKey(data, Key.escape)) mode = "normal";
-					tui.requestRender();
-					return;
-				}
-				if (matchesKey(data, Key.escape)) {
-					done(undefined);
-				} else if (data.toLowerCase() === "d") {
-					const item = load().items.find((entry) => entry.branch === selectedBranch);
-					if (item?.dirty) message = "This worktree is protected because it has uncommitted changes.";
-					else mode = "confirm-delete";
-				}
-				else if (data.toLowerCase() === "p") mode = "confirm-prune";
-				else if (matchesKey(data, Key.up) || matchesKey(data, Key.down) || data.toLowerCase() === "k" || data.toLowerCase() === "j") {
-					const items = load().items;
-					const index = Math.max(0, items.findIndex((item) => item.branch === selectedBranch));
-					const offset = matchesKey(data, Key.up) || data.toLowerCase() === "k" ? -1 : 1;
-					if (items.length > 0) selectedBranch = items[(index + offset + items.length) % items.length].branch;
-				}
-				tui.requestRender();
-			},
-		};
-	}, { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%", anchor: "center", margin: 1 } });
 }
 
 export interface AgentSelectorOptions {

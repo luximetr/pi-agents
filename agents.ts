@@ -175,25 +175,12 @@ export interface PiAgentsConfig {
 		rotate?: string | string[];
 		inspect?: string | string[];
 	};
-	/** Runtime limits, worktree setup, retention, and inspector diagnostics for delegated subagents. */
+	/** Runtime limits and inspector diagnostics for delegated subagents. */
 	subagents?: {
 		/** Highlight a running child after this many minutes without RPC activity. */
 		staleWarningMinutes?: number;
 		/** Grace period before escalating RPC abort to SIGTERM/SIGKILL. */
 		gracefulStopSeconds?: number;
-		/** Provisioning applied when delegate enables useWorktree. */
-		worktree?: {
-			/** Checkout parent directory; relative paths resolve from the repository root. */
-			baseDir?: string;
-			/** Copy .env and .env.* files found beside tracked files. Defaults to true. */
-			copyEnvFiles?: boolean;
-			/** Extra repository-relative files or directories copied from the source checkout. */
-			copyFiles?: string[];
-			/** Shell command run at the worktree root before spawning the child. */
-			setupCommand?: string;
-			/** Auto-prune clean retained worktrees idle longer than this many days at session start (0 disables). Default 7. */
-			retentionDays?: number;
-		};
 	};
 	/**
 	 * MCP servers, keyed by name. Either a stdio server (`command`+`args`,
@@ -603,7 +590,6 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 		const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8")) as Partial<PiAgentsConfig>;
 		const keybindings = parsed.keybindings && typeof parsed.keybindings === "object" ? parsed.keybindings : undefined;
 		const subagents = parsed.subagents && typeof parsed.subagents === "object" ? parsed.subagents : undefined;
-		const worktree = subagents?.worktree && typeof subagents.worktree === "object" ? subagents.worktree : undefined;
 		const mcpServers = normalizeMcpServers(parsed.mcpServers);
 		return {
 			defaultAgent: typeof parsed.defaultAgent === "string" ? parsed.defaultAgent : undefined,
@@ -620,15 +606,6 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 				? {
 						staleWarningMinutes: positiveNumber(subagents.staleWarningMinutes),
 						gracefulStopSeconds: nonNegativeNumber(subagents.gracefulStopSeconds),
-						worktree: worktree
-							? {
-									baseDir: typeof worktree.baseDir === "string" && worktree.baseDir.trim() ? worktree.baseDir.trim() : undefined,
-									copyEnvFiles: typeof worktree.copyEnvFiles === "boolean" ? worktree.copyEnvFiles : undefined,
-									copyFiles: Array.isArray(worktree.copyFiles) ? worktree.copyFiles.map(String).map((file) => file.trim()).filter(Boolean) : undefined,
-									setupCommand: typeof worktree.setupCommand === "string" && worktree.setupCommand.trim() ? worktree.setupCommand.trim() : undefined,
-									retentionDays: nonNegativeNumber(worktree.retentionDays),
-							  }
-							: undefined,
 				  }
 				: undefined,
 			mcpServers,
@@ -747,13 +724,6 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 		subagents: {
 			staleWarningMinutes: projectConfig.subagents?.staleWarningMinutes ?? globalConfig.subagents?.staleWarningMinutes,
 			gracefulStopSeconds: projectConfig.subagents?.gracefulStopSeconds ?? globalConfig.subagents?.gracefulStopSeconds,
-			worktree: {
-				baseDir: projectConfig.subagents?.worktree?.baseDir ?? globalConfig.subagents?.worktree?.baseDir,
-				copyEnvFiles: projectConfig.subagents?.worktree?.copyEnvFiles ?? globalConfig.subagents?.worktree?.copyEnvFiles,
-				copyFiles: projectConfig.subagents?.worktree?.copyFiles ?? globalConfig.subagents?.worktree?.copyFiles,
-				setupCommand: projectConfig.subagents?.worktree?.setupCommand ?? globalConfig.subagents?.worktree?.setupCommand,
-				retentionDays: projectConfig.subagents?.worktree?.retentionDays ?? globalConfig.subagents?.worktree?.retentionDays,
-			},
 		},
 		mcpServers: { ...BUILTIN_MCP_SERVERS, ...globalConfig.mcpServers, ...projectConfig.mcpServers },
 		mcpServerSources,

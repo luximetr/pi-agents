@@ -12,7 +12,7 @@
   },
   "type": "module",
   "scripts": {
-    "test": "jiti test/helpers.test.ts && jiti test/credentials.test.ts && jiti test/studio-assistance.test.ts && jiti test/extension.test.ts && jiti test/mcp.test.ts && jiti test/subagents.test.ts && jiti test/worktrees.test.ts && jiti test/installer.test.ts",
+    "test": "jiti test/helpers.test.ts && jiti test/credentials.test.ts && jiti test/studio-assistance.test.ts && jiti test/extension.test.ts && jiti test/mcp.test.ts && jiti test/subagents.test.ts && jiti test/installer.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "allowScripts": {

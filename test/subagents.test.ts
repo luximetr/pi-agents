@@ -66,22 +66,12 @@ test("smoke: discovers an agent hierarchy", async () => {
 		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
 			export default { name: "worker", description: "Specialist" };
 		`);
-		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({
-			subagents: { worktree: { copyEnvFiles: false, copyFiles: ["dev.pem"], setupCommand: "bun install --frozen-lockfile", retentionDays: 3 } },
-		}));
 		const result = await discoverAgents(root);
 		const lead = result.agents.find((agent) => agent.name === "lead");
 		assert.deepEqual(lead?.subagents, [
 			{ name: "worker" },
 			{ name: "researcher", model: "test/research-model", timeoutSeconds: 45 },
 		]);
-		assert.deepEqual(result.config.subagents?.worktree, {
-			baseDir: undefined,
-			copyEnvFiles: false,
-			copyFiles: ["dev.pem"],
-			setupCommand: "bun install --frozen-lockfile",
-			retentionDays: 3,
-		});
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
@@ -267,123 +257,24 @@ test("subagent inspector renders live state and confirms a manual stop", async (
 	assert.equal(stopped, true);
 });
 
-test("delegate renderer keeps routine results compact and exposes worktree context", () => {
+test("delegate renderer keeps routine results compact", () => {
 	const theme: any = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
-	const call = renderDelegateCall({ agent: "worker", task: "Implement the parser", useWorktree: true, model: "openai-codex/gpt-5.3-codex-spark:high" }, theme).render(100).join("\n");
+	const call = renderDelegateCall({ agent: "worker", task: "Implement the parser", model: "openai-codex/gpt-5.3-codex-spark:high" }, theme).render(100).join("\n");
 	assert.match(call, /delegate → worker/);
 	assert.match(call, /openai-codex\/gpt-5.3-codex-spark:high/);
-	assert.match(call, /isolated worktree/);
+	assert.doesNotMatch(call, /worktree/);
 
 	const output = Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n");
 	const component = renderDelegateResult({
-		content: [{ type: "text", text: `Result from worker:\n\n${output}\n\nBranch: pi-agents/worker/x\nWorktree: /tmp/worker-x` }],
-		details: { agent: "worker", model: "openai-codex/gpt-5.3-codex-spark:high", status: "completed", branch: "pi-agents/worker/x", worktreePath: "/tmp/worker-x", statsLine: "stats: 1 call" },
+		content: [{ type: "text", text: `Result from worker:\n\n${output}` }],
+		details: { agent: "worker", model: "openai-codex/gpt-5.3-codex-spark:high", status: "completed", statsLine: "stats: 1 call" },
 	}, { expanded: false }, theme);
 	const rendered = component.render(120).join("\n");
 	assert.match(rendered, /✓ worker completed · openai-codex\/gpt-5.3-codex-spark:high/);
 	assert.match(rendered, /line 6/);
 	assert.doesNotMatch(rendered, /line 7/);
 	assert.match(rendered, /4 more lines/);
-	assert.match(rendered, /Worktree retained: \/tmp\/worker-x/);
-	assert.equal(rendered.match(/\/tmp\/worker-x/g)?.length, 1);
-});
-
-test("useWorktree runs the subagent on an automatically named branch", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-worktree-"));
-	const fakePi = path.join(root, "fake-pi.mjs");
-	let worktreePath = "";
-	let worktreeBranch = "";
-	try {
-		execFileSync("git", ["init", "-q"], { cwd: root });
-		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
-		execFileSync("git", ["config", "user.name", "Test User"], { cwd: root });
-		await writeFile(path.join(root, "file.txt"), "hello\n");
-		execFileSync("git", ["add", "."], { cwd: root });
-		execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: root });
-		const initialBranch = execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim();
-		await writeFile(fakePi, `#!/usr/bin/env node
-			const { execFileSync } = await import("node:child_process");
-			const branch = execFileSync("git", ["branch", "--show-current"], { encoding: "utf8" }).trim();
-			const text = "subagent branch: " + branch;
-			process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
-			process.stdout.write(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } }) + "\\n");
-			process.stdout.write(JSON.stringify({ type: "message_end", message: { content: [{ type: "text", text }] } }) + "\\n");
-			process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
-			process.exit(0);
-		`);
-		await chmod(fakePi, 0o755);
-		const result = await runSubagent("worker", "task", root, noAbort, {
-			executable: fakePi,
-			useWorktree: true,
-			onWorktreeCreated: (worktree) => { worktreePath = worktree.path; worktreeBranch = worktree.branch; },
-		});
-		assert.match(worktreeBranch, /^pi-agents\/worker\/[a-z0-9]+-[a-f0-9]{8}$/);
-		assert.equal(result, `subagent branch: ${worktreeBranch}`);
-		assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim(), initialBranch);
-		assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: worktreePath, encoding: "utf8" }).trim(), worktreeBranch);
-	} finally {
-		await rm(root, { recursive: true, force: true });
-	}
-});
-
-test("worktree provisioning copies env files and runs a setup command", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-worktree-setup-"));
-	const fakePi = path.join(root, "fake-pi.mjs");
-	let worktreePath = "";
-	try {
-		execFileSync("git", ["init", "-q"], { cwd: root });
-		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
-		execFileSync("git", ["config", "user.name", "Test User"], { cwd: root });
-		await mkdir(path.join(root, "apps", "api"), { recursive: true });
-		await writeFile(path.join(root, ".gitignore"), ".env*\nsecret.json\n");
-		await writeFile(path.join(root, "apps", "api", "index.ts"), "export {};\n");
-		await writeFile(path.join(root, "setup.mjs"), `
-			const { existsSync, writeFileSync } = await import("node:fs");
-			if (!existsSync(".env") || !existsSync("apps/api/.env.local") || !existsSync("secret.json")) process.exit(9);
-			writeFileSync("setup.ok", "ready\\n");
-		`);
-		execFileSync("git", ["add", "."], { cwd: root });
-		execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: root });
-		await writeFile(path.join(root, ".env"), "ROOT_SECRET=yes\n");
-		await writeFile(path.join(root, "apps", "api", ".env.local"), "API_SECRET=yes\n");
-		await writeFile(path.join(root, "secret.json"), "{\"secret\":true}\n");
-		await writeFile(fakePi, `#!/usr/bin/env node
-			const { existsSync } = await import("node:fs");
-			const text = existsSync("setup.ok") ? "worktree ready" : "worktree missing setup";
-			process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
-			process.stdout.write(JSON.stringify({ type: "message_end", message: { content: [{ type: "text", text }] } }) + "\\n");
-			process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
-			process.exit(0);
-		`);
-		await chmod(fakePi, 0o755);
-		const result = await runSubagent("worker", "task", root, noAbort, {
-			executable: fakePi,
-			useWorktree: true,
-			worktree: {
-				copyFiles: ["secret.json"],
-				setupCommand: `"${process.execPath}" setup.mjs`,
-			},
-			onWorktreeCreated: (worktree) => { worktreePath = worktree.path; },
-		});
-		assert.equal(result, "worktree ready");
-		assert.ok(existsSync(path.join(worktreePath, ".env")));
-		assert.ok(existsSync(path.join(worktreePath, "apps", "api", ".env.local")));
-		assert.ok(existsSync(path.join(worktreePath, "secret.json")));
-	} finally {
-		await rm(root, { recursive: true, force: true });
-	}
-});
-
-test("useWorktree fails cleanly outside a git repository", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-worktree-nogit-"));
-	try {
-		await assert.rejects(
-			runSubagent("worker", "task", root, noAbort, { executable: process.execPath, useWorktree: true }),
-			/cannot create worktree for branch "pi-agents\/worker\/[^"]+": .*not a git repository/,
-		);
-	} finally {
-		await rm(root, { recursive: true, force: true });
-	}
+	assert.doesNotMatch(rendered, /Worktree/);
 });
 
 /** Boot the extension with a mock pi API rooted at `root`; returns the delegate tool registration. */
@@ -484,75 +375,6 @@ test("end to end: delegate truncates oversized child output and preserves the fu
 		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
 		else process.env.PI_CODING_AGENT_BIN = previousBin;
 		if (fullOutputPath) await rm(path.dirname(fullOutputPath), { recursive: true, force: true });
-		await rm(root, { recursive: true, force: true });
-	}
-});
-
-test("end to end: delegate with useWorktree isolates the subagent", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegate-worktree-"));
-	const fakePi = path.join(root, "fake-pi.mjs");
-	const previousBin = process.env.PI_CODING_AGENT_BIN;
-	try {
-		// Git repo with an initial commit; lead is the default agent.
-		execFileSync("git", ["init", "-q"], { cwd: root });
-		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
-		execFileSync("git", ["config", "user.name", "Test User"], { cwd: root });
-		await writeFile(path.join(root, "base.txt"), "base\n");
-		execFileSync("git", ["add", "."], { cwd: root });
-		execFileSync("git", ["commit", "-q", "-m", "base"], { cwd: root });
-		const initialBranch = execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-
-		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
-		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
-			export default { name: "lead", description: "Lead", tools: ["read", "bash"], default: true, subagents: ["dev"] };
-		`);
-		await mkdir(path.join(root, ".pi-agents", "dev"), { recursive: true });
-		await writeFile(path.join(root, ".pi-agents", "dev", "agent.ts"), `
-			export default { name: "dev", description: "Dev", tools: ["read", "bash"] };
-		`);
-
-		// Fake child pi: verifies it runs on the generated branch, then commits work there.
-		await writeFile(fakePi, `#!/usr/bin/env node
-			const { execFileSync } = await import("node:child_process");
-			const { writeFileSync } = await import("node:fs");
-			const args = process.argv.slice(2);
-			if (args[0] !== "--mode" || args[1] !== "rpc" || args[2] !== "--no-session" || args[3] !== "--agent" || args[4] !== "dev") process.exit(2);
-			const branch = execFileSync("git", ["branch", "--show-current"], { encoding: "utf8" }).trim();
-			writeFileSync("work.txt", "subagent work on " + branch + "\\n");
-			execFileSync("git", ["add", "work.txt"]);
-			execFileSync("git", ["commit", "-q", "-m", "subagent commit on " + branch]);
-			const text = "done on " + branch;
-			process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
-			process.stdout.write(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } }) + "\\n");
-			process.stdout.write(JSON.stringify({ type: "message_end", message: { provider: "test", model: "test-model", content: [{ type: "text", text }], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } } }) + "\\n");
-			process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
-			process.exit(0);
-		`);
-		await chmod(fakePi, 0o755);
-		process.env.PI_CODING_AGENT_BIN = fakePi;
-
-		const { handlers, registered, ctx } = bootExtension(root);
-		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
-
-		const delegate = registered.find((t) => t.name === "delegate")!;
-		const result = await delegate.execute("call-1", { agent: "dev", task: "add work", useWorktree: true }, undefined, undefined, ctx);
-		const text = String(result.content[0].text);
-		const generatedBranch = String(result.details.branch);
-		assert.match(generatedBranch, /^pi-agents\/dev\//);
-		assert.ok(text.includes(`done on ${generatedBranch}`), text);
-		const worktreePath = String(result.details.worktreePath);
-		// The parent checkout never moves; the child worktree keeps the generated branch and files.
-		assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim(), initialBranch);
-		assert.ok(!existsSync(path.join(root, "work.txt")));
-		assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: worktreePath, encoding: "utf8" }).trim(), generatedBranch);
-		assert.ok(existsSync(path.join(worktreePath, "work.txt")));
-		const mainLog = execFileSync("git", ["log", "--oneline", "-1", initialBranch], { cwd: root, encoding: "utf8" });
-		assert.ok(!mainLog.includes("subagent commit on"), mainLog);
-		const branchLog = execFileSync("git", ["log", "--oneline", "-1", generatedBranch], { cwd: root, encoding: "utf8" });
-		assert.ok(branchLog.includes(`subagent commit on ${generatedBranch}`), branchLog);
-	} finally {
-		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
-		else process.env.PI_CODING_AGENT_BIN = previousBin;
 		await rm(root, { recursive: true, force: true });
 	}
 });

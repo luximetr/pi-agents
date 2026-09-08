@@ -4,7 +4,7 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 
 ## Using the extension (quick start)
 
-- Switch agents: `f7` (Agent Studio/dashboard), `f8` (rotate), or `/agent <name>` (`/agent none` clears). In `f7`, type to filter, use `↑↓` to choose an agent, `Tab`/`←→` to inspect it, `e` to edit it, or `n` to create one. Inspect a running delegated subagent with `f9` or `/subagents`; `/subagents worktrees` manages retained delegation worktrees. Function-key shortcuts work through iTerm2 and herdr without terminal setting changes; configured aliases remain available too.
+- Switch agents: `f7` (Agent Studio/dashboard), `f8` (rotate), or `/agent <name>` (`/agent none` clears). In `f7`, type to filter, use `↑↓` to choose an agent, `Tab`/`←→` to inspect it, `e` to edit it, or `n` to create one. Inspect a running delegated subagent with `f9` or `/subagents`. Function-key shortcuts work through iTerm2 and herdr without terminal setting changes; configured aliases remain available too.
 - Start with an agent from the CLI: `pi --agent dev`.
 - The active agent's system prompt is appended every turn; its tools are restricted to its allowlist (+ its MCP tools).
 - No agent selected = plain pi, unchanged.
@@ -96,20 +96,7 @@ export default {
 
 `subagents` is an allowlist. A string entry uses Pi's normal default model selection and has no deadline. An object entry can fix the model and/or `timeoutSeconds` for that parent-to-child delegation; different parents may configure the same child differently. The parent automatically sees a roster of allowed child names, descriptions, models, and deadlines in its prompt. The child runs as a fresh ephemeral `pi --mode rpc --no-session --agent <name>` process and only its final answer is returned to the parent. Independent delegate calls made together run in parallel. Nested delegation is limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
 
-`delegate` takes `agent`, `task`, and an optional `useWorktree` boolean (default `false`):
-
-```
-delegate(agent: "dev", task: "Implement the parser", useWorktree: true)
-delegate(agent: "doc", task: "Document the parser API", useWorktree: true)
-```
-
 The agent cannot choose its deadline at call time. Configure `timeoutSeconds` on the parent's subagent entry, or omit it to run without a deadline. While the parent waits, the delegation card shows the configured model (including a thinking-level suffix) and the footer shows the running count and `f9` hint. `f9` or `/subagents` opens a live dashboard of all children with configured or actual model, current tool, task, recent activity, cumulative usage, deadline, steering (`s`), and stop (`x`) controls; use `↑↓` or `j k` to select. Manual interruption and timeout return diagnostic context to the parent so it can change approach. Delegate results are compact by default; expand the tool row to read the complete Markdown output. Results over Pi's 2,000-line/50 KB tool limit are truncated for the parent context and saved in full to a private temporary file linked from the result.
-
-When `useWorktree: true` is provided, the extension creates a linked Git worktree on an automatically named branch such as `pi-agents/dev/m4abc123-a1b2c3d4` and starts the child there. Its directory name is generated too. The parent checkout never switches, so delegations can run in parallel with separate files and indexes. Worktrees are retained after completion and their generated branches and paths are returned, preserving uncommitted as well as committed child changes. They default to `.git/pi-agents-worktrees/` in Git's common directory.
-
-Worktrees start from committed `HEAD`; dirty parent source changes are not copied automatically. `.env` and `.env.*` files found beside tracked files are copied by default. Use `subagents.worktree.copyFiles` for other ignored assets and `subagents.worktree.setupCommand` (for example `bun install --frozen-lockfile`) to provision dependencies. Setup runs at the worktree root with `PI_AGENTS_SOURCE_ROOT` and `PI_AGENTS_WORKTREE_ROOT` set. Creation/setup failures roll back the new worktree and branch before returning an error.
-
-Retained worktrees are tracked in a manifest under the worktree base dir. At session start, clean worktrees idle longer than `subagents.worktree.retentionDays` (default 7; `0` disables) are pruned automatically. Dirty worktrees are never removed, and branches with commits not merged into the main checkout's HEAD are always kept. Run `/subagents worktrees` to browse everything that is retained (age, status, dirty/unmerged flags), delete single entries (`d`), or prune past retention immediately (`p`).
 
 ## Custom tools (per agent)
 
@@ -151,13 +138,7 @@ export default {
   },
   "subagents": {
     "staleWarningMinutes": 5,
-    "gracefulStopSeconds": 5,
-    "worktree": {
-      "copyEnvFiles": true,
-      "copyFiles": [],
-      "setupCommand": "bun install --frozen-lockfile",
-      "retentionDays": 7
-    }
+    "gracefulStopSeconds": 5
   },
   "mcpServers": {
     "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
@@ -179,11 +160,6 @@ export default {
 - `keybindings`: each action takes a single key or an array of fallbacks (terminal key encoding varies). The built-in `f7`, `f8`, and `f9` fallbacks are always retained.
 - `subagents.staleWarningMinutes`: inactivity threshold shown by the inspector; it does not stop the child.
 - `subagents.gracefulStopSeconds`: delay before escalating RPC abort to process signals.
-- `subagents.worktree.baseDir`: optional checkout parent, relative to the repository root when not absolute.
-- `subagents.worktree.copyEnvFiles`: copy `.env` variants into generated worktrees (default `true`).
-- `subagents.worktree.copyFiles`: additional repository-relative files/directories to copy.
-- `subagents.worktree.setupCommand`: shell command run before the child starts, such as `bun install --frozen-lockfile`.
-- `subagents.worktree.retentionDays`: auto-prune clean retained worktrees idle longer than this many days at session start (default 7; `0` disables). Dirty worktrees and unmerged branches are never touched.
 
 ## MCP servers
 
