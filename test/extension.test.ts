@@ -748,6 +748,7 @@ test("Agent Studio can create and discover a declarative JSON agent", async () =
 		const filePath = saveDeclarativeAgent(root, "project", {
 			name: "browser-verifier",
 			description: "Checks browser behavior",
+			lifecycle: "resumable",
 			tools: ["read"],
 			mcp: ["playwright"],
 			systemPrompt: "Verify the running application.",
@@ -756,6 +757,7 @@ test("Agent Studio can create and discover a declarative JSON agent", async () =
 		const discovered = await discoverAgents(root);
 		const agent = discovered.agents.find((candidate) => candidate.name === "browser-verifier");
 		assert.equal(agent?.description, "Checks browser behavior");
+		assert.equal(agent?.lifecycle, "resumable");
 		assert.deepEqual(agent?.tools, ["read"]);
 		assert.deepEqual(agent?.mcp, ["playwright"]);
 		assert.equal(agent?.systemPrompt, "Verify the running application.");
@@ -777,9 +779,10 @@ test("direct JSON saves preserve metadata and update a referenced prompt file", 
 			name: "alpha", description: "source", whenToUse: "Keep this metadata", systemPromptFile: "./prompt.md",
 		}, null, "\t"));
 		const agent = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
-		saveAgentSource(agent, { description: "updated", color: null, mcp: [], systemPrompt: "Updated prompt\n" });
+		saveAgentSource(agent, { description: "updated", lifecycle: "resumable", color: null, mcp: [], systemPrompt: "Updated prompt\n" });
 		const source = JSON.parse(await readFile(filePath, "utf8"));
 		assert.equal(source.description, "updated");
+		assert.equal(source.lifecycle, "resumable");
 		assert.equal(source.whenToUse, "Keep this metadata");
 		assert.equal(source.systemPromptFile, "./prompt.md");
 		assert.equal(source.systemPrompt, undefined);
@@ -808,11 +811,12 @@ export default cfg;
 `);
 		const agent = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
 		saveAgentSource(agent, {
-			description: "updated", color: null, tools: ["read", "grep"], mcp: ["playwright"],
+			description: "updated", lifecycle: "resumable", color: null, tools: ["read", "grep"], mcp: ["playwright"],
 			subagents: [{ name: "beta", model: "openai-codex/gpt-5.3-codex-spark:high" }], systemPrompt: "Updated prompt\n",
 		});
 		const source = await readFile(filePath, "utf8");
 		assert.match(source, /description: "updated"/);
+		assert.match(source, /lifecycle: "resumable"/);
 		assert.doesNotMatch(source, /color:/);
 		assert.match(source, /tools: \["read","grep"\]/);
 		assert.match(source, /subagents: \[\{ name: "beta", model: "openai-codex\/gpt-5.3-codex-spark:high" \}\]/);
@@ -822,6 +826,7 @@ export default cfg;
 		assert.equal(await readFile(promptPath, "utf8"), "Updated prompt\n");
 		const updated = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
 		assert.equal(updated.description, "updated");
+		assert.equal(updated.lifecycle, "resumable");
 		assert.deepEqual(updated.tools, ["read", "grep"]);
 		assert.equal(updated.subagents?.[0]?.model, "openai-codex/gpt-5.3-codex-spark:high");
 	} finally { await rm(root, { recursive: true, force: true }); }

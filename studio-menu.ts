@@ -15,6 +15,7 @@ export async function selectMenu<Id extends string>(ctx: ExtensionContext, title
 
 export enum StudioAction {
 	Description = "description",
+	Lifecycle = "lifecycle",
 	Color = "color",
 	Prompt = "prompt",
 	Tools = "tools",
@@ -31,6 +32,7 @@ export enum StudioAction {
 
 export const STUDIO_LABELS: Record<StudioAction, string> = {
 	[StudioAction.Description]: "Edit description",
+	[StudioAction.Lifecycle]: "Delegated lifecycle",
 	[StudioAction.Color]: "Color",
 	[StudioAction.Prompt]: "Edit prompt",
 	[StudioAction.Tools]: "Choose tools",

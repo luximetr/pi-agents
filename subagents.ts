@@ -1,11 +1,16 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
+import { chmod, mkdir, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
+import { CURRENT_SESSION_VERSION, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { StringDecoder } from "node:string_decoder";
 import { OBSERVER_ENV, RUN_ID_ENV } from "./subagent-observer.ts";
 import { SubagentTranscript, messageText, type TranscriptEntry } from "./subagent-transcript.ts";
 
 export const MAX_SUBAGENT_DEPTH = 4;
+export const ROOT_SESSION_ENV = "PI_AGENTS_ROOT_SESSION_ID";
+const RESUMABLE_ANCESTRY_ENV = "PI_AGENTS_RESUMABLE_ANCESTRY";
 
 export interface SubagentUsage {
 	provider?: string;
@@ -88,6 +93,14 @@ export interface RunSubagentOptions {
 	runtimeAgentOverrides?: Record<string, unknown>;
 	/** Stable id supplied by the caller; otherwise a process-local id is generated. */
 	id?: string;
+	/** Persist and resume this agent's participant session instead of creating a fresh session. */
+	lifecycle?: "disposable" | "resumable";
+	/** Identity of the root (user-facing) Pi session. Required for resumable participants. */
+	rootSessionId?: string;
+	/** Effective target identity (normally source path + effective agent name). */
+	participantIdentity?: string;
+	/** Override the private participant-session directory (primarily for tests). */
+	participantSessionDir?: string;
 }
 
 let nextSubagentId = 1;
@@ -123,13 +136,154 @@ function piInvocation(childArgs: string[], executable?: string): { command: stri
 	return { command: process.execPath, args: childArgs };
 }
 
+type ParticipantLock = { path: string; token: string };
+type ParticipantWaitFailure = "cancelled" | "timeout";
+
+class ParticipantWaitError extends Error {
+	constructor(public readonly reason: ParticipantWaitFailure) {
+		super(`subagent ${reason} while waiting for its resumable participant`);
+	}
+}
+
+function participantKey(rootSessionId: string, identity: string): string {
+	return createHash("sha256").update(`${rootSessionId}\0${identity}`).digest("hex");
+}
+
+function processIsAlive(pid: number): boolean {
+	try { process.kill(pid, 0); return true; }
+	catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+async function acquireParticipantLock(lockPath: string, signal: AbortSignal, deadlineAt: number | undefined, failIfBusy: boolean): Promise<ParticipantLock> {
+	const token = randomUUID();
+	let unreadableSince: number | undefined;
+	while (true) {
+		if (signal.aborted) throw new ParticipantWaitError("cancelled");
+		if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new ParticipantWaitError("timeout");
+		try {
+			await mkdir(lockPath);
+			try {
+				await writeFile(path.join(lockPath, "owner.json"), JSON.stringify({ pid: process.pid, token }), { flag: "wx", mode: 0o600 });
+				return { path: lockPath, token };
+			} catch (error) {
+				// Only remove an empty directory we just created. Recursive recovery can
+				// delete a replacement lock and let two writers enter the same session.
+				try { await rmdir(lockPath); } catch { /* Preserve uncertain ownership. */ }
+				throw error;
+			}
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			if (failIfBusy) {
+				throw new Error(`resumable participant is already busy; nested delegation refuses to queue: ${lockPath}`);
+			}
+			let owner: { pid?: unknown } | undefined;
+			try { owner = JSON.parse(await readFile(path.join(lockPath, "owner.json"), "utf8")) as { pid?: unknown }; }
+			catch { /* The winning process may still be writing owner.json. */ }
+			if (typeof owner?.pid === "number") {
+				unreadableSince = undefined;
+				if (!processIsAlive(owner.pid)) {
+					// The owner's child may have survived its parent. Automatic deletion is
+					// therefore unsafe; require deliberate operator recovery.
+					throw new Error(`stale resumable participant lock (owner pid ${owner.pid} is not alive); verify no child is running, then remove: ${lockPath}`);
+				}
+			} else {
+				unreadableSince ??= Date.now();
+				if (Date.now() - unreadableSince >= 1000) throw new Error(`unreadable resumable participant lock; verify no child is running, then remove: ${lockPath}`);
+			}
+			const waitMs = Math.max(1, Math.min(50, deadlineAt === undefined ? 50 : deadlineAt - Date.now()));
+			await new Promise<void>((resolve, reject) => {
+				const abort = () => { clearTimeout(timer); reject(new ParticipantWaitError("cancelled")); };
+				const timer = setTimeout(() => {
+					signal.removeEventListener("abort", abort);
+					resolve();
+				}, waitMs);
+				signal.addEventListener("abort", abort, { once: true });
+				timer.unref?.();
+			});
+		}
+	}
+}
+
+async function releaseParticipantLock(lock: ParticipantLock): Promise<void> {
+	const ownerFile = path.join(lock.path, "owner.json");
+	const owner = JSON.parse(await readFile(ownerFile, "utf8")) as { token?: unknown };
+	if (owner.token !== lock.token) throw new Error(`resumable participant lock ownership changed: ${lock.path}`);
+	await unlink(ownerFile);
+	await rmdir(lock.path);
+}
+
+const SESSION_ENTRY_TYPES = new Set(["message", "model_change", "thinking_level_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"]);
+
+/** Pi's loader skips malformed JSONL lines, so validate private history before giving it to Pi. */
+async function validateParticipantSession(sessionFile: string): Promise<void> {
+	if (!existsSync(sessionFile)) return;
+	const bytes = await readFile(sessionFile);
+	let content: string;
+	try { content = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+	catch { throw new Error(`resumable participant session is not valid UTF-8: ${sessionFile}`); }
+	if (!content) throw new Error(`resumable participant session is empty: ${sessionFile}`);
+	const physicalLines = content.split("\n");
+	if (physicalLines.at(-1) === "") physicalLines.pop();
+	if (!physicalLines.length || physicalLines.some(line => !line.trim())) {
+		throw new Error(`resumable participant session contains an empty JSONL line: ${sessionFile}`);
+	}
+	const entries = physicalLines.map((line, index) => {
+		try {
+			const value = JSON.parse(line) as unknown;
+			if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("entry is not an object");
+			return value as Record<string, unknown>;
+		} catch (error) {
+			throw new Error(`resumable participant session has malformed JSONL at line ${index + 1}: ${sessionFile} (${error instanceof Error ? error.message : String(error)})`);
+		}
+	});
+	const header = entries[0];
+	if (header.type !== "session" || typeof header.id !== "string" || !header.id || typeof header.cwd !== "string" || typeof header.timestamp !== "string" || Number.isNaN(Date.parse(header.timestamp)) || !Number.isInteger(header.version) || Number(header.version) < 1 || Number(header.version) > CURRENT_SESSION_VERSION) {
+		throw new Error(`resumable participant session has an invalid or unsupported header: ${sessionFile}`);
+	}
+	const version = Number(header.version);
+	const ids = new Set<string>();
+	for (let index = 1; index < entries.length; index++) {
+		const entry = entries[index];
+		if (typeof entry.type !== "string" || !SESSION_ENTRY_TYPES.has(entry.type)) {
+			throw new Error(`resumable participant session has an unknown entry type at line ${index + 1}: ${sessionFile}`);
+		}
+		if (version >= 2) {
+			if (typeof entry.id !== "string" || !entry.id || ids.has(entry.id) || (entry.parentId !== null && typeof entry.parentId !== "string") || (typeof entry.parentId === "string" && !ids.has(entry.parentId))) {
+				throw new Error(`resumable participant session has broken tree history at line ${index + 1}: ${sessionFile}`);
+			}
+		}
+		if (typeof entry.timestamp !== "string" || Number.isNaN(Date.parse(entry.timestamp))) {
+			throw new Error(`resumable participant session has an invalid timestamp at line ${index + 1}: ${sessionFile}`);
+		}
+		if (entry.type === "message") {
+			const message = entry.message as Record<string, unknown> | undefined;
+			const contextRole = message?.role === "user" || message?.role === "assistant" || message?.role === "toolResult" || message?.role === "custom" || message?.role === "hookMessage";
+			if (!message || typeof message !== "object" || typeof message.role !== "string" || !["user", "assistant", "toolResult", "bashExecution", "custom", "hookMessage", "branchSummary", "compactionSummary"].includes(message.role) || (contextRole && (message.content == null || (typeof message.content !== "string" && !Array.isArray(message.content))))) {
+				throw new Error(`resumable participant session has an invalid message at line ${index + 1}: ${sessionFile}`);
+			}
+		} else if ((entry.type === "model_change" && (typeof entry.provider !== "string" || typeof entry.modelId !== "string"))
+			|| (entry.type === "thinking_level_change" && typeof entry.thinkingLevel !== "string")
+			|| (entry.type === "compaction" && (typeof entry.summary !== "string" || typeof entry.tokensBefore !== "number"
+				|| (typeof entry.firstKeptEntryId === "string" && !ids.has(entry.firstKeptEntryId))
+				|| (entry.firstKeptEntryId === undefined && !Array.isArray(entry.retainedTail))))
+			|| (entry.type === "branch_summary" && (typeof entry.summary !== "string" || typeof entry.fromId !== "string" || !ids.has(entry.fromId)))
+			|| ((entry.type === "custom" || entry.type === "custom_message") && typeof entry.customType !== "string")
+			|| (entry.type === "custom_message" && (!("content" in entry) || typeof entry.display !== "boolean"))
+			|| (entry.type === "label" && (typeof entry.targetId !== "string" || !ids.has(entry.targetId)))) {
+			throw new Error(`resumable participant session has invalid ${entry.type} data at line ${index + 1}: ${sessionFile}`);
+		}
+		if (version >= 2) ids.add(entry.id as string);
+	}
+}
+
 /** Run an isolated child pi session, forwarding live RPC progress and exposing a controllable handle. */
-export function runSubagent(
+function runSubagentProcess(
 	agentName: string,
 	task: string,
 	cwd: string,
 	signal: AbortSignal,
 	options: RunSubagentOptions = {},
+	timing?: { startedAt: number; deadlineAt?: number },
 ): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const depth = Number(process.env.PI_AGENTS_SUBAGENT_DEPTH ?? "0");
@@ -152,7 +306,17 @@ export function runSubagent(
 		const childCwd = cwd;
 		const id = options.id ?? `subagent-${nextSubagentId++}`;
 
-		const childArgs = ["--mode", "rpc", "--no-session", "--agent", agentName];
+		const childArgs = ["--mode", "rpc"];
+		if (options.lifecycle === "resumable") {
+			if (!options.rootSessionId || !options.participantIdentity) {
+				reject(new Error("resumable subagent requires rootSessionId and participantIdentity"));
+				return;
+			}
+			const key = participantKey(options.rootSessionId, options.participantIdentity);
+			const sessionDir = options.participantSessionDir ?? path.join(getAgentDir(), "pi-agents-subagent-sessions");
+			childArgs.push("--session", path.join(sessionDir, `${key}.jsonl`));
+		} else childArgs.push("--no-session");
+		childArgs.push("--agent", agentName);
 		if (options.model?.trim()) childArgs.push("--model", options.model.trim());
 		const invocation = piInvocation(childArgs, options.executable);
 		const child: ChildProcessWithoutNullStreams = spawn(invocation.command, invocation.args, {
@@ -161,6 +325,10 @@ export function runSubagent(
 				...process.env,
 				PI_AGENTS_SUBAGENT_DEPTH: String(depth + 1),
 				[RUN_ID_ENV]: id,
+				...(options.rootSessionId ? { [ROOT_SESSION_ENV]: options.rootSessionId } : {}),
+				...(options.lifecycle === "resumable" && options.rootSessionId && options.participantIdentity
+					? { [RESUMABLE_ANCESTRY_ENV]: [...(process.env[RESUMABLE_ANCESTRY_ENV]?.split(",").filter(Boolean) ?? []), participantKey(options.rootSessionId, options.participantIdentity)].join(",") }
+					: {}),
 				...(options.observerEndpoint ? { [OBSERVER_ENV]: options.observerEndpoint } : {}),
 				...(options.runtimeAgentOverrides && Object.keys(options.runtimeAgentOverrides).length > 0
 					? { PI_AGENTS_STUDIO_OVERRIDES: JSON.stringify(options.runtimeAgentOverrides) }
@@ -168,7 +336,9 @@ export function runSubagent(
 			},
 			stdio: ["pipe", "pipe", "pipe"],
 		});
-		const startedAt = Date.now();
+		const processStartedAt = Date.now();
+		const startedAt = timing?.startedAt ?? processStartedAt;
+		const deadlineAt = timing?.deadlineAt ?? (timeoutSeconds === undefined ? undefined : processStartedAt + timeoutSeconds * 1000);
 		const state: SubagentSnapshot = {
 			id,
 			parentRunId: options.parentRunId,
@@ -176,8 +346,8 @@ export function runSubagent(
 			task,
 			model: options.model?.trim() || undefined,
 			startedAt,
-			lastActivityAt: startedAt,
-			deadlineAt: timeoutSeconds === undefined ? undefined : startedAt + timeoutSeconds * 1000,
+			lastActivityAt: processStartedAt,
+			deadlineAt,
 			status: "running",
 			phase: "starting",
 			partialText: "",
@@ -416,8 +586,8 @@ export function runSubagent(
 		child.stdout.on("data", (chunk: Buffer) => consume(chunk));
 		child.stdout.on("end", () => consume("", true));
 		child.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-20_000); });
-		if (timeoutSeconds !== undefined) {
-			deadlineTimer = setTimeout(() => stop("timeout"), timeoutSeconds * 1000);
+		if (deadlineAt !== undefined) {
+			deadlineTimer = setTimeout(() => stop("timeout"), Math.max(0, deadlineAt - Date.now()));
 			deadlineTimer.unref?.();
 		}
 		if (signal.aborted) parentAbort();
@@ -450,4 +620,78 @@ export function runSubagent(
 		}));
 		send({ id: "prompt", type: "prompt", message: task });
 	});
+}
+
+/** Run a delegated agent, serializing and persisting only resumable participants. */
+export async function runSubagent(
+	agentName: string,
+	task: string,
+	cwd: string,
+	signal: AbortSignal,
+	options: RunSubagentOptions = {},
+): Promise<string> {
+	if (options.lifecycle !== "resumable") return runSubagentProcess(agentName, task, cwd, signal, options);
+	const startedAt = Date.now();
+	const timeoutSeconds = options.timeoutSeconds;
+	if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0)) {
+		throw new Error("subagent timeoutSeconds must be a positive number");
+	}
+	const deadlineAt = timeoutSeconds === undefined ? undefined : startedAt + timeoutSeconds * 1000;
+	if (!options.rootSessionId || !options.participantIdentity) {
+		throw new Error("resumable subagent requires rootSessionId and participantIdentity");
+	}
+	const stoppedWhileQueued = (reason: ParticipantWaitFailure): SubagentStoppedError => {
+		const now = Date.now();
+		const timedOut = reason === "timeout";
+		return new SubagentStoppedError(timedOut ? "timeout" : "parent", {
+			id: options.id ?? `subagent-${nextSubagentId++}`,
+			parentRunId: options.parentRunId,
+			agent: agentName,
+			task,
+			model: options.model?.trim() || undefined,
+			startedAt,
+			lastActivityAt: startedAt,
+			deadlineAt,
+			endedAt: now,
+			status: "failed",
+			phase: timedOut ? "deadline exceeded while queued for resumable participant" : "cancelled while queued for resumable participant",
+			partialText: "",
+			recentEvents: [timedOut ? "⏱ deadline reached while queued" : "■ cancellation requested while queued"],
+			stopReason: timedOut ? "timeout" : "parent",
+		});
+	};
+	const key = participantKey(options.rootSessionId, options.participantIdentity);
+	const ancestry = process.env[RESUMABLE_ANCESTRY_ENV]?.split(",").filter(Boolean) ?? [];
+	if (ancestry.includes(key)) {
+		throw new Error(`resumable delegation cycle detected for agent "${agentName}"; refusing to wait on its own participant`);
+	}
+	const sessionDir = options.participantSessionDir ?? path.join(getAgentDir(), "pi-agents-subagent-sessions");
+	// Creating this boundary before launch makes storage failures explicit. Never
+	// fall back to --no-session, which would silently discard existing context.
+	await mkdir(sessionDir, { recursive: true, mode: 0o700 });
+	// mkdir's mode does not repair an existing directory. Participant transcripts
+	// are sensitive, so narrow both existing and newly created boundaries.
+	await chmod(sessionDir, 0o700);
+	const lockDir = path.join(sessionDir, ".locks");
+	await mkdir(lockDir, { recursive: true, mode: 0o700 });
+	await chmod(lockDir, 0o700);
+	let lock: ParticipantLock;
+	try {
+		// A nested waiter can form A→B/B→A across concurrently started roots even
+		// though neither target appears in its own ancestry. Reject nested contention;
+		// independent top-level calls retain FIFO-ish polling serialization.
+		lock = await acquireParticipantLock(path.join(lockDir, key), signal, deadlineAt, Number(process.env.PI_AGENTS_SUBAGENT_DEPTH ?? "0") > 0);
+	} catch (error) {
+		if (error instanceof ParticipantWaitError) throw stoppedWhileQueued(error.reason);
+		throw error;
+	}
+	try {
+		const sessionFile = path.join(sessionDir, `${key}.jsonl`);
+		await validateParticipantSession(sessionFile);
+		if (signal.aborted) throw stoppedWhileQueued("cancelled");
+		if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw stoppedWhileQueued("timeout");
+		return await runSubagentProcess(agentName, task, cwd, signal, options, { startedAt, deadlineAt });
+	} finally {
+		await releaseParticipantLock(lock);
+	}
 }

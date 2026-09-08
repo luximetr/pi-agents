@@ -24,6 +24,7 @@ import {
 } from "./ui.ts";
 import {
 	formatArgs,
+	ROOT_SESSION_ENV,
 	SubagentStoppedError,
 	runSubagent,
 	type SubagentUsage,
@@ -242,6 +243,7 @@ export default function (pi: ExtensionAPI) {
 		const raw = value as Record<string, unknown>;
 		const result: AgentOverride = {};
 		if (typeof raw.description === "string" && raw.description.trim()) result.description = raw.description.trim();
+		if (raw.lifecycle === "disposable" || raw.lifecycle === "resumable") result.lifecycle = raw.lifecycle;
 		if (raw.color === null) result.color = null;
 		else if (parseAgentColor(raw.color)) result.color = parseAgentColor(raw.color);
 		if (Array.isArray(raw.tools)) result.tools = raw.tools.map(String);
@@ -327,6 +329,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
 			const timeoutSeconds = subagent.timeoutSeconds;
+			const childAgent = agents.find((agent) => agent.name === agentName)!;
 			try {
 				observerContext = ctx;
 				let observerEndpoint: string | undefined;
@@ -394,6 +397,9 @@ export default function (pi: ExtensionAPI) {
 				};
 				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
 					model: subagent.model,
+					lifecycle: childAgent.lifecycle,
+					rootSessionId: process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.(),
+					participantIdentity: `${childAgent.source}:${path.resolve(childAgent.filePath)}:${childAgent.name}`,
 					id: runId,
 					observerEndpoint,
 					parentRunId: process.env[RUN_ID_ENV],

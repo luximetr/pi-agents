@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -114,6 +115,216 @@ test("end to end: delegate launches an isolated child with the target agent", as
 			provider: "test", model: "test-model", input: 10, output: 5, cacheRead: 2, cacheWrite: 1, cost: 0.01,
 		});
 		assert.equal(result, "worker-result:inspect files");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("resumable subagents use one serialized disk session per root and effective agent", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-resumable-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	const log = path.join(root, "runs.log");
+	const sessionDir = path.join(root, "participants");
+	try {
+		await writeFile(fakePi, `#!/usr/bin/env node
+			import { appendFileSync } from "node:fs";
+			const args = process.argv.slice(2);
+			const sessionIndex = args.indexOf("--session");
+			if (sessionIndex < 0 || args.includes("--no-session")) process.exit(2);
+			let input = "";
+			process.stdin.on("data", chunk => {
+				input += chunk;
+				if (!input.includes("\\n")) return;
+				const task = JSON.parse(input.split("\\n")[0]).message;
+				appendFileSync(${JSON.stringify(log)}, "start " + task + " " + args[sessionIndex + 1] + "\\n");
+				setTimeout(() => {
+					appendFileSync(${JSON.stringify(log)}, "end " + task + "\\n");
+					process.stdout.write(JSON.stringify({type:"message_end", message:{content:[{type:"text", text:"reply:" + task}]}}) + "\\n");
+					process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
+				}, 100);
+			});
+		`);
+		await chmod(fakePi, 0o755);
+		await mkdir(sessionDir, { mode: 0o755 });
+		const shared = { executable: fakePi, lifecycle: "resumable" as const, rootSessionId: "root-one", participantIdentity: "project:/agent/worker", participantSessionDir: sessionDir };
+		const replies = await Promise.all([
+			runSubagent("worker", "one", root, noAbort, shared),
+			runSubagent("worker", "two", root, noAbort, shared),
+		]);
+		assert.deepEqual(replies.sort(), ["reply:one", "reply:two"]);
+		await runSubagent("worker", "other-root", root, noAbort, { ...shared, rootSessionId: "root-two" });
+		const lines = readFileSync(log, "utf8").trim().split("\n");
+		assert.match(lines[0], /^start (one|two) /);
+		assert.match(lines[1], /^end (one|two)$/);
+		assert.match(lines[2], /^start (one|two) /);
+		assert.match(lines[3], /^end (one|two)$/);
+		const firstSession = lines[0].split(" ").at(-1);
+		const secondSession = lines[2].split(" ").at(-1);
+		const otherSession = lines[4].split(" ").at(-1);
+		assert.equal(firstSession, secondSession);
+		assert.notEqual(firstSession, otherSession);
+		assert.equal(statSync(sessionDir).mode & 0o777, 0o700, "existing participant storage is made private");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("nested delegation fails visibly when a resumable participant is already busy", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-busy-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	const started = path.join(root, "started");
+	const previousDepth = process.env.PI_AGENTS_SUBAGENT_DEPTH;
+	let topLevel: Promise<string> | undefined;
+	try {
+		await writeFile(fakePi, `#!/usr/bin/env node
+			import { writeFileSync } from "node:fs";
+			process.stdin.once("data", () => {
+				writeFileSync(${JSON.stringify(started)}, "yes");
+				setTimeout(() => {
+					process.stdout.write(JSON.stringify({type:"message_end", message:{content:[{type:"text", text:"done"}]}}) + "\\n");
+					process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
+				}, 200);
+			});
+		`);
+		await chmod(fakePi, 0o755);
+		delete process.env.PI_AGENTS_SUBAGENT_DEPTH;
+		const options = { executable: fakePi, lifecycle: "resumable" as const, rootSessionId: "root", participantIdentity: "busy-B", participantSessionDir: path.join(root, "sessions") };
+		topLevel = runSubagent("B", "top-level B", root, noAbort, options);
+		for (let i = 0; i < 200 && !existsSync(started); i++) await new Promise(resolve => setTimeout(resolve, 10));
+		assert.ok(existsSync(started));
+		process.env.PI_AGENTS_SUBAGENT_DEPTH = "1";
+		await assert.rejects(runSubagent("B", "nested A to B", root, noAbort, options), /already busy; nested delegation refuses to queue/);
+		delete process.env.PI_AGENTS_SUBAGENT_DEPTH;
+		assert.equal(await topLevel, "done");
+	} finally {
+		if (previousDepth === undefined) delete process.env.PI_AGENTS_SUBAGENT_DEPTH;
+		else process.env.PI_AGENTS_SUBAGENT_DEPTH = previousDepth;
+		await topLevel?.catch(() => {});
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("resumable queue timeout and cancellation use the real queue start", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-queued-stop-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	const log = path.join(root, "starts.log");
+	try {
+		await writeFile(fakePi, `#!/usr/bin/env node
+			import { appendFileSync } from "node:fs";
+			process.stdin.once("data", () => {
+				appendFileSync(${JSON.stringify(log)}, "start\\n");
+				setTimeout(() => {
+					process.stdout.write(JSON.stringify({type:"message_end", message:{content:[{type:"text", text:"done"}]}}) + "\\n");
+					process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
+				}, 220);
+			});
+		`);
+		await chmod(fakePi, 0o755);
+		const options = { executable: fakePi, lifecycle: "resumable" as const, rootSessionId: "root", participantIdentity: "worker", participantSessionDir: path.join(root, "sessions") };
+		const holder = runSubagent("worker", "holder", root, noAbort, options);
+		for (let i = 0; i < 50 && !existsSync(log); i++) await new Promise(resolve => setTimeout(resolve, 10));
+		const timeoutStartedAt = Date.now();
+		await assert.rejects(runSubagent("worker", "queued timeout", root, noAbort, { ...options, timeoutSeconds: 0.06 }), (error: unknown) => {
+			assert.ok(error instanceof SubagentStoppedError);
+			assert.equal(error.reason, "timeout");
+			assert.ok(error.snapshot.startedAt >= timeoutStartedAt && error.snapshot.startedAt < timeoutStartedAt + 30);
+			assert.match(error.snapshot.phase, /while queued/);
+			return true;
+		});
+		assert.ok(Date.now() - timeoutStartedAt < 180, "queue wait consumed the deadline without launching");
+		await holder;
+
+		const holder2 = runSubagent("worker", "holder 2", root, noAbort, options);
+		while (readFileSync(log, "utf8").trim().split("\n").length < 2) await new Promise(resolve => setTimeout(resolve, 10));
+		const controller = new AbortController();
+		const cancelStartedAt = Date.now();
+		const queued = runSubagent("worker", "queued cancel", root, controller.signal, options);
+		setTimeout(() => controller.abort(), 40);
+		await assert.rejects(queued, (error: unknown) => {
+			assert.ok(error instanceof SubagentStoppedError);
+			assert.equal(error.reason, "parent");
+			assert.ok(error.snapshot.startedAt >= cancelStartedAt && error.snapshot.startedAt < cancelStartedAt + 30);
+			assert.match(error.snapshot.phase, /cancelled while queued/);
+			return true;
+		});
+		await holder2;
+		assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 2);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("stale resumable locks fail without unsafe automatic recovery", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-stale-lock-"));
+	const sessionDir = path.join(root, "sessions");
+	const rootSessionId = "root";
+	const participantIdentity = "worker";
+	const key = createHash("sha256").update(`${rootSessionId}\0${participantIdentity}`).digest("hex");
+	const lockPath = path.join(sessionDir, ".locks", key);
+	try {
+		await mkdir(lockPath, { recursive: true });
+		await writeFile(path.join(lockPath, "owner.json"), JSON.stringify({ pid: 2147483647, token: "stale" }));
+		await assert.rejects(runSubagent("worker", "task", root, noAbort, {
+			lifecycle: "resumable", rootSessionId, participantIdentity, participantSessionDir: sessionDir,
+		}), /stale resumable participant lock.*verify no child is running/);
+		assert.ok(existsSync(path.join(lockPath, "owner.json")), "stale ownership is preserved for manual recovery");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("resumable sessions reject malformed, truncated, and broken JSONL before launch", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-session-validation-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	const log = path.join(root, "runs.log");
+	const sessionDir = path.join(root, "sessions");
+	const rootSessionId = "root";
+	const participantIdentity = "worker";
+	const key = createHash("sha256").update(`${rootSessionId}\0${participantIdentity}`).digest("hex");
+	const sessionFile = path.join(sessionDir, `${key}.jsonl`);
+	try {
+		await writeFile(fakePi, `#!/usr/bin/env node
+			import { appendFileSync } from "node:fs";
+			appendFileSync(${JSON.stringify(log)}, "launched\\n");
+			process.stdin.once("data", () => {
+				process.stdout.write(JSON.stringify({type:"message_end", message:{content:[{type:"text", text:"ok"}]}}) + "\\n");
+				process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
+			});
+		`);
+		await chmod(fakePi, 0o755);
+		await mkdir(sessionDir, { recursive: true });
+		const options = { executable: fakePi, lifecycle: "resumable" as const, rootSessionId, participantIdentity, participantSessionDir: sessionDir };
+		const header = JSON.stringify({ type: "session", version: 3, id: "session-id", timestamp: new Date().toISOString(), cwd: root });
+		const first = JSON.stringify({ type: "message", id: "a1b2c3d4", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: "hello", timestamp: Date.now() } });
+		await writeFile(sessionFile, `${header}\n${first}\n`);
+		assert.equal(await runSubagent("worker", "valid", root, noAbort, options), "ok");
+		assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 1);
+
+		for (const [name, content, pattern] of [
+			["malformed", `${header}\n{not-json}\n`, /malformed JSONL at line 2/],
+			["truncated", `${header}\n{\"type\":\"message\"`, /malformed JSONL at line 2/],
+			["broken", `${header}\n${JSON.stringify({ type: "message", id: "deadbeef", parentId: "missing", timestamp: new Date().toISOString(), message: { role: "user", content: "lost" } })}\n`, /broken tree history at line 2/],
+			["missing context", `${header}\n${JSON.stringify({ type: "message", id: "deadbeef", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: null } })}\n`, /invalid message at line 2/],
+		] as const) {
+			await writeFile(sessionFile, content);
+			await assert.rejects(runSubagent("worker", name, root, noAbort, options), pattern);
+		}
+		assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 1, "invalid history never reaches Pi's permissive loader");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("agent lifecycle is validated and defaults to disposable behavior", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-lifecycle-"));
+	try {
+		await mkdir(path.join(root, ".pi-agents", "keep"), { recursive: true });
+		await mkdir(path.join(root, ".pi-agents", "fresh"), { recursive: true });
+		await writeFile(path.join(root, ".pi-agents", "keep", "agent.json"), JSON.stringify({ name: "keep", description: "Keep", lifecycle: "resumable" }));
+		await writeFile(path.join(root, ".pi-agents", "fresh", "agent.json"), JSON.stringify({ name: "fresh", description: "Fresh" }));
+		const agents = (await discoverAgents(root)).agents;
+		assert.equal(agents.find(agent => agent.name === "keep")?.lifecycle, "resumable");
+		assert.equal(agents.find(agent => agent.name === "fresh")?.lifecycle, "disposable");
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
