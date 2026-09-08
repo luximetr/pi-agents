@@ -9,7 +9,7 @@ Opencode-style agents for [pi](https://github.com/earendil-dev/pi): define agent
 Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.3.0        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.3.1        # all projects (user scope)
 ```
 
 Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
@@ -20,7 +20,7 @@ To track the latest commit on `main` instead of a pinned release:
 pi install git:github.com/luximetr/pi-agents
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.3.0`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+To update an existing installation, run the same command with the desired ref (for example `@v0.3.1`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
 
 Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
 
@@ -241,8 +241,8 @@ While the parent waits, the delegation card shows the child's configured model (
 
 - `↑↓` / `j k`: select runs in the tree. `←→`: collapse/expand or navigate parent/child.
 - `Enter`: focus the conversation at full width. `→`: dive into its first child; `←` / `Esc`: back. `Tab`: switch tree/conversation focus. Narrow terminals show one pane at a time.
-- `PgUp` / `PgDn`: scroll the conversation; `Home`: beginning; `End`: follow live output again. Scrolling up pauses auto-follow. Each run keeps its scroll position while navigating.
-- `e`: expand/collapse tool arguments and results. `s`: queue steering for the selected active run; its transcript reports RPC acceptance/rejection (acceptance is not immediate delivery).
+- `Control-U` / `Control-D`: scroll the conversation by a page; `g`: beginning; `Shift-G`: follow live output again. Scrolling up pauses auto-follow. Each run keeps its scroll position while navigating. The equivalent MacBook `Fn-↑` / `Fn-↓` and `Fn-←` / `Fn-→` keys also work.
+- `p`: expand/collapse the full task prompt. `e`: expand/collapse tool arguments and results. `s`: queue steering for the selected active run; its transcript reports RPC acceptance/rejection (acceptance is not immediate delivery).
 - `x`: confirm stopping the selected run **and its descendants**, not unrelated siblings. `Esc`: back/close; `f9`: close directly. Viewing or closing the explorer never interrupts a run or switches the main session.
 
 Observation uses a private local socket on macOS/Linux, independent of the child RPC pipes and model context; no Orca-specific integration is required. History is in memory for the current runtime: `/reload`, session replacement, and exit clear it. Each transcript retains up to 400 entries / 100,000 characters, with 16,000-character entry previews; up to 100 completed-run transcripts are retained alongside active runs. Omitted history is marked explicitly. Run metadata remains in the tree. Images appear as placeholders. No transcript files are written; observed tool output may contain sensitive content, so treat the viewer like the main chat.

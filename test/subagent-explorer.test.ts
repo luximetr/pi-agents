@@ -182,6 +182,7 @@ test("owner disconnect marks incomplete remote runs unavailable, not successfull
 test("explorer supports bounded wide/narrow layouts, drill-down/back, scrolling and completed history", async () => {
 	const parent = snapshot("parent");
 	const child = snapshot("child", "parent");
+	parent.task = "First prompt line\nSecond prompt line";
 	parent.transcript = [{ id: "text", kind: "assistant", text: Array.from({ length: 100 }, (_, i) => `line-${i}`).join("\n") }];
 	child.transcript = [{ id: "text", kind: "assistant", text: "nested conversation 中文 🐳" }];
 	const handles = [handleFor(parent), handleFor(child)];
@@ -197,15 +198,26 @@ test("explorer supports bounded wide/narrow layouts, drill-down/back, scrolling 
 			assert.equal(lines.length, height);
 			assert.ok(lines.every((line: string) => visibleWidth(line) <= width));
 		}
+		assert.match(component.render(120).join("\n"), /⌃U\/⌃D page · g\/G start\/follow · p prompt/);
 		component.handleInput("\r");
 		let text = component.render(120).join("\n");
 		assert.match(text, /line-99/);
-		component.handleInput("\u001b[H");
+		component.handleInput("p");
+		text = component.render(120).join("\n");
+		assert.match(text, /Task: First prompt line\nSecond prompt line/);
+		component.handleInput("p");
+		component.handleInput("g");
 		text = component.render(120).join("\n");
 		assert.match(text, /line-0\n/);
 		assert.match(text, /scroll paused/);
+		component.handleInput("\x04");
+		assert.doesNotMatch(component.render(120).join("\n"), /line-0\n/);
+		component.handleInput("g");
 		parent.transcript[0].text += "\nnew streamed line";
 		assert.match(component.render(120).join("\n"), /line-0\n/);
+		component.handleInput("G");
+		assert.match(component.render(120).join("\n"), /new streamed line/);
+		component.handleInput("g");
 		component.handleInput("\u001b[C");
 		assert.match(component.render(120).join("\n"), /nested conversation/);
 		component.handleInput("\u001b");

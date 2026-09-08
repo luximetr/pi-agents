@@ -79,6 +79,7 @@ export function showSubagentInspector(
 		let maxScroll = 0;
 		const history: string[] = [];
 		const collapsed = new Set<string>();
+		const expandedTasks = new Set<string>();
 		const scroll = new Map<string, { top: number; follow: boolean }>();
 		const input = new Input();
 		let disposed = false;
@@ -164,10 +165,14 @@ export function showSubagentInspector(
 				const activeChildren = runs.some(run => run.parentRunId === selected.id && isActiveRun(run));
 				const stale = selected.status === "running" && !activeChildren && staleWarningMinutes > 0 && now - selected.lastActivityAt >= staleWarningMinutes * 60_000;
 				const usage = selected.usage;
+				const taskExpanded = expandedTasks.has(selected.id);
+				const taskLines = taskExpanded
+					? wrapTextWithAnsi(`Task: ${safe(selected.task)}`, rightWidth)
+					: [`Task: ${safe(selected.task).replace(/\n/g, " ")}`];
 				const detailHeader = [
 					`${badge(selected)} ${safe(phase(selected, runs))} · ${elapsedTime}${deadline}`,
 					`Model: ${safe(model(selected))}`,
-					`Task: ${safe(selected.task).replace(/\n/g, " ")}`,
+					...taskLines,
 					selected.currentTool ? `Tool: ${safe(selected.currentTool)}` : `Status: ${selected.status}`,
 					stale ? theme.fg("warning", `No agent activity for ${elapsed(now - selected.lastActivityAt)} — possibly stalled`)
 						: usage ? `Own usage: ↑${usage.input} ↓${usage.output} R${usage.cacheRead} W${usage.cacheWrite} · $${usage.cost.toFixed(3)}` : "Usage: pending",
@@ -206,7 +211,7 @@ export function showSubagentInspector(
 				if (!notice && width < 80) footer = full || detailFocus ? "↑↓ scroll · → child · Esc back" : "↑↓ select · Enter open · Esc back";
 				if (mode === "stop") footer = `Stop ${targetName} AND its descendants? y confirm · n/Esc cancel`;
 				if (mode === "steer") footer = `Steer ${targetName} › ${input.render(Math.max(1, width - targetName.length - 11))[0] ?? ""}`;
-				const keys = width < 80 ? "s steer · x stop · e tools · F9 close" : "PgUp/PgDn scroll · Home start · End follow · e tools · s steer · x stop subtree · F9 close";
+				const keys = width < 80 ? "p prompt · e tools · s steer · x stop · F9 close" : "⌃U/⌃D page · g/G start/follow · p prompt · e tools · s steer · x stop subtree · F9 close";
 				return [...header, ...body, theme.fg("muted", footer), theme.fg("dim", mode === "steer" ? "Enter queue steering · Esc cancel" : mode === "stop" ? "y confirm subtree stop · n/Esc cancel" : keys)].map(line => truncateToWidth(line, width));
 			},
 			handleInput(data: string) {
@@ -236,10 +241,14 @@ export function showSubagentInspector(
 						else { close(); return; }
 					} else if (matchesKey(data, Key.enter)) { full = true; detailFocus = true; }
 					else if (matchesKey(data, Key.tab)) { full = false; detailFocus = !detailFocus; history.length = 0; }
-					else if (matchesKey(data, Key.pageUp)) scrollBy(-transcriptHeight);
-					else if (matchesKey(data, Key.pageDown)) scrollBy(transcriptHeight);
-					else if (matchesKey(data, Key.home)) { position().top = 0; position().follow = false; }
-					else if (matchesKey(data, Key.end)) position().follow = true;
+					else if (matchesKey(data, Key.pageUp) || matchesKey(data, Key.ctrl("u"))) scrollBy(-transcriptHeight);
+					else if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.ctrl("d"))) scrollBy(transcriptHeight);
+					else if (matchesKey(data, Key.home) || data === "g") { position().top = 0; position().follow = false; }
+					else if (matchesKey(data, Key.end) || data === "G") position().follow = true;
+					else if (data === "p") {
+						if (expandedTasks.has(selectedId)) expandedTasks.delete(selectedId);
+						else expandedTasks.add(selectedId);
+					}
 					else if (data === "e") expandTools = !expandTools;
 					else if (data === "s" || data === "x") {
 						target = getHandles().find(handle => handle.id === selectedId);
