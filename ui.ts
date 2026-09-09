@@ -485,7 +485,6 @@ export async function showAgentStudio(
 	let subagents = agent.subagents?.map(entry => ({ ...entry }));
 	let systemPrompt = agent.systemPrompt ?? "";
 	let description = agent.description;
-	let lifecycle = agent.lifecycle ?? "disposable";
 	let color = agent.color;
 	const sourceIsEditable = canSaveAgentSource(agent);
 	const sourceFileName = agent.filePath.split(/[\\/]/).at(-1) ?? "agent source";
@@ -501,7 +500,6 @@ export async function showAgentStudio(
 		});
 		const actions = [
 			item(StudioAction.Description),
-			item(StudioAction.Lifecycle, lifecycle),
 			item(StudioAction.Color, color ?? "automatic"),
 			item(StudioAction.Prompt, systemPrompt ? `${systemPrompt.split("\n").length} lines` : "empty"),
 			item(StudioAction.Tools, inheritsTools ? "inherited" : String(tools.length)),
@@ -527,14 +525,6 @@ export async function showAgentStudio(
 		if (choice === StudioAction.Description) {
 			const edited = await editAgentField(ctx, AgentField.Description, currentDraft(), available);
 			if (edited?.trim()) description = edited.trim();
-			continue;
-		}
-		if (choice === StudioAction.Lifecycle) {
-			const selected = await selectMenu(ctx, `Delegated lifecycle · ${agent.name}`, [
-				{ id: "disposable", label: "Disposable (fresh context for every delegation)" },
-				{ id: "resumable", label: "Resumable (retain context in this main session)" },
-			]);
-			if (selected) lifecycle = selected;
 			continue;
 		}
 		if (choice === StudioAction.Color) {
@@ -598,7 +588,6 @@ export async function showAgentStudio(
 		if (choice === StudioAction.Revert) return { action: "revert" };
 		const override: AgentOverride = {
 			description,
-			lifecycle,
 			color: color ?? null,
 			...(inheritsTools ? {} : { tools }),
 			...(subagents === undefined ? {} : { subagents }),

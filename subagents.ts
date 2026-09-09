@@ -93,11 +93,11 @@ export interface RunSubagentOptions {
 	runtimeAgentOverrides?: Record<string, unknown>;
 	/** Stable id supplied by the caller; otherwise a process-local id is generated. */
 	id?: string;
-	/** Persist and resume this agent's participant session instead of creating a fresh session. */
+	/** Persist and resume this assignment's participant session instead of creating a fresh session. */
 	lifecycle?: "disposable" | "resumable";
 	/** Identity of the root (user-facing) Pi session. Required for resumable participants. */
 	rootSessionId?: string;
-	/** Effective target identity (normally source path + effective agent name). */
+	/** Effective parent-child assignment identity used to isolate resumable context. */
 	participantIdentity?: string;
 	/** Override the private participant-session directory (primarily for tests). */
 	participantSessionDir?: string;

@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { discoverAgents, findMainCheckoutRoot } from "../agents.ts";
+import { discoverAgents, findMainCheckoutRoot, resolveSubagentLifecycle, subagentAssignmentIdentity } from "../agents.ts";
 import extension, { matchesDeniedPath } from "../index.ts";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
@@ -63,7 +63,7 @@ test("smoke: discovers an agent hierarchy", async () => {
 	try {
 		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
-			export default { name: "lead", description: "Coordinator", subagents: ["worker", { name: "researcher", model: "test/research-model", timeoutSeconds: 45 }] };
+			export default { name: "lead", description: "Coordinator", subagents: ["worker", { name: "researcher", model: "test/research-model", timeoutSeconds: 45, lifecycle: "resumable" }] };
 		`);
 		await mkdir(path.join(root, ".pi-agents", "worker"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
@@ -73,7 +73,7 @@ test("smoke: discovers an agent hierarchy", async () => {
 		const lead = result.agents.find((agent) => agent.name === "lead");
 		assert.deepEqual(lead?.subagents, [
 			{ name: "worker" },
-			{ name: "researcher", model: "test/research-model", timeoutSeconds: 45 },
+			{ name: "researcher", model: "test/research-model", timeoutSeconds: 45, lifecycle: "resumable" },
 		]);
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -122,7 +122,7 @@ test("end to end: delegate launches an isolated child with the target agent", as
 	}
 });
 
-test("resumable subagents use one serialized disk session per root and effective agent", async () => {
+test("resumable assignments use one serialized disk session per root and assignment identity", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-resumable-"));
 	const fakePi = path.join(root, "fake-pi.mjs");
 	const log = path.join(root, "runs.log");
@@ -328,16 +328,27 @@ test("resumable sessions reject malformed, truncated, and broken JSONL before la
 	}
 });
 
-test("agent lifecycle is validated and defaults to disposable behavior", async () => {
+test("assignment lifecycle defaults to disposable and contexts are parent-child scoped", () => {
+	assert.equal(resolveSubagentLifecycle({ name: "worker", lifecycle: "resumable" }), "resumable");
+	assert.equal(resolveSubagentLifecycle({ name: "worker" }), "disposable");
+
+	const worker = { name: "worker", source: "project" as const, filePath: "/agents/worker.ts" };
+	const lead = { name: "lead", source: "project" as const, filePath: "/agents/lead.ts" };
+	const reviewer = { name: "reviewer", source: "project" as const, filePath: "/agents/reviewer.ts" };
+	assert.equal(subagentAssignmentIdentity(lead, worker), subagentAssignmentIdentity(lead, worker));
+	assert.notEqual(subagentAssignmentIdentity(lead, worker), subagentAssignmentIdentity(reviewer, worker));
+});
+
+test("agent lifecycle metadata is ignored and assignment lifecycle is validated", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-lifecycle-"));
 	try {
 		await mkdir(path.join(root, ".pi-agents", "keep"), { recursive: true });
-		await mkdir(path.join(root, ".pi-agents", "fresh"), { recursive: true });
+		await mkdir(path.join(root, ".pi-agents", "parent"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "keep", "agent.json"), JSON.stringify({ name: "keep", description: "Keep", lifecycle: "resumable" }));
-		await writeFile(path.join(root, ".pi-agents", "fresh", "agent.json"), JSON.stringify({ name: "fresh", description: "Fresh" }));
+		await writeFile(path.join(root, ".pi-agents", "parent", "agent.json"), JSON.stringify({ name: "parent", description: "Parent", subagents: [{ name: "keep", lifecycle: "session" }] }));
 		const agents = (await discoverAgents(root)).agents;
-		assert.equal(agents.find(agent => agent.name === "keep")?.lifecycle, "resumable");
-		assert.equal(agents.find(agent => agent.name === "fresh")?.lifecycle, "disposable");
+		assert.equal("lifecycle" in agents.find(agent => agent.name === "keep")!, false);
+		assert.equal(agents.find(agent => agent.name === "parent")?.subagents, undefined);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
@@ -518,7 +529,7 @@ function bootExtension(root: string) {
 	};
 	extension(pi);
 	const theme = { fg: (role: string, text: string) => text, getColorMode: () => "truecolor" };
-	const ctx: any = { cwd: root, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => undefined }, ui: { theme, setStatus: () => {}, notify: () => {} } };
+	const ctx: any = { cwd: root, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => undefined, getSessionId: () => "root-test-session" }, ui: { theme, setStatus: () => {}, notify: () => {} } };
 	return { handlers, registered, ctx };
 }
 
@@ -532,11 +543,11 @@ test("end to end: configured subagent timeout returns control to the parent dele
 			subagents: { gracefulStopSeconds: 0.01 },
 		}));
 		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
-			export default { name: "lead", description: "Lead", default: true, subagents: [{ name: "worker", model: "test/worker-model", timeoutSeconds: 1.5 }] };
+			export default { name: "lead", description: "Lead", default: true, subagents: [{ name: "worker", model: "test/worker-model", timeoutSeconds: 1.5, lifecycle: "disposable" }] };
 		`);
 		await mkdir(path.join(root, ".pi-agents", "worker"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
-			export default { name: "worker", description: "Worker" };
+			export default { name: "worker", description: "Worker", lifecycle: "resumable" };
 		`);
 		await writeFile(fakePi, `#!/usr/bin/env node
 			const args = process.argv.slice(2);

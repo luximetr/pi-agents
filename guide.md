@@ -56,8 +56,7 @@ export default {
   limitations: ["Does not modify application code"],    // optional
   promptSummary: "Methodical browser operator.",         // optional
   tools: ["read", "bash"],            // allowlist; omit = keep current, [] = no tools
-  lifecycle: "resumable",              // delegated context; omit/default = "disposable"
-  subagents: ["developer"],            // optional delegation allowlist; object entries may set model/timeout
+  subagents: ["developer"],            // optional delegation allowlist; object entries may set model/timeout/lifecycle
   mcp: ["playwright"],                // MCP servers to connect (opt-in!)
   // color: "#ff8800",                 // theme role or hex; auto-assigned by name when omitted
   systemPrompt: "You are...",         // inline…
@@ -89,17 +88,17 @@ export default {
   description: "Coordinates specialists.",
   subagents: [
     "developer",
-    { name: "researcher", model: "anthropic/claude-sonnet-5", timeoutSeconds: 900 },
+    { name: "researcher", model: "anthropic/claude-sonnet-5", timeoutSeconds: 900, lifecycle: "resumable" },
   ],
   systemPrompt: "Delegate implementation and research; keep the high-level context short.",
 };
 ```
 
-`subagents` is an allowlist. A string entry uses Pi's normal default model selection and has no deadline. An object entry can fix the model and/or `timeoutSeconds` for that parent-to-child delegation; different parents may configure the same child differently. The parent automatically sees a roster of allowed child names, descriptions, models, and deadlines in its prompt.
+`subagents` is an allowlist. A string entry uses Pi's normal default model selection, has no deadline, and uses the default disposable lifecycle. An object entry can fix the model, `timeoutSeconds`, and/or `lifecycle` for that parent-to-child delegation; different parents may configure the same child differently. In Agent Studio, **Manage subagents → Lifecycle** offers **Disposable** and **Resumable**. The parent automatically sees a roster of allowed child names, descriptions, models, deadlines, and lifecycles in its prompt.
 
-The target agent's `lifecycle` controls context. Omitted or `"disposable"` preserves the fresh ephemeral `pi --mode rpc --no-session` behavior. A `"resumable"` agent instead owns a private disk-backed Pi session keyed by the root main-session identity and effective agent identity. It resumes across later delegations, `/reload`, nested delegation, and process restart; a new main session gets a separate participant. Top-level requests for one participant are serialized (different agents can still run in parallel). Nested delegation to an already-busy resumable participant fails visibly rather than queues; this conservative rule prevents both direct recursion and concurrent A→B/B→A cycles from deadlocking. A relationship's `timeoutSeconds` covers queue wait plus execution. Persistence errors, malformed or structurally broken session JSONL, and stale locks fail visibly and never fall back to a fresh session. Stale locks are not recovered automatically because the owning parent's child may still be alive; verify no child is running before manually removing the lock path reported by the error. Only each invocation's final answer is returned to its caller.
+An omitted assignment `lifecycle` defaults to `"disposable"`. Disposable runs use a fresh ephemeral `pi --mode rpc --no-session` context. A resumable assignment instead owns a private disk-backed Pi session keyed by the root main-session identity and effective parent-child assignment. It resumes across later delegations, `/reload`, nested delegation, and process restart; another parent targeting the same child has isolated context, and a new main session gets a separate participant. Top-level requests for one participant are serialized (different assignments can still run in parallel). Nested delegation to an already-busy resumable participant fails visibly rather than queues; this conservative rule prevents both direct recursion and concurrent A→B/B→A cycles from deadlocking. A relationship's `timeoutSeconds` covers queue wait plus execution. Persistence errors, malformed or structurally broken session JSONL, and stale locks fail visibly and never fall back to a fresh session. Stale locks are not recovered automatically because the owning parent's child may still be alive; verify no child is running before manually removing the lock path reported by the error. Only each invocation's final answer is returned to its caller.
 
-Resumable conversation files live under `~/.pi/agent/pi-agents-subagent-sessions/<hash>.jsonl` with locks under `.locks/`; `PI_CODING_AGENT_DIR` overrides the base directory. Storage directories are owner-only (`0700`). There is no automatic cleanup or reset action yet; new main sessions use separate participants without deleting old files. Missing final JSONL newlines are rejected before resume without modifying history. Queued requests appear in Agent Explorer, can be stopped individually, and retain timeout/failure status for the current runtime. Steering is unavailable until the child starts; its run ID and total deadline stay unchanged.
+Resumable assignment conversation files live under `~/.pi/agent/pi-agents-subagent-sessions/<hash>.jsonl` with locks under `.locks/`; `PI_CODING_AGENT_DIR` overrides the base directory. Storage directories are owner-only (`0700`). There is no automatic cleanup or reset action yet; new main sessions use separate participants without deleting old files. Missing final JSONL newlines are rejected before resume without modifying history. Queued requests appear in Agent Explorer, can be stopped individually, and retain timeout/failure status for the current runtime. Steering is unavailable until the child starts; its run ID and total deadline stay unchanged.
 
 Nested delegation remains limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
 

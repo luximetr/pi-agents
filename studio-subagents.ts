@@ -10,7 +10,7 @@ export async function editSubagents(ctx: ExtensionContext, parent: string, agent
 			{ id: "add", label: "Add subagent" },
 			...entries.map((entry, index) => ({
 				id: `entry:${index}`,
-				label: `${index + 1} · ${entry.name} · ${entry.model ?? "default model"} · ${entry.timeoutSeconds === undefined ? "no timeout" : `${entry.timeoutSeconds}s`}${agents.some(agent => agent.name === entry.name) ? "" : " (missing agent)"}`,
+				label: `${index + 1} · ${entry.name} · ${entry.model ?? "default model"} · ${entry.timeoutSeconds === undefined ? "no timeout" : `${entry.timeoutSeconds}s`} · ${entry.lifecycle ?? "disposable"}${agents.some(agent => agent.name === entry.name) ? "" : " (missing agent)"}`,
 			})),
 			{ id: "done", label: "Done" },
 		];
@@ -32,6 +32,7 @@ export async function editSubagents(ctx: ExtensionContext, parent: string, agent
 		const action = await selectMenu(ctx, `Subagent · ${entry.name}`, [
 			{ id: "model", label: `Set model (${entry.model ?? "default"})` },
 			{ id: "timeout", label: `Set timeout (${entry.timeoutSeconds === undefined ? "none" : `${entry.timeoutSeconds}s`})` },
+			{ id: "lifecycle", label: `Set lifecycle (${entry.lifecycle ?? "disposable"})` },
 			{ id: "remove", label: "Remove subagent" },
 			{ id: "back", label: "Back" },
 		]);
@@ -47,6 +48,13 @@ export async function editSubagents(ctx: ExtensionContext, parent: string, agent
 			if (timeout !== undefined && (!Number.isFinite(timeout) || timeout <= 0)) {
 				ctx.ui.notify("Timeout must be a positive number of seconds.", "warning");
 			} else entry.timeoutSeconds = timeout;
+		}
+		if (action === "lifecycle") {
+			const lifecycle = await selectMenu(ctx, `Lifecycle · ${parent} → ${entry.name}`, [
+				{ id: "disposable", label: "Disposable (fresh context for every delegation)" },
+				{ id: "resumable", label: "Resumable (retain context for this assignment)" },
+			]);
+			if (lifecycle) entry.lifecycle = lifecycle;
 		}
 	}
 }

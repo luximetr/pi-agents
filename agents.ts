@@ -28,8 +28,8 @@ export const Tools: Record<BuiltinTool, BuiltinTool> = {
  */
 export type ToolName = BuiltinTool | (string & {});
 
-/** Conversation lifetime for delegated instances of an agent. */
-export type AgentLifecycle = "disposable" | "resumable";
+/** Conversation lifetime for a parent-to-child assignment. */
+export type SubagentLifecycle = "disposable" | "resumable";
 
 /**
  * Shell execution available to custom tools: `exec(command, args, options?)`
@@ -69,21 +69,26 @@ export interface SubagentConfig {
 	model?: string;
 	/** Total execution limit in seconds for this parent-to-child delegation. Omit for no deadline. */
 	timeoutSeconds?: number;
+	/** Conversation lifetime for this assignment. Omit for disposable behavior. */
+	lifecycle?: SubagentLifecycle;
 }
 
 /** Shorthand agent name or a configured parent-to-child delegation. */
 export type SubagentDeclaration = string | SubagentConfig;
 
+/** Resolve an assignment's lifecycle, defaulting omitted values to disposable. */
+export function resolveSubagentLifecycle(assignment: SubagentConfig): SubagentLifecycle {
+	return assignment.lifecycle ?? "disposable";
+}
+
 /**
  * Agent definition. The interactive agent's model and thinking level are
- * selected in pi itself. A delegated child may have fixed model and timeout
- * settings configured on its parent's `subagents` entry.
+ * selected in pi itself. A delegated child may have fixed model, timeout, and
+ * lifecycle settings configured on its parent's `subagents` entry.
  */
 export interface AgentConfig {
 	/** Unique agent name, used in UI and commands */
 	name: string;
-	/** Delegated conversation lifetime. Omit for the current fresh-session behavior. */
-	lifecycle?: AgentLifecycle;
 	/** One-line description shown in the picker. */
 	description: string;
 	/** Short user-facing explanation of the tasks this agent is best suited for. */
@@ -125,7 +130,7 @@ export interface AgentConfig {
 	 * name. Registered when the agent is applied; active only while it is.
 	 */
 	customTools?: Record<string, AgentCustomTool>;
-	/** Agents this agent may delegate to. Object entries can set a model and timeout for that parent-to-child delegation. */
+	/** Agents this agent may delegate to. Object entries can set model, timeout, and lifecycle for that parent-to-child delegation. */
 	subagents?: SubagentDeclaration[];
 	/** Auto-select this agent on session start (config.json defaultAgent wins over this) */
 	default?: boolean;
@@ -151,11 +156,18 @@ export interface DiscoveredAgent extends Omit<AgentConfig, "subagents"> {
 	studioDraft?: boolean;
 }
 
+/** Stable resumable-context identity for one parent-to-child assignment. */
+export function subagentAssignmentIdentity(
+	parent: Pick<DiscoveredAgent, "source" | "filePath" | "name">,
+	child: Pick<DiscoveredAgent, "source" | "filePath" | "name">,
+): string {
+	const identity = (agent: Pick<DiscoveredAgent, "source" | "filePath" | "name">) => [agent.source, path.resolve(agent.filePath), agent.name];
+	return JSON.stringify([identity(parent), identity(child)]);
+}
+
 export interface AgentOverride {
 	/** Replace the description shown in Studio and delegation help. */
 	description?: string;
-	/** Replace the delegated conversation lifetime. */
-	lifecycle?: AgentLifecycle;
 	/** Replace the display color; null restores automatic coloring. */
 	color?: string | null;
 	/** Replace the agent's declared base tool allowlist. Omit to keep the source definition. */
@@ -252,7 +264,6 @@ function normalizeAgent(
 		return null;
 	}
 	const color = normalizeColor(cfg.color, filePath);
-	const lifecycle = normalizeLifecycle(cfg.lifecycle, filePath);
 	const dir = path.dirname(filePath);
 
 	let systemPrompt: string | undefined = cfg.systemPrompt;
@@ -280,7 +291,6 @@ function normalizeAgent(
 	return {
 		name,
 		description: cfg.description.trim(),
-		lifecycle: lifecycle ?? "disposable",
 		whenToUse: normalizeOptionalText(cfg.whenToUse),
 		capabilities: normalizeTextList(cfg.capabilities),
 		limitations: normalizeTextList(cfg.limitations),
@@ -309,13 +319,6 @@ function normalizeAgent(
 	};
 }
 
-function normalizeLifecycle(raw: unknown, filePath: string): AgentLifecycle | undefined {
-	if (raw === undefined) return undefined;
-	if (raw === "disposable" || raw === "resumable") return raw;
-	console.error(`pi-agents: ${filePath}: invalid "lifecycle" ${JSON.stringify(raw)} — use "disposable" or "resumable"`);
-	return undefined;
-}
-
 function normalizeOptionalText(raw: unknown): string | undefined {
 	return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
 }
@@ -337,10 +340,10 @@ export function normalizeSubagents(raw: unknown, filePath: string): SubagentConf
 			continue;
 		}
 		if (!entry || typeof entry !== "object") {
-			console.error(`pi-agents: ${filePath}: invalid subagent entry — use a name string or { name, model?, timeoutSeconds? }`);
+			console.error(`pi-agents: ${filePath}: invalid subagent entry — use a name string or { name, model?, timeoutSeconds?, lifecycle? }`);
 			continue;
 		}
-		const candidate = entry as { name?: unknown; model?: unknown; timeoutSeconds?: unknown };
+		const candidate = entry as { name?: unknown; model?: unknown; timeoutSeconds?: unknown; lifecycle?: unknown };
 		const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
 		if (!name) {
 			console.error(`pi-agents: ${filePath}: subagent entry is missing a valid "name"`);
@@ -354,10 +357,15 @@ export function normalizeSubagents(raw: unknown, filePath: string): SubagentConf
 			console.error(`pi-agents: ${filePath}: subagent "${name}" has an invalid "timeoutSeconds"`);
 			continue;
 		}
+		if (candidate.lifecycle !== undefined && candidate.lifecycle !== "disposable" && candidate.lifecycle !== "resumable") {
+			console.error(`pi-agents: ${filePath}: subagent "${name}" has an invalid "lifecycle" — use "disposable" or "resumable"`);
+			continue;
+		}
 		subagents.push({
 			name,
-			model: typeof candidate.model === "string" ? candidate.model.trim() : undefined,
-			timeoutSeconds: typeof candidate.timeoutSeconds === "number" ? candidate.timeoutSeconds : undefined,
+			...(typeof candidate.model === "string" ? { model: candidate.model.trim() } : {}),
+			...(typeof candidate.timeoutSeconds === "number" ? { timeoutSeconds: candidate.timeoutSeconds } : {}),
+			...(candidate.lifecycle === "disposable" || candidate.lifecycle === "resumable" ? { lifecycle: candidate.lifecycle } : {}),
 		});
 	}
 	return subagents.length > 0 ? subagents : undefined;
@@ -552,7 +560,6 @@ function normalizeAgentOverrides(raw: unknown): Record<string, AgentOverride> | 
 		const candidate = value as Record<string, unknown>;
 		const override: AgentOverride = {};
 		if (typeof candidate.description === "string" && candidate.description.trim()) override.description = candidate.description.trim();
-		if (candidate.lifecycle === "disposable" || candidate.lifecycle === "resumable") override.lifecycle = candidate.lifecycle;
 		if (candidate.color === null) override.color = null;
 		else if (parseAgentColor(candidate.color)) override.color = parseAgentColor(candidate.color);
 		if (Array.isArray(candidate.tools)) override.tools = candidate.tools.map(String).map((item) => item.trim()).filter(Boolean);
@@ -795,7 +802,6 @@ export function applyAgentOverride(
 		...(savedOverrideSources ? { savedOverrideSources: [...savedOverrideSources] } : {}),
 	};
 	if (override.description !== undefined) result.description = override.description;
-	if (override.lifecycle !== undefined) result.lifecycle = override.lifecycle;
 	if (override.color !== undefined) result.color = override.color === null ? undefined : parseAgentColor(override.color);
 	if (override.tools !== undefined) result.tools = [...override.tools];
 	if (override.mcp !== undefined) result.mcp = [...override.mcp];
@@ -866,7 +872,6 @@ function updateAgentsConfig(cwd: string, scope: "project" | "global", update: (r
 export interface DeclarativeAgentInput {
 	name: string;
 	description: string;
-	lifecycle?: AgentLifecycle;
 	color?: string;
 	tools?: ToolName[];
 	mcp?: string[];
@@ -946,10 +951,11 @@ function tsTools(entries: ToolName[], property: ts.ObjectLiteralElementLike | un
 
 function tsSubagents(entries: SubagentConfig[]): string {
 	return `[${entries.map((entry) => {
-		if (!entry.model && entry.timeoutSeconds === undefined) return JSON.stringify(entry.name);
+		if (!entry.model && entry.timeoutSeconds === undefined && entry.lifecycle === undefined) return JSON.stringify(entry.name);
 		const fields = [`name: ${JSON.stringify(entry.name)}`];
 		if (entry.model) fields.push(`model: ${JSON.stringify(entry.model)}`);
 		if (entry.timeoutSeconds !== undefined) fields.push(`timeoutSeconds: ${entry.timeoutSeconds}`);
+		if (entry.lifecycle !== undefined) fields.push(`lifecycle: ${JSON.stringify(entry.lifecycle)}`);
 		return `{ ${fields.join(", ")} }`;
 	}).join(", ")}]`;
 }
@@ -976,7 +982,6 @@ function updateStaticAgentSource(agent: DiscoveredAgent, override: AgentOverride
 	}
 	const desired = new Map<string, string | null>();
 	if (override.description !== undefined) desired.set("description", JSON.stringify(override.description.trim()));
-	if (override.lifecycle !== undefined) desired.set("lifecycle", JSON.stringify(override.lifecycle));
 	if (override.color !== undefined) desired.set("color", override.color === null ? null : JSON.stringify(parseAgentColor(override.color)));
 	if (override.tools !== undefined) desired.set("tools", tsTools(override.tools, properties.get("tools"), source));
 	if (override.mcp !== undefined) desired.set("mcp", JSON.stringify(override.mcp));
@@ -1037,7 +1042,6 @@ function updateJsonAgentSource(agent: DiscoveredAgent, override: AgentOverride):
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`cannot save ${agent.filePath}: expected a JSON object`);
 	const data = { ...(parsed as Record<string, unknown>) };
 	if (override.description !== undefined) data.description = override.description.trim();
-	if (override.lifecycle !== undefined) data.lifecycle = override.lifecycle;
 	if (override.color !== undefined) {
 		if (override.color === null) delete data.color;
 		else data.color = parseAgentColor(override.color);
@@ -1082,7 +1086,6 @@ export function saveDeclarativeAgent(cwd: string, scope: "project" | "global", i
 	const data: DeclarativeAgentInput = {
 		name,
 		description: input.description.trim(),
-		...(input.lifecycle === undefined ? {} : { lifecycle: input.lifecycle }),
 		...(input.color === undefined ? {} : { color: parseAgentColor(input.color) }),
 		...(input.tools === undefined ? {} : { tools: [...input.tools] }),
 		...(input.mcp === undefined ? {} : { mcp: [...input.mcp] }),

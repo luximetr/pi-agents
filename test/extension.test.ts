@@ -347,16 +347,21 @@ test("/new inherits agent, model, reasoning and drafts across extension replacem
 test("subagent editor validates timeouts and cancels without mutating existing settings", async () => {
 	const current = [{ name: "missing", model: "old/model", timeoutSeconds: 20 }];
 	const runtime = boot("/tmp", {
-		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Set timeout (20s)", "Done"],
+		selectAnswers: ["1 · missing · old/model · 20s · disposable (missing agent)", "Set timeout (20s)", "Done"],
 		inputAnswers: ["-1"],
 	});
 	assert.deepEqual(await editSubagents(runtime.ctx, "parent", [], current), current);
 	assert.ok(runtime.notifications.some(item => item.message.includes("positive number")));
 	const cancelled = boot("/tmp", {
-		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Remove subagent", undefined],
+		selectAnswers: ["1 · missing · old/model · 20s · disposable (missing agent)", "Remove subagent", undefined],
 	});
 	assert.equal(await editSubagents(cancelled.ctx, "parent", [], current), undefined);
 	assert.equal(current.length, 1);
+
+	const lifecycle = boot("/tmp", {
+		selectAnswers: ["1 · child · default model · no timeout · disposable (missing agent)", "Set lifecycle (disposable)", "Resumable (retain context for this assignment)", "Done"],
+	});
+	assert.deepEqual(await editSubagents(lifecycle.ctx, "parent", [], [{ name: "child" }]), [{ name: "child", lifecycle: "resumable" }]);
 });
 
 test("Studio adds configured subagents, restores drafts, and saves an empty delegation list", async () => {
@@ -365,7 +370,7 @@ test("Studio adds configured subagents, restores drafts, and saves an empty dele
 		await makeAgent(root, "alpha", "default: true, tools: undefined");
 		await makeAgent(root, "beta");
 		const runtime = boot(root, {
-			selectAnswers: ["Manage subagents (0)", "Add subagent", "beta · beta", "1 · beta · default model · no timeout", "Set model (default)", "1 · beta · test/model · no timeout", "Set timeout (none)", "Done", "Apply as session draft"],
+			selectAnswers: ["Manage subagents (0)", "Add subagent", "beta · beta", "1 · beta · default model · no timeout · disposable", "Set model (default)", "1 · beta · test/model · no timeout · disposable", "Set timeout (none)", "1 · beta · test/model · 30s · disposable", "Set lifecycle (disposable)", "Resumable (retain context for this assignment)", "Done", "Apply as session draft"],
 			inputAnswers: ["test/model", "30"],
 			customActions: [component => component.handleInput("e")],
 		});
@@ -373,12 +378,12 @@ test("Studio adds configured subagents, restores drafts, and saves an empty dele
 		await runtime.commands.get("agent").handler("", runtime.ctx);
 		assert.ok(runtime.activeToolsets.at(-1)?.includes("delegate"));
 		const draft = runtime.entries.find(entry => entry.customType === "pi-agents-studio-state")!;
-		assert.deepEqual((draft.data as any).override.subagents, [{ name: "beta", model: "test/model", timeoutSeconds: 30 }]);
+		assert.deepEqual((draft.data as any).override.subagents, [{ name: "beta", model: "test/model", timeoutSeconds: 30, lifecycle: "resumable" }]);
 		saveAgentOverride(root, "project", "alpha", (draft.data as any).override);
 		assert.deepEqual((await discoverAgents(root)).agents.find(agent => agent.name === "alpha")?.subagents, (draft.data as any).override.subagents);
 		const restored = boot(root, {
 			branchEntries: [{ type: "custom", ...draft }],
-			selectAnswers: ["Manage subagents (1)", "1 · beta · test/model · 30s", "Remove subagent", "Done", "Save agent.ts (project)"],
+			selectAnswers: ["Manage subagents (1)", "1 · beta · test/model · 30s · resumable", "Remove subagent", "Done", "Save agent.ts (project)"],
 			customActions: [component => component.handleInput("e")],
 		});
 		await restored.handlers.get("session_start")?.({ reason: "startup" }, restored.ctx);
@@ -633,13 +638,13 @@ test("agent custom tools are registered, activated, and wrap string results", as
 test("parent prompts name allowed subagents and their runtime settings", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegation-prompt-"));
 	try {
-		await makeAgent(root, "lead", 'default: true, subagents: [{ name: "worker", model: "test/worker", timeoutSeconds: 90 }]');
+		await makeAgent(root, "lead", 'default: true, subagents: [{ name: "worker", model: "test/worker", timeoutSeconds: 90, lifecycle: "resumable" }]');
 		await makeAgent(root, "worker");
 		const runtime = boot(root);
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		const result = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
 		assert.match(result.systemPrompt, /allowed subagents/);
-		assert.match(result.systemPrompt, /worker: worker \(model test\/worker, 90s deadline\)/);
+		assert.match(result.systemPrompt, /worker: worker \(model test\/worker, 90s deadline, resumable lifecycle\)/);
 		assert.match(result.systemPrompt, /independent delegate calls together/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -749,7 +754,6 @@ test("Agent Studio can create and discover a declarative JSON agent", async () =
 		const filePath = saveDeclarativeAgent(root, "project", {
 			name: "browser-verifier",
 			description: "Checks browser behavior",
-			lifecycle: "resumable",
 			tools: ["read"],
 			mcp: ["playwright"],
 			systemPrompt: "Verify the running application.",
@@ -758,7 +762,6 @@ test("Agent Studio can create and discover a declarative JSON agent", async () =
 		const discovered = await discoverAgents(root);
 		const agent = discovered.agents.find((candidate) => candidate.name === "browser-verifier");
 		assert.equal(agent?.description, "Checks browser behavior");
-		assert.equal(agent?.lifecycle, "resumable");
 		assert.deepEqual(agent?.tools, ["read"]);
 		assert.deepEqual(agent?.mcp, ["playwright"]);
 		assert.equal(agent?.systemPrompt, "Verify the running application.");
@@ -777,13 +780,13 @@ test("direct JSON saves preserve metadata and update a referenced prompt file", 
 		const promptPath = path.join(path.dirname(filePath), "prompt.md");
 		await writeFile(promptPath, "Source prompt\n");
 		await writeFile(filePath, JSON.stringify({
-			name: "alpha", description: "source", whenToUse: "Keep this metadata", systemPromptFile: "./prompt.md",
+			name: "alpha", description: "source", lifecycle: "legacy-value", whenToUse: "Keep this metadata", systemPromptFile: "./prompt.md",
 		}, null, "\t"));
 		const agent = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
-		saveAgentSource(agent, { description: "updated", lifecycle: "resumable", color: null, mcp: [], systemPrompt: "Updated prompt\n" });
+		saveAgentSource(agent, { description: "updated", color: null, mcp: [], systemPrompt: "Updated prompt\n" });
 		const source = JSON.parse(await readFile(filePath, "utf8"));
 		assert.equal(source.description, "updated");
-		assert.equal(source.lifecycle, "resumable");
+		assert.equal(source.lifecycle, "legacy-value");
 		assert.equal(source.whenToUse, "Keep this metadata");
 		assert.equal(source.systemPromptFile, "./prompt.md");
 		assert.equal(source.systemPrompt, undefined);
@@ -803,6 +806,7 @@ test("direct TypeScript saves update the static agent object and its prompt file
 	name: "alpha",
 	// This executable field and comment must survive Studio saves.
 	description: "source",
+	lifecycle: "legacy-value",
 	color: "#ffffff",
 	tools: ["read"],
 	customTools: { ping: { description: "Ping", execute: () => "pong" } },
@@ -812,24 +816,25 @@ export default cfg;
 `);
 		const agent = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
 		saveAgentSource(agent, {
-			description: "updated", lifecycle: "resumable", color: null, tools: ["read", "grep"], mcp: ["playwright"],
-			subagents: [{ name: "beta", model: "openai-codex/gpt-5.3-codex-spark:high" }], systemPrompt: "Updated prompt\n",
+			description: "updated", color: null, tools: ["read", "grep"], mcp: ["playwright"],
+			subagents: [{ name: "beta", model: "openai-codex/gpt-5.3-codex-spark:high", lifecycle: "disposable" }], systemPrompt: "Updated prompt\n",
 		});
 		const source = await readFile(filePath, "utf8");
 		assert.match(source, /description: "updated"/);
-		assert.match(source, /lifecycle: "resumable"/);
+		assert.match(source, /lifecycle: "legacy-value"/);
 		assert.doesNotMatch(source, /color:/);
 		assert.match(source, /tools: \["read","grep"\]/);
-		assert.match(source, /subagents: \[\{ name: "beta", model: "openai-codex\/gpt-5.3-codex-spark:high" \}\]/);
+		assert.match(source, /subagents: \[\{ name: "beta", model: "openai-codex\/gpt-5.3-codex-spark:high", lifecycle: "disposable" \}\]/);
 		assert.match(source, /customTools: \{ ping:/);
 		assert.match(source, /This executable field and comment must survive/);
 		assert.match(source, /systemPromptFile: "\.\/prompt\.md"/);
 		assert.equal(await readFile(promptPath, "utf8"), "Updated prompt\n");
 		const updated = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
 		assert.equal(updated.description, "updated");
-		assert.equal(updated.lifecycle, "resumable");
+		assert.equal("lifecycle" in updated, false);
 		assert.deepEqual(updated.tools, ["read", "grep"]);
 		assert.equal(updated.subagents?.[0]?.model, "openai-codex/gpt-5.3-codex-spark:high");
+		assert.equal(updated.subagents?.[0]?.lifecycle, "disposable");
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -845,7 +850,7 @@ test("Studio saves JSON-backed agent edits to agent.json and removes saved overl
 			flag: "alpha",
 			selectAnswers: [
 				"Manage subagents (0)", "Add subagent", "beta · beta",
-				"1 · beta · default model · no timeout", "Set model (default)", "Done",
+				"1 · beta · default model · no timeout · disposable", "Set model (default)", "Done",
 				"Save agent.json (project)",
 			],
 			inputAnswers: ["openai-codex/gpt-5.3-codex-spark:high"],

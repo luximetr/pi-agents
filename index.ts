@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, resolveSubagentLifecycle, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, subagentAssignmentIdentity, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
 import messageTiming from "./message-timing.ts";
@@ -248,7 +248,6 @@ export default function (pi: ExtensionAPI) {
 		const raw = value as Record<string, unknown>;
 		const result: AgentOverride = {};
 		if (typeof raw.description === "string" && raw.description.trim()) result.description = raw.description.trim();
-		if (raw.lifecycle === "disposable" || raw.lifecycle === "resumable") result.lifecycle = raw.lifecycle;
 		if (raw.color === null) result.color = null;
 		else if (parseAgentColor(raw.color)) result.color = parseAgentColor(raw.color);
 		if (Array.isArray(raw.tools)) result.tools = raw.tools.map(String);
@@ -335,6 +334,7 @@ export default function (pi: ExtensionAPI) {
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
 			const timeoutSeconds = subagent.timeoutSeconds;
 			const childAgent = agents.find((agent) => agent.name === agentName)!;
+			const lifecycle = resolveSubagentLifecycle(subagent);
 			try {
 				observerContext = ctx;
 				let observerEndpoint: string | undefined;
@@ -402,9 +402,9 @@ export default function (pi: ExtensionAPI) {
 				};
 				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
 					model: subagent.model,
-					lifecycle: childAgent.lifecycle,
+					lifecycle,
 					rootSessionId: process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.(),
-					participantIdentity: `${childAgent.source}:${path.resolve(childAgent.filePath)}:${childAgent.name}`,
+					participantIdentity: subagentAssignmentIdentity(parent!, childAgent),
 					id: runId,
 					observerEndpoint,
 					parentRunId: process.env[RUN_ID_ENV],
@@ -974,7 +974,11 @@ export default function (pi: ExtensionAPI) {
 		if (!agent.subagents?.length) return undefined;
 		const lines = agent.subagents.map((childConfig) => {
 			const child = agents.find((candidate) => candidate.name === childConfig.name);
-			const runtime = [childConfig.model ? `model ${childConfig.model}` : "default model", childConfig.timeoutSeconds ? `${childConfig.timeoutSeconds}s deadline` : "no deadline"].join(", ");
+			const runtime = [
+				childConfig.model ? `model ${childConfig.model}` : "default model",
+				childConfig.timeoutSeconds ? `${childConfig.timeoutSeconds}s deadline` : "no deadline",
+				`${resolveSubagentLifecycle(childConfig)} lifecycle`,
+			].join(", ");
 			return `- ${childConfig.name}: ${child?.description ?? "specialist agent"} (${runtime})`;
 		});
 		return [

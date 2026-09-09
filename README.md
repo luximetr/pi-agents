@@ -11,7 +11,7 @@ The package also includes an independent message-timing module: every user messa
 Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.3.3        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.3.4        # all projects (user scope)
 ```
 
 Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
@@ -22,7 +22,7 @@ To track the latest commit on `main` instead of a pinned release:
 pi install git:github.com/luximetr/pi-agents
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.3.3`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+To update an existing installation, run the same command with the desired ref (for example `@v0.3.4`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
 
 Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
 
@@ -128,7 +128,7 @@ If the main checkout was never trusted, the normal pi trust prompt applies in th
 | Start with agent | `pi --agent dev` |
 | Active agent indicator | footer status line: `agent:dev · 7 tools · MCP:playwright`, tinted with the agent's color |
 
-The interactive agent's model and reasoning level are selected in pi itself (`/model`, thinking UI). A parent agent can select a fixed model and timeout for each delegated subagent as described below.
+The interactive agent's model and reasoning level are selected in pi itself (`/model`, thinking UI). A parent agent can select a fixed model, timeout, and lifecycle for each delegated subagent as described below.
 
 ## Agent Studio
 
@@ -150,7 +150,7 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 - **Set as default agent** saves a project/global startup default immediately, without activating the agent or applying pending edits. Project defaults take precedence over global defaults; resumed sessions keep their own agent selection.
 - **`/new` preserves your current agent, model, reasoning level, and unsaved Studio drafts** across session replacement (including plain Pi mode). Model inheritance requires the model and its credentials to remain available; reasoning is clamped to the model's supported levels. This does not change Pi's model defaults for a fresh launch.
 
-Use **Manage subagents** to add existing agents, remove assignments, or set each child's optional model and timeout in seconds. Blank settings restore the default model or no deadline. **Done** keeps changes in the Studio draft; Escape discards changes made in the subagent menu. Then apply or save the draft. Create new child agents from the dashboard first.
+Use **Manage subagents** to add existing agents, remove assignments, or set each child's optional model, timeout, and lifecycle. Lifecycle choices are **Disposable** and **Resumable**; omitted lifecycle defaults to Disposable. Blank model/timeout settings restore the default model or no deadline. **Done** keeps changes in the Studio draft; Escape discards changes made in the subagent menu. Then apply or save the draft. Create new child agents from the dashboard first.
 
 The MCP editor includes curated recipes for Playwright, iOS Simulator, pen.dev, local DocHub, and local DesignHub. They remain disconnected until assigned to an agent. Project/global `mcpServers` with the same name override the bundled recipe.
 
@@ -209,7 +209,6 @@ export default {
   promptSummary: "Precise technical writer; verifies examples.",  // optional
   color: "#bf5af2",                               // theme role or "#rrggbb"; auto-assigned by name when omitted
   tools: ["read", "grep", "find", "ls", "write", "edit", "bash"],  // tool allowlist
-  lifecycle: "resumable",                         // optional delegated context; default "disposable"
   deniedPaths: ["**/.env", "**/*.fig", "**/*.pen", "**/*.md"], // file-tool denylist
   systemPrompt: `You are the DOC agent. ...`,     // inline prompt…
   // systemPromptFile: "./prompt.md",             // …or from a file (relative to agent)
@@ -223,7 +222,7 @@ The dashboard distinguishes declared tools from the effective active toolset, sh
 
 #### Subagents and hierarchy
 
-An agent can delegate isolated work to another declared agent. Set `subagents` to an allowlist of agent names. Use an object entry when that parent should always spawn a child with a specific model and/or timeout:
+An agent can delegate isolated work to another declared agent. Set `subagents` to an allowlist of agent names. Use an object entry when that parent should always spawn a child with a specific model, timeout, and/or lifecycle:
 
 ```ts
 export default {
@@ -232,15 +231,15 @@ export default {
   tools: ["read", "grep", "find"],
   subagents: [
     "developer", // uses Pi's default model selection
-    { name: "researcher", model: "anthropic/claude-sonnet-5", timeoutSeconds: 900 },
+    { name: "researcher", model: "anthropic/claude-sonnet-5", timeoutSeconds: 900, lifecycle: "resumable" },
   ],
   systemPrompt: "Stay high-level; delegate implementation and research tasks.",
 };
 ```
 
-This adds the `delegate` tool automatically. The active parent's system prompt also receives a concise roster of its allowed children (name, description, model, and deadline), so it can route work without guessing agent names. By default (or with `lifecycle: "disposable"`) every delegation runs as a fresh, ephemeral `pi --mode rpc --no-session --agent <name>` session and returns only its final answer. Set `lifecycle: "resumable"` on the child agent definition to give that effective agent one private, disk-backed Pi session per root main-session ID. Its later delegations—including nested ones—resume that context across `/reload` and process restarts; a different main session gets a different participant. Top-level calls to the same resumable participant are serialized, while calls to different participants remain parallel. Nested delegation to any already-busy resumable participant is rejected visibly rather than queued; this conservative policy also prevents concurrent cross-participant cycles from deadlocking. A configured deadline includes time spent waiting in the queue. Session/lock storage errors and invalid persisted JSONL fail the delegation and never fall back to a fresh context. Stale locks are not removed automatically because the lock owner's child may still be alive; after verifying no child is running, an operator may remove the lock path named in the error. When `model` is configured, the child is launched with `--model <value>`; otherwise Pi uses its normal default model selection. Model and timeout settings belong to the parent-to-child relationship. Delegation remains restricted to the allowlist and nested delegation is capped at four levels. Set `PI_CODING_AGENT_BIN` if needed.
+This adds the `delegate` tool automatically. The active parent's system prompt also receives a concise roster of its allowed children (name, description, model, deadline, and lifecycle), so it can route work without guessing agent names. Assignment lifecycle defaults to `"disposable"` when omitted. Disposable delegations run as fresh, ephemeral `pi --mode rpc --no-session --agent <name>` sessions and return only their final answer. A resumable assignment gets one private, disk-backed Pi session per root main-session ID **and parent-child assignment**. Later calls on that assignment—including nested ones—resume its context across `/reload` and process restarts; another parent targeting the same child has isolated context, and a different main session gets a different participant. Top-level calls to the same resumable participant are serialized, while calls to different participants remain parallel. Nested delegation to any already-busy resumable participant is rejected visibly rather than queued; this conservative policy also prevents concurrent cross-participant cycles from deadlocking. A configured deadline includes time spent waiting in the queue. Session/lock storage errors and invalid persisted JSONL fail the delegation and never fall back to a fresh context. Stale locks are not removed automatically because the lock owner's child may still be alive; after verifying no child is running, an operator may remove the lock path named in the error. When `model` is configured, the child is launched with `--model <value>`; otherwise Pi uses its normal default model selection. Model, timeout, and assignment lifecycle settings belong to the parent-to-child relationship. Delegation remains restricted to the allowlist and nested delegation is capped at four levels. Set `PI_CODING_AGENT_BIN` if needed.
 
-**Conversation storage and retention:** resumable agents save Pi JSONL conversations under `~/.pi/agent/pi-agents-subagent-sessions/<hash>.jsonl`, with coordination locks under `.locks/`. `PI_CODING_AGENT_DIR` overrides the `~/.pi/agent` base directory. The hash identifies the root main session and effective agent; storage directories are owner-only (`0700`). Disposable agents do not persist their conversations. There is currently no automatic cleanup or conversation-reset action: a new main session starts separate participants but does not delete older files. Treat stored conversations as sensitive. Invalid history, including a missing final JSONL newline, is rejected before resuming without modifying the file.
+**Conversation storage and retention:** resumable assignments save Pi JSONL conversations under `~/.pi/agent/pi-agents-subagent-sessions/<hash>.jsonl`, with coordination locks under `.locks/`. `PI_CODING_AGENT_DIR` overrides the `~/.pi/agent` base directory. The hash identifies the root main session and effective parent-child assignment; storage directories are owner-only (`0700`). Disposable assignments do not persist their conversations. There is currently no automatic cleanup or conversation-reset action: a new main session starts separate participants but does not delete older files. Treat stored conversations as sensitive. Invalid history, including a missing final JSONL newline, is rejected before resuming without modifying the file.
 
 **Queued requests:** Agent Explorer shows resumable delegations while they wait for their participant. You can stop a queued request without stopping the request currently using that participant; queued timeouts and failures remain visible in Explorer for the current runtime. Steering is unavailable while queued and becomes available when the child starts. The run keeps its ID and total deadline through that transition.
 
@@ -465,7 +464,7 @@ The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent insp
 
 ## Limitations / roadmap
 
-- Agent Studio saves descriptions, lifecycle, colors, prompts, tool allowlists, MCP assignments, and subagent delegation settings directly to JSON definitions and static TypeScript object definitions. Dynamic/computed definitions use explicit saved overlays. Other metadata, policies, and executable custom-tool code remain untouched.
+- Agent Studio saves descriptions, colors, prompts, tool allowlists, MCP assignments, and subagent delegation settings directly to JSON definitions and static TypeScript object definitions. Dynamic/computed definitions use explicit saved overlays. Other metadata, policies, and executable custom-tool code remain untouched.
 - MCP supports stdio and streamable HTTP transports (no SSE); custom server definitions are still configured statically, while the bundled Playwright, iOS Simulator, pen.dev, DocHub, and DesignHub recipes can be assigned in Studio.
 - External edits to `.pi-agents/` need `/reload` (or a new session); Studio drafts and saves are applied immediately.
 - Project-local installs (`pi install <repo> -l` / `pi-agents --local`) are recorded in `.pi/settings.json`, which git never checks out — freshly created worktrees of such a project have no extension. Use the default global install instead (the `.pi-agents/` configs remain per project)
