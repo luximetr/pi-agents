@@ -1,16 +1,68 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 
 export interface MenuItem<Id extends string> {
 	id: Id;
 	label: string;
 }
 
-/** ui.select is label-only. Resolve it here; callers deal exclusively in stable IDs. */
+class WrappingMenu<Id extends string> implements Component {
+	private selected = 0;
+
+	constructor(
+		private readonly title: string,
+		private readonly items: readonly MenuItem<Id>[],
+		private readonly theme: Theme,
+		private readonly onDone: (value: Id | undefined) => void,
+		private readonly requestRender: () => void,
+	) {}
+
+	render(width: number): string[] {
+		return [
+			truncateToWidth(this.theme.fg("accent", this.theme.bold(this.title)), width),
+			...this.items.map((item, index) => truncateToWidth(
+				index === this.selected
+					? this.theme.bg("selectedBg", this.theme.fg("accent", `› ${item.label}`))
+					: this.theme.fg("text", `  ${item.label}`),
+				width,
+			)),
+			truncateToWidth(this.theme.fg("dim", "↑↓ navigate · enter select · esc cancel"), width),
+		];
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, Key.up)) {
+			this.selected = (this.selected - 1 + this.items.length) % this.items.length;
+			this.requestRender();
+		} else if (matchesKey(data, Key.down)) {
+			this.selected = (this.selected + 1) % this.items.length;
+			this.requestRender();
+		} else if (matchesKey(data, Key.enter)) {
+			this.onDone(this.items[this.selected]?.id);
+		} else if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+			this.onDone(undefined);
+		}
+	}
+
+	invalidate(): void {}
+}
+
+/** Select by stable ID, with wrapping navigation in the production TUI. */
 export async function selectMenu<Id extends string>(ctx: ExtensionContext, title: string, items: readonly MenuItem<Id>[]): Promise<Id | undefined> {
 	const byLabel = new Map(items.map(item => [item.label, item.id]));
 	if (byLabel.size !== items.length) throw new Error("Menu labels must be unique within a menu.");
-	const selected = await ctx.ui.select(title, items.map(item => item.label));
-	return selected === undefined ? undefined : byLabel.get(selected);
+	if (items.length === 0) return undefined;
+
+	// RPC/non-interactive adapters and lightweight extension harnesses implement label-only select.
+	// A real TUI supplies the complete theme API as well as custom components.
+	if (ctx.mode !== "tui" || typeof ctx.ui.theme.bg !== "function") {
+		const selected = await ctx.ui.select(title, items.map(item => item.label));
+		return selected === undefined ? undefined : byLabel.get(selected);
+	}
+
+	return ctx.ui.custom<Id | undefined>((tui, theme, _keybindings, done) =>
+		new WrappingMenu(title, items, theme, done, () => tui.requestRender()),
+	);
 }
 
 export enum StudioAction {

@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import * as ts from "typescript";
 import extension from "../index.ts";
 import { startAuthenticatedMcp } from "./http-mcp-fixture.ts";
 import { mcpToolName } from "../mcp.ts";
@@ -448,9 +449,12 @@ test("Studio creates a reviewed AI draft with color using the selected model and
 		const requests = enableStudioAI(runtime, JSON.stringify(generated));
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("agent").handler("", runtime.ctx);
-		const saved = JSON.parse(await readFile(path.join(root, ".pi-agents", "planner", "agent.json"), "utf8"));
-		assert.equal(saved.description, "Reviewed product planner");
-		assert.equal(saved.color, generated.color);
+		const dir = path.join(root, ".pi-agents", "planner");
+		const saved = (await discoverAgents(root)).agents.find(agent => agent.name === "planner");
+		assert.equal(saved?.description, "Reviewed product planner");
+		assert.equal(saved?.color, generated.color);
+		assert.equal(await readFile(path.join(dir, "prompt.md"), "utf8"), generated.systemPrompt);
+		await assert.rejects(readFile(path.join(dir, "agent.json")), { code: "ENOENT" });
 		assert.equal(requests.length, 1);
 		assert.equal(requests[0].model.id, "selected-model");
 		assert.equal(requests[0].options.reasoning, "high");
@@ -551,7 +555,10 @@ test("cancelling AI draft review does not create an agent", async () => {
 		enableStudioAI(runtime, JSON.stringify({ name: "dev", description: "Developer", systemPrompt: "Test changes" }));
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("agent").handler("", runtime.ctx);
-		await assert.rejects(readFile(path.join(root, ".pi-agents", "dev", "agent.json")), { code: "ENOENT" });
+		const dir = path.join(root, ".pi-agents", "dev");
+		await assert.rejects(readFile(path.join(dir, "agent.ts")), { code: "ENOENT" });
+		await assert.rejects(readFile(path.join(dir, "prompt.md")), { code: "ENOENT" });
+		await assert.rejects(readFile(path.join(dir, "agent.json")), { code: "ENOENT" });
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -738,33 +745,43 @@ test("Agent Studio creates an agent from the empty dashboard", async () => {
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("agent").handler("", runtime.ctx);
-		const created = JSON.parse(await readFile(path.join(root, ".pi-agents", "new-agent", "agent.json"), "utf8"));
-		assert.equal(created.description, "Experiments with project tools");
-		assert.equal(created.color, "#bf5af2");
-		assert.equal(created.systemPrompt, "Use the available tools carefully.");
+		const dir = path.join(root, ".pi-agents", "new-agent");
+		const created = (await discoverAgents(root)).agents.find(agent => agent.name === "new-agent");
+		assert.equal(created?.description, "Experiments with project tools");
+		assert.equal(created?.color, "#bf5af2");
+		assert.equal(await readFile(path.join(dir, "prompt.md"), "utf8"), "Use the available tools carefully.");
+		await assert.rejects(readFile(path.join(dir, "agent.json")), { code: "ENOENT" });
 		assert.ok(runtime.notifications.some((entry) => /Created agent "new-agent"/.test(entry.message)));
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
-test("Agent Studio can create and discover a declarative JSON agent", async () => {
+test("Agent Studio creates and discovers warning-free agent.ts and prompt.md files", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-create-"));
 	try {
+		const description = 'Checks `browser` behavior: "quoted" and Unicode ✓\nwithout generating TypeScript errors';
+		const prompt = "Verify ${the running application} with `care` and \\\\ paths.";
 		const filePath = saveDeclarativeAgent(root, "project", {
 			name: "browser-verifier",
-			description: "Checks browser behavior",
+			description,
 			tools: ["read"],
 			mcp: ["playwright"],
-			systemPrompt: "Verify the running application.",
+			systemPrompt: prompt,
 		});
-		assert.match(filePath, /browser-verifier\/agent\.json$/);
+		assert.match(filePath, /browser-verifier\/agent\.ts$/);
+		assert.equal(await readFile(path.join(path.dirname(filePath), "prompt.md"), "utf8"), prompt);
+		await assert.rejects(readFile(path.join(path.dirname(filePath), "agent.json")), { code: "ENOENT" });
+		const program = ts.createProgram([filePath], {
+			target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, strict: true, noEmit: true, skipLibCheck: true,
+		});
+		assert.deepEqual(ts.getPreEmitDiagnostics(program).map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")), []);
 		const discovered = await discoverAgents(root);
 		const agent = discovered.agents.find((candidate) => candidate.name === "browser-verifier");
-		assert.equal(agent?.description, "Checks browser behavior");
+		assert.equal(agent?.description, description);
 		assert.deepEqual(agent?.tools, ["read"]);
 		assert.deepEqual(agent?.mcp, ["playwright"]);
-		assert.equal(agent?.systemPrompt, "Verify the running application.");
+		assert.equal(agent?.systemPrompt, prompt);
 		await assert.rejects(async () => saveDeclarativeAgent(root, "project", {
 			name: "browser-verifier", description: "duplicate",
 		}), /already exists/);
@@ -773,24 +790,29 @@ test("Agent Studio can create and discover a declarative JSON agent", async () =
 	}
 });
 
-test("direct JSON saves preserve metadata and update a referenced prompt file", async () => {
+test("direct legacy JSON saves migrate metadata and prompt to TypeScript", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-json-prompt-"));
 	try {
-		const filePath = saveDeclarativeAgent(root, "project", { name: "alpha", description: "source" });
-		const promptPath = path.join(path.dirname(filePath), "prompt.md");
+		const dir = path.join(root, ".pi-agents", "alpha");
+		await mkdir(dir, { recursive: true });
+		const jsonPath = path.join(dir, "agent.json");
+		const promptPath = path.join(dir, "prompt.md");
 		await writeFile(promptPath, "Source prompt\n");
-		await writeFile(filePath, JSON.stringify({
+		await writeFile(jsonPath, JSON.stringify({
 			name: "alpha", description: "source", lifecycle: "legacy-value", whenToUse: "Keep this metadata", systemPromptFile: "./prompt.md",
 		}, null, "\t"));
 		const agent = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
-		saveAgentSource(agent, { description: "updated", color: null, mcp: [], systemPrompt: "Updated prompt\n" });
-		const source = JSON.parse(await readFile(filePath, "utf8"));
-		assert.equal(source.description, "updated");
-		assert.equal(source.lifecycle, "legacy-value");
-		assert.equal(source.whenToUse, "Keep this metadata");
-		assert.equal(source.systemPromptFile, "./prompt.md");
-		assert.equal(source.systemPrompt, undefined);
+		const filePath = saveAgentSource(agent, { description: "updated", color: null, mcp: [], systemPrompt: "Updated prompt\n" });
+		assert.match(filePath, /agent\.ts$/);
+		const source = await readFile(filePath, "utf8");
+		assert.match(source, /"description": "updated"/);
+		assert.match(source, /"lifecycle": "legacy-value"/);
+		assert.match(source, /"whenToUse": "Keep this metadata"/);
+		assert.match(source, /"systemPromptFile": "\.\/prompt\.md"/);
+		assert.doesNotMatch(source, /"systemPrompt":/);
 		assert.equal(await readFile(promptPath, "utf8"), "Updated prompt\n");
+		await assert.rejects(readFile(jsonPath), { code: "ENOENT" });
+		assert.equal((await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")?.description, "updated");
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -838,12 +860,15 @@ export default cfg;
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("Studio saves JSON-backed agent edits to agent.json and removes saved overlays", async () => {
+test("Studio migrates JSON-backed agent edits to agent.ts and removes saved overlays", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-json-save-"));
 	try {
-		const filePath = saveDeclarativeAgent(root, "project", {
+		const dir = path.join(root, ".pi-agents", "alpha");
+		await mkdir(dir, { recursive: true });
+		const jsonPath = path.join(dir, "agent.json");
+		await writeFile(jsonPath, JSON.stringify({
 			name: "alpha", description: "source description", tools: ["read"], mcp: [], systemPrompt: "Source prompt",
-		});
+		}));
 		saveDeclarativeAgent(root, "project", { name: "beta", description: "beta", tools: ["read"] });
 		saveAgentOverride(root, "project", "alpha", { description: "saved description" });
 		const runtime = boot(root, {
@@ -851,7 +876,7 @@ test("Studio saves JSON-backed agent edits to agent.json and removes saved overl
 			selectAnswers: [
 				"Manage subagents (0)", "Add subagent", "beta · beta",
 				"1 · beta · default model · no timeout · disposable", "Set model (default)", "Done",
-				"Save agent.json (project)",
+				"Save agent.ts (project)",
 			],
 			inputAnswers: ["openai-codex/gpt-5.3-codex-spark:high"],
 			customActions: [component => component.handleInput("e")],
@@ -859,9 +884,12 @@ test("Studio saves JSON-backed agent edits to agent.json and removes saved overl
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("agent").handler("", runtime.ctx);
 
-		const source = JSON.parse(await readFile(filePath, "utf8"));
-		assert.equal(source.description, "saved description");
-		assert.deepEqual(source.subagents, [{ name: "beta", model: "openai-codex/gpt-5.3-codex-spark:high" }]);
+		const filePath = path.join(dir, "agent.ts");
+		const source = await readFile(filePath, "utf8");
+		assert.match(source, /"description": "saved description"/);
+		assert.match(source, /"subagents": \[/);
+		assert.equal(await readFile(path.join(dir, "prompt.md"), "utf8"), "Source prompt");
+		await assert.rejects(readFile(jsonPath), { code: "ENOENT" });
 		const config = JSON.parse(await readFile(path.join(root, ".pi-agents", "config.json"), "utf8"));
 		assert.equal(config.agentOverrides, undefined);
 		const alpha = (await discoverAgents(root)).agents.find(agent => agent.name === "alpha");

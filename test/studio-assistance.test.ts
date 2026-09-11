@@ -15,6 +15,31 @@ test("menu IDs remain stable across label and title changes", async () => {
 	assert.equal(await selectMenu({ ui: { select: async () => undefined } } as any, "Cancel", [{ id: StudioAction.Apply, label: "Apply" }]), undefined);
 });
 
+test("TUI menus wrap from first to last and last to first with arrow keys", async () => {
+	const items = [
+		{ id: StudioAction.Description, label: "Description" },
+		{ id: StudioAction.Prompt, label: "Prompt" },
+		{ id: StudioAction.Apply, label: "Apply" },
+	];
+	const theme = { fg: (_role: string, text: string) => text, bg: (_role: string, text: string) => text, bold: (text: string) => text };
+	const selectWithKeys = (keys: string[]) => selectMenu({
+		mode: "tui",
+		ui: {
+			theme,
+			select: async () => { throw new Error("TUI menu must use custom selector"); },
+			custom: async (factory: any) => {
+				let selected: StudioAction | undefined;
+				const component = factory({ requestRender() {} }, theme, {}, (value: StudioAction | undefined) => { selected = value; });
+				for (const key of keys) component.handleInput(key);
+				return selected;
+			},
+		},
+	} as any, "Wrap", items);
+
+	assert.equal(await selectWithKeys(["\x1b[A", "\r"]), StudioAction.Apply, "up on the first item wraps to the last");
+	assert.equal(await selectWithKeys(["\x1b[B", "\x1b[B", "\x1b[B", "\r"]), StudioAction.Description, "down on the last item wraps to the first");
+});
+
 test("assisted drafts validate names, colors and tool/MCP allowlists; strip executable fields and secrets", () => {
 	const result = parseAssistedDraft(JSON.stringify({ ...draft, env: { SECRET: "hidden" }, mcpServers: { secret: {} }, customTools: {} }), available);
 	assert.equal(result.color, "#aabbcc");

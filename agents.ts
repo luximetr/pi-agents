@@ -878,10 +878,16 @@ export interface DeclarativeAgentInput {
 	systemPrompt?: string;
 }
 
-function writeJsonAtomic(filePath: string, data: object): void {
+function writeTextAtomic(filePath: string, content: string, defaultMode = 0o600): void {
+	const mode = fs.existsSync(filePath) ? fs.statSync(filePath).mode & 0o777 : defaultMode;
 	const tempPath = `${filePath}.tmp-${process.pid}`;
-	fs.writeFileSync(tempPath, `${JSON.stringify(data, null, "\t")}\n`, { encoding: "utf8", mode: 0o600 });
+	fs.writeFileSync(tempPath, content, { encoding: "utf8", mode });
 	fs.renameSync(tempPath, filePath);
+}
+
+/** Serialize data-only agent definitions as standalone, warning-free TypeScript. */
+function generatedAgentSource(data: Record<string, unknown>): string {
+	return `export default ${JSON.stringify(data, null, "\t")};\n`;
 }
 
 type SourceEdit = { start: number; end: number; text: string };
@@ -937,11 +943,6 @@ export function canSaveAgentSource(agent: DiscoveredAgent): boolean {
 	}
 }
 
-function tsString(value: string): string {
-	if (!value.includes("\n")) return JSON.stringify(value);
-	return `\`${value.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${")}\``;
-}
-
 function tsTools(entries: ToolName[], property: ts.ObjectLiteralElementLike | undefined, source: string): string {
 	const usesToolsEnum = !!property && ts.isPropertyAssignment(property) && /\bTools\s*\./.test(source.slice(property.initializer.getStart(), property.initializer.end));
 	if (!usesToolsEnum) return JSON.stringify(entries);
@@ -986,8 +987,9 @@ function updateStaticAgentSource(agent: DiscoveredAgent, override: AgentOverride
 	if (override.tools !== undefined) desired.set("tools", tsTools(override.tools, properties.get("tools"), source));
 	if (override.mcp !== undefined) desired.set("mcp", JSON.stringify(override.mcp));
 	if (override.subagents !== undefined) desired.set("subagents", tsSubagents(override.subagents));
-	if (override.systemPrompt !== undefined && !agent.sourceSystemPromptPath) {
-		desired.set("systemPrompt", override.systemPrompt === null ? null : tsString(override.systemPrompt));
+	if (override.systemPrompt !== undefined) {
+		desired.set("systemPrompt", null);
+		desired.set("systemPromptFile", JSON.stringify("./prompt.md"));
 	}
 
 	const edits: SourceEdit[] = [];
@@ -1032,15 +1034,18 @@ function updateStaticAgentSource(agent: DiscoveredAgent, override: AgentOverride
 	}
 }
 
-function updateJsonAgentSource(agent: DiscoveredAgent, override: AgentOverride): void {
+function readJsonAgentSource(filePath: string): Record<string, unknown> {
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(fs.readFileSync(agent.filePath, "utf8"));
+		parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
 	} catch (err) {
-		throw new Error(`cannot save ${agent.filePath}: invalid JSON (${err})`);
+		throw new Error(`cannot save ${filePath}: invalid JSON (${err})`);
 	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`cannot save ${agent.filePath}: expected a JSON object`);
-	const data = { ...(parsed as Record<string, unknown>) };
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`cannot save ${filePath}: expected a JSON object`);
+	return { ...(parsed as Record<string, unknown>) };
+}
+
+function applySerializableOverride(data: Record<string, unknown>, override: AgentOverride): void {
 	if (override.description !== undefined) data.description = override.description.trim();
 	if (override.color !== undefined) {
 		if (override.color === null) delete data.color;
@@ -1049,28 +1054,31 @@ function updateJsonAgentSource(agent: DiscoveredAgent, override: AgentOverride):
 	if (override.tools !== undefined) data.tools = [...override.tools];
 	if (override.mcp !== undefined) data.mcp = [...override.mcp];
 	if (override.subagents !== undefined) data.subagents = override.subagents.map(entry => ({ ...entry }));
-	if (override.systemPrompt !== undefined && !agent.sourceSystemPromptPath) {
-		if (override.systemPrompt === null) delete data.systemPrompt;
-		else data.systemPrompt = override.systemPrompt;
-	}
-	writeJsonAtomic(agent.filePath, data);
 }
 
-/** Save Studio fields to the definition currently backing this agent and update its referenced prompt file. */
+/** Save Studio fields to agent.ts and keep its prompt in the sibling prompt.md. */
 export function saveAgentSource(agent: DiscoveredAgent, override: AgentOverride): string {
-	if (agent.filePath.endsWith(".json")) updateJsonAgentSource(agent, override);
-	else updateStaticAgentSource(agent, override);
-	if (override.systemPrompt !== undefined && agent.sourceSystemPromptPath) {
-		const prompt = override.systemPrompt === null ? "" : override.systemPrompt;
-		const mode = fs.existsSync(agent.sourceSystemPromptPath) ? fs.statSync(agent.sourceSystemPromptPath).mode & 0o777 : 0o600;
-		const tempPath = `${agent.sourceSystemPromptPath}.tmp-${process.pid}`;
-		fs.writeFileSync(tempPath, prompt, { encoding: "utf8", mode });
-		fs.renameSync(tempPath, agent.sourceSystemPromptPath);
+	const promptPath = path.join(path.dirname(agent.filePath), "prompt.md");
+	const prompt = override.systemPrompt === undefined ? agent.systemPrompt ?? "" : override.systemPrompt ?? "";
+
+	if (agent.filePath.endsWith(".json")) {
+		const data = readJsonAgentSource(agent.filePath);
+		applySerializableOverride(data, override);
+		delete data.systemPrompt;
+		data.systemPromptFile = "./prompt.md";
+		const filePath = path.join(path.dirname(agent.filePath), "agent.ts");
+		writeTextAtomic(promptPath, prompt);
+		writeTextAtomic(filePath, generatedAgentSource(data));
+		fs.unlinkSync(agent.filePath);
+		return filePath;
 	}
+
+	if (override.systemPrompt !== undefined) writeTextAtomic(promptPath, prompt);
+	updateStaticAgentSource(agent, override);
 	return agent.filePath;
 }
 
-/** Create a JSON-backed agent that Agent Studio can manage without rewriting TypeScript. */
+/** Create a canonical agent.ts + prompt.md definition for Agent Studio. */
 export function saveDeclarativeAgent(cwd: string, scope: "project" | "global", input: DeclarativeAgentInput): string {
 	const name = input.name.trim();
 	if (!/^[A-Za-z0-9._-]+$/.test(name) || name === "." || name === "..") throw new Error("agent name may contain only letters, numbers, dot, underscore, and hyphen");
@@ -1079,19 +1087,21 @@ export function saveDeclarativeAgent(cwd: string, scope: "project" | "global", i
 	const root = scope === "global" ? getGlobalAgentsDir() : (findProjectAgentsDir(cwd) ?? path.join(findProjectRoot(cwd), ".pi-agents"));
 	const dir = path.join(root, name);
 	fs.mkdirSync(dir, { recursive: true });
-	const filePath = path.join(dir, "agent.json");
-	if (fs.existsSync(filePath) || fs.existsSync(path.join(dir, "agent.ts")) || fs.existsSync(path.join(dir, "index.ts"))) {
+	const filePath = path.join(dir, "agent.ts");
+	const promptPath = path.join(dir, "prompt.md");
+	if (fs.existsSync(filePath) || fs.existsSync(path.join(dir, "index.ts")) || fs.existsSync(path.join(dir, "agent.json")) || fs.existsSync(promptPath)) {
 		throw new Error(`agent source already exists: ${dir}`);
 	}
-	const data: DeclarativeAgentInput = {
+	const data: Record<string, unknown> = {
 		name,
 		description: input.description.trim(),
 		...(input.color === undefined ? {} : { color: parseAgentColor(input.color) }),
 		...(input.tools === undefined ? {} : { tools: [...input.tools] }),
 		...(input.mcp === undefined ? {} : { mcp: [...input.mcp] }),
-		...(input.systemPrompt?.trim() ? { systemPrompt: input.systemPrompt } : {}),
+		systemPromptFile: "./prompt.md",
 	};
-	writeJsonAtomic(filePath, data);
+	writeTextAtomic(promptPath, input.systemPrompt ?? "");
+	writeTextAtomic(filePath, generatedAgentSource(data));
 	return filePath;
 }
 
@@ -1110,7 +1120,7 @@ export async function discoverAgents(cwd: string, opts?: DiscoverOptions): Promi
 	const byName = new Map<string, DiscoveredAgent>();
 
 	async function loadFrom(dir: string, source: "global" | "project", envFallbackDir?: string) {
-		// Folder per agent: code-backed agent.ts/index.ts or Studio-created agent.json.
+		// Folder per agent: canonical agent.ts, index.ts, or a legacy agent.json.
 		for (const agentDir of listAgentDirs(dir)) {
 			const filePath = [path.join(agentDir, "agent.ts"), path.join(agentDir, "index.ts"), path.join(agentDir, "agent.json")].find((p) => fs.existsSync(p));
 			if (filePath) {

@@ -487,7 +487,8 @@ export async function showAgentStudio(
 	let description = agent.description;
 	let color = agent.color;
 	const sourceIsEditable = canSaveAgentSource(agent);
-	const sourceFileName = agent.filePath.split(/[\\/]/).at(-1) ?? "agent source";
+	const currentSourceFileName = agent.filePath.split(/[\\/]/).at(-1) ?? "agent source";
+	const savedSourceFileName = currentSourceFileName === "agent.json" ? "agent.ts" : currentSourceFileName;
 	const available = {
 		tools: [...new Set([...options.allTools.map(tool => tool.name).filter(name => name !== "delegate" && name !== "powershell" && !name.includes("__")), ...Object.keys(agent.customTools ?? {})])],
 		mcp: [...new Set([...Object.keys(options.mcpServers), ...Object.keys(agent.mcpServers ?? {})])],
@@ -508,7 +509,7 @@ export async function showAgentStudio(
 			...(options.onSetDefault ? [item(StudioAction.Default)] : []),
 			item(StudioAction.Apply),
 			...(sourceIsEditable
-				? [{ id: StudioAction.SaveSource, label: `Save ${sourceFileName} (${agent.source})` }]
+				? [{ id: StudioAction.SaveSource, label: `Save ${savedSourceFileName} (${agent.source})` }]
 				: [
 					...(options.trusted ? [item(StudioAction.SaveProject)] : []),
 					item(StudioAction.SaveGlobal),

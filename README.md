@@ -11,7 +11,7 @@ The package also includes an independent message-timing module: every user messa
 Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.3.4        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.3.5        # all projects (user scope)
 ```
 
 Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
@@ -22,7 +22,7 @@ To track the latest commit on `main` instead of a pinned release:
 pi install git:github.com/luximetr/pi-agents
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.3.4`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+To update an existing installation, run the same command with the desired ref (for example `@v0.3.5`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
 
 Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
 
@@ -119,7 +119,7 @@ If the main checkout was never trusted, the normal pi trust prompt applies in th
 | Action | How |
 |---|---|
 | Open Agent Studio / picker | `f7` (also accepts configured shortcuts) |
-| Edit or create an agent | In `f7`: select an agent and press `e`, or press `n` for a new JSON-backed agent |
+| Edit or create an agent | In `f7`: select an agent and press `e`, or press `n` to create a canonical `agent.ts` + `prompt.md` agent |
 | Rotate to next agent | `f8` (cycles: plain pi → dev → doc → … → plain pi; also accepts configured shortcuts) |
 | Explore subagents and descendants (live + completed) | `f9` or `/subagents` |
 | Switch directly | `/agent dev`, `/agent none` |
@@ -139,12 +139,12 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 - Reorder and delete refresh the dashboard and available agents immediately; no reload is needed.
 
 - Select an agent and press `e` to edit its description, color, prompt, built-in/extension tool allowlist, and MCP assignments. Tool and MCP selectors show details for the highlighted item in a right-side pane.
-- Press `n` to create a project or global agent manually or **Describe with AI**. Review/edit the AI draft as JSON, choose its color, and confirm before anything is saved. Manual creation uses the same assisted description and prompt editors. Studio-created agents use a declarative `agent.json`; no TypeScript is generated.
+- Press `n` to create a project or global agent manually or **Describe with AI**. Review/edit the AI draft, choose its color, and confirm before anything is saved. Manual creation uses the same assisted description and prompt editors. Studio creates the canonical folder layout with configuration in `agent.ts` and the system prompt in `prompt.md`; it does not create `agent.json`.
 - Open **Edit description** or **Edit prompt** to edit normally or press **F2** for AI help with that field’s current text, including unsaved edits. Suggestions appear in the same editor for review and further editing. **F3** restores the pre-AI text; **Enter/Ctrl+S** accepts the field into the Studio draft; **Escape** discards the field edits. Use **Shift+Enter** for newlines. There are no separate top-level AI refinement actions.
 - Assistance is a neutral, tool-free Pi model request using the current provider/model, authentication, and reasoning level—not the active agent’s persona. It receives only the editable draft and available tool/MCP names, never agent `.env` values, MCP headers, or conversation history. PM, developer, documentation, designer, and dev-lead patterns guide the assistant internally; there is no template-selection menu. Requests are cancellable and time out after two minutes; normal provider usage charges apply.
 - **Color** offers automatic coloring, named palette colors, or a custom `#rrggbb`/theme role. Color and description edits also work as session drafts.
 - **Apply as session draft** tests changes immediately without touching the source definition. Drafts are stored in session history, survive resume/tree navigation, are marked `◆ draft` in the dashboard, and are inherited by delegated children.
-- **Save agent.ts** or **Save agent.json** writes edited fields directly to the definition currently backing the agent. Static TypeScript object exports are patched without replacing imports, comments, custom tools, or unrelated fields. A referenced `systemPromptFile` is updated directly. Existing saved overlays that affected the agent are folded into the source and removed.
+- **Save agent.ts** writes edited fields directly to the agent definition. Static TypeScript object exports are patched without replacing imports, comments, custom tools, or unrelated fields, while direct Studio saves keep the system prompt in `prompt.md` via `systemPromptFile`. Legacy `agent.json` definitions remain discoverable, but saving one migrates it to the canonical `agent.ts` + `prompt.md` layout instead of creating or updating JSON. Existing saved overlays that affected the agent are folded into the source and removed.
 - Dynamic factory/computed definitions cannot be patched safely. Only those agents show explicit **Save project override (.pi-agents/config.json)** and **Save global override (~/.pi/agent/pi-agents/config.json)** actions, which persist editable fields under `agentOverrides`.
 - **Revert session draft** returns to the saved source and any saved overlays. The dashboard marks saved overlays and shows their global/project provenance.
 - **Set as default agent** saves a project/global startup default immediately, without activating the agent or applying pending edits. Project defaults take precedence over global defaults; resumed sessions keep their own agent selection.
@@ -164,7 +164,7 @@ Use the selected server’s **Manage credentials** action to enter masked tokens
 - `dochub`: connects to `http://localhost:3001/mcp`; set `DOCHUB_TOKEN` in the shell or `.pi-agents/.env`.
 - `designhub`: connects through the editor proxy at `http://localhost:5101/mcp`; set `DESIGNHUB_TOKEN` in the shell or `.pi-agents/.env`.
 
-Static TypeScript and declarative agents normally save directly to their source. The layered model remains available for dynamic definitions: `source definition + saved global/project override + session draft = effective agent`.
+Static TypeScript agents normally save directly to `agent.ts` with their prompts kept in `prompt.md`; legacy `agent.json` definitions migrate to that layout when saved. The layered model remains available for dynamic TypeScript definitions: `source definition + saved global/project override + session draft = effective agent`.
 
 ## Defining agents
 
@@ -188,13 +188,9 @@ Agents live in `.pi-agents/` — project root (walked up to git root) and global
 .pi-agents/doc.ts     # name defaults to filename
 ```
 
-### Declarative agent (created by Studio)
+### Legacy `agent.json`
 
-```
-.pi-agents/browser/agent.json
-```
-
-`agent.json` supports the normal serializable agent fields such as `name`, `description`, `tools`, `mcp`, and `systemPrompt`. Agent Studio saves edits directly to this file. Use `agent.ts` when imports, factories, or executable custom tools are needed. Studio patches static exported object definitions and their referenced prompt files directly; dynamic factories use clearly labeled config overrides.
+Existing `.pi-agents/<name>/agent.json` definitions are still discovered for compatibility. Agent Studio does not create them: the next direct save migrates the definition to the canonical `agent.ts` + `prompt.md` layout. TypeScript remains available for imports, factories, and executable custom tools. Studio patches static exported object definitions and keeps directly saved prompts in `prompt.md`; dynamic factories use clearly labeled config overrides.
 
 ### agent.ts
 
@@ -464,7 +460,7 @@ The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent insp
 
 ## Limitations / roadmap
 
-- Agent Studio saves descriptions, colors, prompts, tool allowlists, MCP assignments, and subagent delegation settings directly to JSON definitions and static TypeScript object definitions. Dynamic/computed definitions use explicit saved overlays. Other metadata, policies, and executable custom-tool code remain untouched.
+- Agent Studio saves descriptions, colors, prompts, tool allowlists, MCP assignments, and subagent delegation settings to canonical `agent.ts` + `prompt.md` definitions. Legacy `agent.json` definitions are discovered and migrated on save. Dynamic/computed TypeScript definitions use explicit saved overlays. Other metadata, policies, and executable custom-tool code remain untouched.
 - MCP supports stdio and streamable HTTP transports (no SSE); custom server definitions are still configured statically, while the bundled Playwright, iOS Simulator, pen.dev, DocHub, and DesignHub recipes can be assigned in Studio.
 - External edits to `.pi-agents/` need `/reload` (or a new session); Studio drafts and saves are applied immediately.
 - Project-local installs (`pi install <repo> -l` / `pi-agents --local`) are recorded in `.pi/settings.json`, which git never checks out — freshly created worktrees of such a project have no extension. Use the default global install instead (the `.pi-agents/` configs remain per project)
