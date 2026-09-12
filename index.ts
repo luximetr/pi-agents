@@ -735,7 +735,7 @@ export default function (pi: ExtensionAPI) {
 
 		let savedPath: string;
 		if (result.action === "save-source") {
-			savedPath = saveAgentSource(agent, result.override);
+			savedPath = saveAgentSource(agent, result.override, result.mcpServers);
 			for (const scope of agent.savedOverrideSources ?? []) removeAgentOverride(ctx.cwd, scope, name);
 		} else {
 			const scope = result.action === "save-global" ? "global" : "project";

@@ -312,7 +312,8 @@ function renderAgentDetails(
 export type AgentSelectorResult = string | { action: "edit" | "reorder" | "delete"; agent: string } | { action: "create" } | null;
 
 export type AgentStudioResult =
-	| { action: "apply" | "save-source" | "save-project" | "save-global"; override: AgentOverride }
+	| { action: "apply" | "save-project" | "save-global"; override: AgentOverride }
+	| { action: "save-source"; override: AgentOverride; mcpServers: Record<string, McpServerConfig> }
 	| { action: "revert" }
 	| null;
 
@@ -596,7 +597,13 @@ export async function showAgentStudio(
 			systemPrompt: systemPrompt.trim() ? systemPrompt : null,
 		};
 		if (choice === StudioAction.Apply) return { action: "apply", override };
-		if (choice === StudioAction.SaveSource) return { action: "save-source", override };
+		if (choice === StudioAction.SaveSource) {
+			const mcpServers = Object.fromEntries(mcp.flatMap((name) => {
+				const server = agent.mcpServers?.[name] ?? options.mcpServers[name];
+				return server ? [[name, server] as const] : [];
+			}));
+			return { action: "save-source", override, mcpServers };
+		}
 		if (choice === StudioAction.SaveProject) return { action: "save-project", override };
 		if (choice === StudioAction.SaveGlobal) return { action: "save-global", override };
 	}

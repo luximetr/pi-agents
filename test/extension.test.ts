@@ -831,6 +831,8 @@ test("direct TypeScript saves update the static agent object and its prompt file
 	lifecycle: "legacy-value",
 	color: "#ffffff",
 	tools: ["read"],
+	mcp: ["pen.dev"],
+	mcpServers: { "pen.dev": { command: "stale-pen-server" } },
 	customTools: { ping: { description: "Ping", execute: () => "pong" } },
 	systemPromptFile: "./prompt.md",
 };
@@ -838,14 +840,17 @@ export default cfg;
 `);
 		const agent = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
 		saveAgentSource(agent, {
-			description: "updated", color: null, tools: ["read", "grep"], mcp: ["playwright"],
+			description: "updated", color: null, tools: ["read", "grep"], mcp: ["designhub"],
 			subagents: [{ name: "beta", model: "openai-codex/gpt-5.3-codex-spark:high", lifecycle: "disposable" }], systemPrompt: "Updated prompt\n",
-		});
+		}, { designhub: { url: "http://localhost:5101/mcp", headers: { Authorization: "Bearer ${DESIGNHUB_TOKEN}" } } });
 		const source = await readFile(filePath, "utf8");
 		assert.match(source, /description: "updated"/);
 		assert.match(source, /lifecycle: "legacy-value"/);
 		assert.doesNotMatch(source, /color:/);
 		assert.match(source, /tools: \["read","grep"\]/);
+		assert.match(source, /mcp: \["designhub"\]/);
+		assert.match(source, /mcpServers: \{"designhub":\{"url":"http:\/\/localhost:5101\/mcp"/);
+		assert.doesNotMatch(source, /stale-pen-server/);
 		assert.match(source, /subagents: \[\{ name: "beta", model: "openai-codex\/gpt-5.3-codex-spark:high", lifecycle: "disposable" \}\]/);
 		assert.match(source, /customTools: \{ ping:/);
 		assert.match(source, /This executable field and comment must survive/);
@@ -855,6 +860,9 @@ export default cfg;
 		assert.equal(updated.description, "updated");
 		assert.equal("lifecycle" in updated, false);
 		assert.deepEqual(updated.tools, ["read", "grep"]);
+		assert.deepEqual(updated.mcp, ["designhub"]);
+		assert.equal(updated.mcpServers?.designhub.url, "http://localhost:5101/mcp");
+		assert.equal(updated.mcpServers?.["pen.dev"], undefined);
 		assert.equal(updated.subagents?.[0]?.model, "openai-codex/gpt-5.3-codex-spark:high");
 		assert.equal(updated.subagents?.[0]?.lifecycle, "disposable");
 	} finally { await rm(root, { recursive: true, force: true }); }

@@ -974,7 +974,7 @@ function removePropertyEdit(source: string, property: ts.ObjectLiteralElementLik
 	return { start: property.getFullStart(), end, text: "" };
 }
 
-function updateStaticAgentSource(agent: DiscoveredAgent, override: AgentOverride): void {
+function updateStaticAgentSource(agent: DiscoveredAgent, override: AgentOverride, mcpServers?: Record<string, McpServerConfig>): void {
 	const { source, object } = parseEditableSource(agent.filePath);
 	const properties = new Map<string, ts.ObjectLiteralElementLike>();
 	for (const property of object.properties) {
@@ -986,6 +986,7 @@ function updateStaticAgentSource(agent: DiscoveredAgent, override: AgentOverride
 	if (override.color !== undefined) desired.set("color", override.color === null ? null : JSON.stringify(parseAgentColor(override.color)));
 	if (override.tools !== undefined) desired.set("tools", tsTools(override.tools, properties.get("tools"), source));
 	if (override.mcp !== undefined) desired.set("mcp", JSON.stringify(override.mcp));
+	if (mcpServers !== undefined) desired.set("mcpServers", Object.keys(mcpServers).length > 0 ? JSON.stringify(mcpServers) : null);
 	if (override.subagents !== undefined) desired.set("subagents", tsSubagents(override.subagents));
 	if (override.systemPrompt !== undefined) {
 		desired.set("systemPrompt", null);
@@ -1056,14 +1057,18 @@ function applySerializableOverride(data: Record<string, unknown>, override: Agen
 	if (override.subagents !== undefined) data.subagents = override.subagents.map(entry => ({ ...entry }));
 }
 
-/** Save Studio fields to agent.ts and keep its prompt in the sibling prompt.md. */
-export function saveAgentSource(agent: DiscoveredAgent, override: AgentOverride): string {
+/** Save Studio fields and selected MCP definitions to agent.ts, keeping its prompt in the sibling prompt.md. */
+export function saveAgentSource(agent: DiscoveredAgent, override: AgentOverride, mcpServers?: Record<string, McpServerConfig>): string {
 	const promptPath = path.join(path.dirname(agent.filePath), "prompt.md");
 	const prompt = override.systemPrompt === undefined ? agent.systemPrompt ?? "" : override.systemPrompt ?? "";
 
 	if (agent.filePath.endsWith(".json")) {
 		const data = readJsonAgentSource(agent.filePath);
 		applySerializableOverride(data, override);
+		if (mcpServers !== undefined) {
+			if (Object.keys(mcpServers).length > 0) data.mcpServers = mcpServers;
+			else delete data.mcpServers;
+		}
 		delete data.systemPrompt;
 		data.systemPromptFile = "./prompt.md";
 		const filePath = path.join(path.dirname(agent.filePath), "agent.ts");
@@ -1074,7 +1079,7 @@ export function saveAgentSource(agent: DiscoveredAgent, override: AgentOverride)
 	}
 
 	if (override.systemPrompt !== undefined) writeTextAtomic(promptPath, prompt);
-	updateStaticAgentSource(agent, override);
+	updateStaticAgentSource(agent, override, mcpServers);
 	return agent.filePath;
 }
 
