@@ -958,7 +958,7 @@ test("project Studio overrides preserve config and expose curated MCP recipes", 
 		assert.deepEqual(discovered.config.mcpServers?.playwright.args, ["-y", "@playwright/mcp@0.0.80"]);
 		assert.equal(discovered.config.mcpServers?.["pen.dev"].command, "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/out/mcp-server-darwin-arm64");
 		assert.deepEqual(discovered.config.mcpServers?.dochub, {
-			url: "http://localhost:3001/mcp",
+			url: "https://dochub.phoenixchumphon.com/mcp",
 			headers: { Authorization: "Bearer ${DOCHUB_TOKEN}" },
 		});
 		assert.deepEqual(discovered.config.mcpServers?.designhub, {

@@ -589,7 +589,7 @@ export const BUILTIN_MCP_SERVERS: Record<string, McpServerConfig> = {
 		args: ["--app", "desktop", "--agent", "pi"],
 	},
 	dochub: {
-		url: "http://localhost:3001/mcp",
+		url: "https://dochub.phoenixchumphon.com/mcp",
 		headers: { Authorization: "Bearer ${DOCHUB_TOKEN}" },
 	},
 	designhub: {
@@ -607,7 +607,7 @@ export const BUILTIN_MCP_SERVER_DESCRIPTIONS: Record<string, string> = {
 	playwright: "Automate and inspect a web browser with Playwright. The pinned npm server is downloaded on first use.",
 	"ios-simulator": "Inspect and control iOS Simulator. Requires Xcode and a bootable simulator on macOS.",
 	"pen.dev": "Inspect and edit .pen design files through the running Pen desktop app. Requires Pen.app in /Applications on Apple silicon.",
-	dochub: "Search and retrieve indexed documentation from local DocHub. Requires DocHub on port 3001 and DOCHUB_TOKEN in the shell or .pi-agents/.env.",
+	dochub: "Search and retrieve indexed documentation from DocHub. Set DOCHUB_TOKEN in the shell or the agent's .env; the endpoint URL can be changed in Studio.",
 	designhub: "Read and update project design context through DesignHub. Set DESIGNHUB_TOKEN in the shell or the agent's .env; the endpoint URL can be changed in Studio.",
 	taskhub: "Read and update project tasks through TaskHub. Set TASKHUB_TOKEN in the shell or the agent's .env; the endpoint URL can be changed in Studio.",
 };

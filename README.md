@@ -11,7 +11,7 @@ The package also includes an independent message-timing module: every user messa
 Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.3.9        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.3.10        # all projects (user scope)
 ```
 
 Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
@@ -22,7 +22,7 @@ To track the latest commit on `main` instead of a pinned release:
 pi install git:github.com/luximetr/pi-agents
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.3.9`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+To update an existing installation, run the same command with the desired ref (for example `@v0.3.10`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
 
 Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
 
@@ -161,7 +161,7 @@ Use **Manage MCP servers** in Studio to browse servers on the left and inspect t
 
 Use the selected server’s **Manage credentials** action to enter masked tokens for DocHub, DesignHub, TaskHub, or other HTTP servers with `${VAR}` header references. Credentials are saved immediately beside the edited agent’s definition (for example `.pi-agents/doc/.env` or `~/.pi/agent/pi-agents/doc/.env`), not in shared scope-level files, drafts, agent overrides, or session history. Files use owner-only permissions and a local Git ignore rule; tracked `.env` files are refused. Empty input or Escape leaves credentials unchanged. Saving refreshes only the edited agent’s credentials and reconnects its MCP servers immediately if it is active—no `/reload` needed. Other agents keep their own credentials. Session drafts are preserved; authentication failures are reported and can be retried by saving a corrected token. Shell values may override these settings.
 
-- `dochub`: connects to `http://localhost:3001/mcp`; set `DOCHUB_TOKEN` in the shell or `.pi-agents/.env`.
+- `dochub`: connects to `https://dochub.phoenixchumphon.com/mcp`; set `DOCHUB_TOKEN` in the shell or `.pi-agents/.env`.
 - `designhub`: defaults to `https://designhub.phoenixchumphon.com/mcp`; edit the endpoint in Studio if needed and set `DESIGNHUB_TOKEN` in the shell or `.pi-agents/.env`.
 - `taskhub`: defaults to `https://taskhub.phoenixchumphon.com/mcp`; edit the endpoint in Studio if needed and set `TASKHUB_TOKEN` in the shell or `.pi-agents/.env`.
 

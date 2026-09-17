@@ -10,7 +10,7 @@ export default {
 	// .pi-agents/agent-doc/.env (gitignored) via ${DOCHUB_MCP_TOKEN}.
 	mcpServers: {
 		dochub: {
-			url: "http://100.91.130.31:3001/mcp",
+			url: "https://dochub.phoenixchumphon.com/mcp",
 			headers: {
 				Authorization: "Bearer ${DOCHUB_MCP_TOKEN}",
 			},
