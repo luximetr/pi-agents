@@ -962,7 +962,7 @@ test("project Studio overrides preserve config and expose curated MCP recipes", 
 			headers: { Authorization: "Bearer ${DOCHUB_TOKEN}" },
 		});
 		assert.deepEqual(discovered.config.mcpServers?.designhub, {
-			url: "http://localhost:5101/mcp",
+			url: "https://designhub.phoenixchumphon.com/mcp",
 			headers: { Authorization: "Bearer ${DESIGNHUB_TOKEN}" },
 		});
 		assert.equal(discovered.config.mcpServerSources?.["pen.dev"], "builtin");
@@ -1004,9 +1004,48 @@ test("Agent Studio selectors show highlighted tool and MCP details in a right pa
 		assert.match(toolDetails, /Choices \(1\/2\)/);
 		assert.doesNotMatch(toolDetails, /powershell/i);
 		assert.match(mcpDetails, /designhub/);
-		assert.match(mcpDetails, /local DesignHub editor/);
-		assert.match(mcpDetails, /proxy\. Requires DesignHub/);
-		assert.match(mcpDetails, /http:\/\/localhost:5101\/mcp/);
+		assert.match(mcpDetails, /project design context through DesignHub/);
+		assert.match(mcpDetails, /endpoint URL can be/);
+		assert.match(mcpDetails, /changed in Studio/);
+		assert.match(mcpDetails, /https:\/\/designhub\.phoenixchumphon\.com\/mcp/);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("Agent Studio edits and persists an HTTP MCP endpoint URL", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-mcp-url-"));
+	try {
+		await makeAgent(root, "alpha", 'default: true, mcp: ["designhub"]');
+		let editedDetails = "";
+		const endpoint = "https://designhub.example.com/custom-mcp";
+		const runtime = boot(root, {
+			selectAnswers: ["Manage MCP servers (1)", "Save agent.ts (project)"],
+			inputAnswers: [endpoint],
+			customActions: [
+				component => component.handleInput("e"),
+				component => {
+					component.handleInput("\r");
+					component.handleInput("\x1b[B");
+					component.handleInput("\x1b[B");
+					component.handleInput("\x1b[B");
+					assert.match(component.render(140).join("\n"), /Edit endpoint URL/);
+					component.handleInput("\r");
+				},
+				component => {
+					editedDetails = component.render(140).join("\n");
+					component.handleInput("\x1b");
+					component.handleInput("\x1b");
+				},
+			],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("agent").handler("", runtime.ctx);
+		assert.match(editedDetails, /https:\/\/designhub\.example\.com\/custom-mcp/);
+		assert.match(editedDetails, /agent-local draft/);
+		const saved = (await discoverAgents(root)).agents.find(agent => agent.name === "alpha");
+		assert.equal(saved?.mcpServers?.designhub.url, endpoint);
+		assert.equal(saved?.mcpServers?.designhub.headers?.Authorization, "Bearer ${DESIGNHUB_TOKEN}");
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

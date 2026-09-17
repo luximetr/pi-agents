@@ -325,7 +325,12 @@ async function showToggleEditor(
 	title: string,
 	items: Array<{ id: string; label: string; description?: string }>,
 	initial: string[],
-	serverSettings?: { credentials: (name: string) => Promise<void>; test: (name: string) => Promise<string | void> },
+	serverSettings?: {
+		credentials: (name: string) => Promise<void>;
+		test: (name: string) => Promise<string | void>;
+		editUrl?: (name: string) => Promise<void>;
+		canEditUrl?: (name: string) => boolean;
+	},
 ): Promise<string[]> {
 	const enabled = new Set(initial);
 	const searchInput = new Input();
@@ -334,7 +339,7 @@ async function showToggleEditor(
 	let settingsFocused = false;
 	let settingIndex = 0;
 	const testResults = new Map<string, string>();
-	const show = () => ctx.ui.custom<"credentials" | "test" | undefined>((tui, theme, _kb, done) => {
+	const show = () => ctx.ui.custom<"credentials" | "test" | "url" | undefined>((tui, theme, _kb, done) => {
 
 		const filteredItems = () => {
 			const query = searchInput.getValue().trim().toLowerCase();
@@ -347,6 +352,14 @@ async function showToggleEditor(
 			if (!filtered.some((item) => item.id === selectedId)) selectedId = filtered[0]?.id;
 			return filtered;
 		};
+		const settingsFor = (name: string) => [
+			{ id: "toggle" as const, label: enabled.has(name) ? "Disable server" : "Enable server" },
+			{ id: "credentials" as const, label: "Manage credentials" },
+			{ id: "test" as const, label: "Test connection" },
+			...(serverSettings?.editUrl && (serverSettings.canEditUrl?.(name) ?? true)
+				? [{ id: "url" as const, label: "Edit endpoint URL" }]
+				: []),
+		];
 
 		return {
 			get focused() { return searchInput.focused; },
@@ -387,11 +400,12 @@ async function showToggleEditor(
 						"",
 					);
 					if (serverSettings) {
-						const settings = [enabled.has(selected.id) ? "Disable server" : "Enable server", "Manage credentials", "Test connection"];
-						settings.forEach((label, index) => rightPane.push(
-							settingsFocused && settingIndex === index ? theme.fg("accent", ` › ${label}`) : `   ${label}`,
+						const settings = settingsFor(selected.id);
+						settingIndex = Math.min(settingIndex, settings.length - 1);
+						settings.forEach((setting, index) => rightPane.push(
+							settingsFocused && settingIndex === index ? theme.fg("accent", ` › ${setting.label}`) : `   ${setting.label}`,
 						));
-						rightPane.push(theme.fg("dim", " Enable changes apply with the Studio draft."), "");
+						rightPane.push(theme.fg("dim", " Enablement applies with the draft; endpoint edits require Save agent.ts."), "");
 						const result = testResults.get(selected.id);
 						if (result) pushWrapped(rightPane, rightWidth, result, 1);
 					}
@@ -423,12 +437,16 @@ async function showToggleEditor(
 					if (selectedId) settingsFocused = !settingsFocused;
 				} else if (settingsFocused) {
 					if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
-						settingIndex = (settingIndex + (matchesKey(data, Key.up) ? 2 : 1)) % 3;
+						const settings = selectedId ? settingsFor(selectedId) : [];
+						if (settings.length > 0) {
+							settingIndex = (settingIndex + (matchesKey(data, Key.up) ? settings.length - 1 : 1)) % settings.length;
+						}
 					} else if (matchesKey(data, Key.enter) && selectedId) {
-						if (settingIndex === 0) {
+						const action = settingsFor(selectedId)[settingIndex]?.id;
+						if (action === "toggle") {
 							if (enabled.has(selectedId)) enabled.delete(selectedId);
 							else enabled.add(selectedId);
-						} else done(settingIndex === 1 ? "credentials" : "test");
+						} else if (action) done(action);
 					}
 				} else if (serverSettings && matchesKey(data, Key.enter)) {
 					if (selectedId) settingsFocused = true;
@@ -453,8 +471,10 @@ async function showToggleEditor(
 	while (true) {
 		const action = await show();
 		if (!action || !selectedId || !serverSettings) break;
-		const result = await serverSettings[action](selectedId);
-		if (action === "credentials") testResults.delete(selectedId);
+		const result = action === "url"
+			? await serverSettings.editUrl?.(selectedId)
+			: await serverSettings[action](selectedId);
+		if (action === "credentials" || action === "url") testResults.delete(selectedId);
 		else if (result) testResults.set(selectedId, result);
 	}
 	return items.map((item) => item.id).filter((id) => enabled.has(id));
@@ -478,11 +498,19 @@ export async function chooseAgentColor(ctx: ExtensionContext, current?: string):
 export async function showAgentStudio(
 	ctx: ExtensionContext,
 	agent: DiscoveredAgent,
-	options: AgentSelectorOptions & { agents?: readonly DiscoveredAgent[]; hasSessionDraft: boolean; onSetDefault?: () => Promise<void>; onCredentialsSaved?: () => Promise<void>; onTestMcp?: (name: string) => Promise<string | void> },
+	options: AgentSelectorOptions & { agents?: readonly DiscoveredAgent[]; hasSessionDraft: boolean; onSetDefault?: () => Promise<void>; onCredentialsSaved?: () => Promise<void>; onTestMcp?: (name: string, server?: McpServerConfig) => Promise<string | void> },
 ): Promise<AgentStudioResult> {
 	let tools = agent.tools === undefined ? [...options.activeTools] : [...agent.tools];
 	let inheritsTools = agent.tools === undefined;
 	let mcp = [...(agent.mcp ?? [])];
+	const cloneServer = (server: McpServerConfig): McpServerConfig => ({
+		...server,
+		...(server.args ? { args: [...server.args] } : {}),
+		...(server.env ? { env: { ...server.env } } : {}),
+		...(server.headers ? { headers: { ...server.headers } } : {}),
+	});
+	const mcpServers = Object.fromEntries(Object.entries({ ...options.mcpServers, ...agent.mcpServers }).map(([name, server]) => [name, cloneServer(server)]));
+	const editedMcpServers = new Set<string>();
 	let subagents = agent.subagents?.map(entry => ({ ...entry }));
 	let systemPrompt = agent.systemPrompt ?? "";
 	let description = agent.description;
@@ -554,35 +582,56 @@ export async function showAgentStudio(
 			continue;
 		}
 		if (choice === StudioAction.Mcp) {
-			const names = [...new Set([...Object.keys(options.mcpServers), ...Object.keys(agent.mcpServers ?? {}), ...mcp])].sort();
-			const choices = names.map((name) => {
-				const source = agent.mcpServers?.[name] ? "agent-local" : options.mcpServerSources[name] ?? "unknown";
-				const cfg = agent.mcpServers?.[name] ?? options.mcpServers[name];
+			const names = [...new Set([...Object.keys(mcpServers), ...mcp])].sort();
+			const describeServer = (name: string): string => {
+				const source = editedMcpServers.has(name)
+					? "agent-local draft"
+					: agent.mcpServers?.[name] ? "agent-local" : options.mcpServerSources[name] ?? "unknown";
+				const cfg = mcpServers[name];
 				const transport = cfg?.url
 					? `HTTP · ${cfg.url}`
 					: cfg?.command
 						? `stdio · ${[cfg.command, ...(cfg.args ?? [])].join(" ")}`
 						: "missing definition";
 				const recipeHelp = source === "builtin" ? BUILTIN_MCP_SERVER_DESCRIPTIONS[name] : undefined;
-				return {
-					id: name,
-					label: name,
-					description: [recipeHelp, `${transport} · ${source}`].filter(Boolean).join("\n"),
-				};
-			});
+				return [recipeHelp, `${transport} · ${source}`].filter(Boolean).join("\n");
+			};
+			const choices = names.map((name) => ({ id: name, label: name, description: describeServer(name) }));
 			if (choices.length === 0) ctx.ui.notify("No MCP servers or built-in recipes are available.", "warning");
 			else mcp = await showToggleEditor(ctx, `MCP servers · ${agent.name}`, choices, mcp, {
 				credentials: async (name) => {
-					if (await configureCredentials(ctx, { ...options.mcpServers, ...agent.mcpServers }, agent, options.trusted, name)) {
+					if (await configureCredentials(ctx, mcpServers, agent, options.trusted, name)) {
 						try { await options.onCredentialsSaved?.(); }
 						catch { ctx.ui.notify("Credential saved, but runtime refresh failed. Run /reload to retry.", "error"); }
 					}
 				},
 				test: async (name) => {
 					try {
-						if (options.onTestMcp) return await options.onTestMcp(name);
+						if (options.onTestMcp) return await options.onTestMcp(name, mcpServers[name]);
 						else ctx.ui.notify("Connection testing is unavailable in this context.", "warning");
 					} catch { ctx.ui.notify("MCP connection test failed.", "error"); }
+				},
+				canEditUrl: (name) => sourceIsEditable && Boolean(mcpServers[name]?.url),
+				editUrl: async (name) => {
+					const server = mcpServers[name];
+					if (!server?.url) return;
+					while (true) {
+						const value = await ctx.ui.input(`MCP endpoint URL · ${name}`, server.url);
+						if (value === undefined) return;
+						const trimmed = value.trim();
+						try {
+							const parsed = new URL(trimmed);
+							if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported protocol");
+						} catch {
+							ctx.ui.notify("Enter a valid http:// or https:// MCP endpoint URL.", "warning");
+							continue;
+						}
+						server.url = trimmed;
+						editedMcpServers.add(name);
+						const choice = choices.find(item => item.id === name);
+						if (choice) choice.description = describeServer(name);
+						return;
+					}
 				},
 			});
 			continue;
@@ -598,11 +647,11 @@ export async function showAgentStudio(
 		};
 		if (choice === StudioAction.Apply) return { action: "apply", override };
 		if (choice === StudioAction.SaveSource) {
-			const mcpServers = Object.fromEntries(mcp.flatMap((name) => {
-				const server = agent.mcpServers?.[name] ?? options.mcpServers[name];
+			const selectedMcpServers = Object.fromEntries(mcp.flatMap((name) => {
+				const server = mcpServers[name];
 				return server ? [[name, server] as const] : [];
 			}));
-			return { action: "save-source", override, mcpServers };
+			return { action: "save-source", override, mcpServers: selectedMcpServers };
 		}
 		if (choice === StudioAction.SaveProject) return { action: "save-project", override };
 		if (choice === StudioAction.SaveGlobal) return { action: "save-global", override };

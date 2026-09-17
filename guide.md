@@ -12,7 +12,7 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 
 ## Agent Studio
 
-Open `f7`, select an agent, and press `e`. Studio can edit the effective system prompt, direct tool allowlist, MCP assignments, and subagents. Tool and MCP selectors show the highlighted item's description and connection details in a right-side pane.
+Open `f7`, select an agent, and press `e`. Studio can edit the effective system prompt, direct tool allowlist, MCP assignments and HTTP endpoint URLs, and subagents. Tool and MCP selectors show the highlighted item's description and connection details in a right-side pane. In **Manage MCP servers**, open a server's settings and choose **Edit endpoint URL**; **Save agent.ts** persists it as an agent-local definition.
 
 - **Apply as session draft**: activates immediately, persists in session history, follows session-tree navigation, and is inherited by delegated children. The dashboard marks it `◆ draft`.
 - **Save agent.ts**: writes edits directly to the agent definition, copies selected MCP definitions into its local `mcpServers`, removes stale unselected local MCP definitions, and removes saved overlays folded into it. Static TypeScript object exports retain imports, comments, custom tools, and unrelated fields; direct Studio saves keep the system prompt in `prompt.md` via `systemPromptFile`. A discovered legacy `agent.json` is migrated to canonical `agent.ts` + `prompt.md` files when saved.
@@ -28,7 +28,7 @@ The MCP selector always offers recipes shipped with the extension. They are opt-
 - `ios-simulator`: pinned `ios-simulator-mcp@2.1.0`; requires Xcode/iOS Simulator.
 - `pen.dev`: uses the Apple-silicon MCP server bundled in `/Applications/Pen.app`; keep Pen running.
 - `dochub`: local Streamable HTTP at `http://localhost:3001/mcp`; set `DOCHUB_TOKEN` in the shell or `.pi-agents/.env`.
-- `designhub`: local Streamable HTTP through the editor proxy at `http://localhost:5101/mcp`; set `DESIGNHUB_TOKEN` in the shell or `.pi-agents/.env`.
+- `designhub`: Streamable HTTP at `https://designhub.phoenixchumphon.com/mcp` by default; edit the endpoint in Studio if needed and set `DESIGNHUB_TOKEN` in the shell or `.pi-agents/.env`.
 
 ## Where agents live
 

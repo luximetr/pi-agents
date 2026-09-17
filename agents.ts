@@ -593,7 +593,7 @@ export const BUILTIN_MCP_SERVERS: Record<string, McpServerConfig> = {
 		headers: { Authorization: "Bearer ${DOCHUB_TOKEN}" },
 	},
 	designhub: {
-		url: "http://localhost:5101/mcp",
+		url: "https://designhub.phoenixchumphon.com/mcp",
 		headers: { Authorization: "Bearer ${DESIGNHUB_TOKEN}" },
 	},
 };
@@ -604,7 +604,7 @@ export const BUILTIN_MCP_SERVER_DESCRIPTIONS: Record<string, string> = {
 	"ios-simulator": "Inspect and control iOS Simulator. Requires Xcode and a bootable simulator on macOS.",
 	"pen.dev": "Inspect and edit .pen design files through the running Pen desktop app. Requires Pen.app in /Applications on Apple silicon.",
 	dochub: "Search and retrieve indexed documentation from local DocHub. Requires DocHub on port 3001 and DOCHUB_TOKEN in the shell or .pi-agents/.env.",
-	designhub: "Read and update project design context through the local DesignHub editor proxy. Requires DesignHub on port 5101 and DESIGNHUB_TOKEN in the shell or .pi-agents/.env.",
+	designhub: "Read and update project design context through DesignHub. Set DESIGNHUB_TOKEN in the shell or the agent's .env; the endpoint URL can be changed in Studio.",
 };
 
 function loadConfigFrom(dir: string): PiAgentsConfig {

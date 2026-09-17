@@ -695,9 +695,9 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(`Could not save default agent: ${err instanceof Error ? err.message : String(err)}`, "error");
 				}
 			},
-			onTestMcp: async (serverName) => {
+			onTestMcp: async (serverName, draftServer) => {
 				const current = agents.find(candidate => candidate.name === name);
-				const server = current?.mcpServers?.[serverName] ?? config.mcpServers?.[serverName];
+				const server = draftServer ?? current?.mcpServers?.[serverName] ?? config.mcpServers?.[serverName];
 				if (!current || !server) {
 					ctx.ui.notify(`MCP "${serverName}" has no server definition.`, "error");
 					return;
