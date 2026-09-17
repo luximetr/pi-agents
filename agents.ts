@@ -596,6 +596,10 @@ export const BUILTIN_MCP_SERVERS: Record<string, McpServerConfig> = {
 		url: "https://designhub.phoenixchumphon.com/mcp",
 		headers: { Authorization: "Bearer ${DESIGNHUB_TOKEN}" },
 	},
+	taskhub: {
+		url: "https://taskhub.phoenixchumphon.com/mcp",
+		headers: { Authorization: "Bearer ${TASKHUB_TOKEN}" },
+	},
 };
 
 /** Human-facing recipe help used by Agent Studio's details pane. */
@@ -605,6 +609,7 @@ export const BUILTIN_MCP_SERVER_DESCRIPTIONS: Record<string, string> = {
 	"pen.dev": "Inspect and edit .pen design files through the running Pen desktop app. Requires Pen.app in /Applications on Apple silicon.",
 	dochub: "Search and retrieve indexed documentation from local DocHub. Requires DocHub on port 3001 and DOCHUB_TOKEN in the shell or .pi-agents/.env.",
 	designhub: "Read and update project design context through DesignHub. Set DESIGNHUB_TOKEN in the shell or the agent's .env; the endpoint URL can be changed in Studio.",
+	taskhub: "Read and update project tasks through TaskHub. Set TASKHUB_TOKEN in the shell or the agent's .env; the endpoint URL can be changed in Studio.",
 };
 
 function loadConfigFrom(dir: string): PiAgentsConfig {

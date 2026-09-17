@@ -965,9 +965,14 @@ test("project Studio overrides preserve config and expose curated MCP recipes", 
 			url: "https://designhub.phoenixchumphon.com/mcp",
 			headers: { Authorization: "Bearer ${DESIGNHUB_TOKEN}" },
 		});
+		assert.deepEqual(discovered.config.mcpServers?.taskhub, {
+			url: "https://taskhub.phoenixchumphon.com/mcp",
+			headers: { Authorization: "Bearer ${TASKHUB_TOKEN}" },
+		});
 		assert.equal(discovered.config.mcpServerSources?.["pen.dev"], "builtin");
 		assert.equal(discovered.config.mcpServerSources?.dochub, "builtin");
 		assert.equal(discovered.config.mcpServerSources?.designhub, "builtin");
+		assert.equal(discovered.config.mcpServerSources?.taskhub, "builtin");
 		assert.equal(discovered.config.mcpServerSources?.custom, "project");
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -1004,6 +1009,7 @@ test("Agent Studio selectors show highlighted tool and MCP details in a right pa
 		assert.match(toolDetails, /Choices \(1\/2\)/);
 		assert.doesNotMatch(toolDetails, /powershell/i);
 		assert.match(mcpDetails, /designhub/);
+		assert.match(mcpDetails, /taskhub/);
 		assert.match(mcpDetails, /project design context through DesignHub/);
 		assert.match(mcpDetails, /endpoint URL can be/);
 		assert.match(mcpDetails, /changed in Studio/);

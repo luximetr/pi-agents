@@ -9,6 +9,7 @@ import { parseEnvFile, BUILTIN_MCP_SERVERS } from "../agents.ts";
 
 assert.deepEqual(credentialVariables(BUILTIN_MCP_SERVERS.dochub), ["DOCHUB_TOKEN"]);
 assert.deepEqual(credentialVariables(BUILTIN_MCP_SERVERS.designhub), ["DESIGNHUB_TOKEN"]);
+assert.deepEqual(credentialVariables(BUILTIN_MCP_SERVERS.taskhub), ["TASKHUB_TOKEN"]);
 assert.deepEqual(credentialVariables({ command: "node" }), []);
 const updated = updateCredential('# comment\r\nOTHER=keep\r\nexport TOKEN=old\r\nTOKEN=duplicate\r\n', "TOKEN", 'a"b#c=\\$');
 assert.equal(parseEnvFile(updated).TOKEN, 'a"b#c=\\$');

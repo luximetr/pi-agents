@@ -11,7 +11,7 @@ The package also includes an independent message-timing module: every user messa
 Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.3.8        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.3.9        # all projects (user scope)
 ```
 
 Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
@@ -22,7 +22,7 @@ To track the latest commit on `main` instead of a pinned release:
 pi install git:github.com/luximetr/pi-agents
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.3.8`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+To update an existing installation, run the same command with the desired ref (for example `@v0.3.9`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
 
 Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
 
@@ -152,17 +152,18 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 
 Use **Manage subagents** to add existing agents, remove assignments, or set each child's optional model, timeout, and lifecycle. Lifecycle choices are **Disposable** and **Resumable**; omitted lifecycle defaults to Disposable. Blank model/timeout settings restore the default model or no deadline. **Done** keeps changes in the Studio draft; Escape discards changes made in the subagent menu. Then apply or save the draft. Create new child agents from the dashboard first.
 
-The MCP editor includes curated recipes for Playwright, iOS Simulator, pen.dev, DocHub, and DesignHub. They remain disconnected until assigned to an agent. Project/global `mcpServers` with the same name override the bundled recipe.
+The MCP editor includes curated recipes for Playwright, iOS Simulator, pen.dev, DocHub, DesignHub, and TaskHub. They remain disconnected until assigned to an agent. Project/global `mcpServers` with the same name override the bundled recipe.
 
 - `playwright`: pinned `@playwright/mcp@0.0.80`.
 - `ios-simulator`: pinned `ios-simulator-mcp@2.1.0`; requires Xcode/iOS Simulator.
 - `pen.dev`: connects to the Apple-silicon MCP server inside `/Applications/Pen.app`; keep Pen running.
 Use **Manage MCP servers** in Studio to browse servers on the left and inspect the selected server’s details and settings on the right. Press Enter or Tab to focus its **Enable/Disable server**, **Manage credentials**, **Test connection**, and (for HTTP servers) **Edit endpoint URL** actions; use ↑↓ and Enter to choose an action. Escape returns to the server list, then to Studio. Space toggles enablement directly from the list. For directly editable agents, endpoint edits remain pending in Studio and are persisted as an agent-local definition by **Save agent.ts**. Credential entry and testing return to the same server’s settings, with test results shown inline. **Test connection** uses the edited endpoint, initializes an isolated MCP client, and discovers tools with a 10-second timeout; it does not enable the server, register tools, or change the active agent. Tests report missing credentials, connection failures, or the discovered tool count without exposing tokens.
 
-Use the selected server’s **Manage credentials** action to enter masked tokens for DocHub, DesignHub, or other HTTP servers with `${VAR}` header references. Credentials are saved immediately beside the edited agent’s definition (for example `.pi-agents/doc/.env` or `~/.pi/agent/pi-agents/doc/.env`), not in shared scope-level files, drafts, agent overrides, or session history. Files use owner-only permissions and a local Git ignore rule; tracked `.env` files are refused. Empty input or Escape leaves credentials unchanged. Saving refreshes only the edited agent’s credentials and reconnects its MCP servers immediately if it is active—no `/reload` needed. Other agents keep their own credentials. Session drafts are preserved; authentication failures are reported and can be retried by saving a corrected token. Shell values may override these settings.
+Use the selected server’s **Manage credentials** action to enter masked tokens for DocHub, DesignHub, TaskHub, or other HTTP servers with `${VAR}` header references. Credentials are saved immediately beside the edited agent’s definition (for example `.pi-agents/doc/.env` or `~/.pi/agent/pi-agents/doc/.env`), not in shared scope-level files, drafts, agent overrides, or session history. Files use owner-only permissions and a local Git ignore rule; tracked `.env` files are refused. Empty input or Escape leaves credentials unchanged. Saving refreshes only the edited agent’s credentials and reconnects its MCP servers immediately if it is active—no `/reload` needed. Other agents keep their own credentials. Session drafts are preserved; authentication failures are reported and can be retried by saving a corrected token. Shell values may override these settings.
 
 - `dochub`: connects to `http://localhost:3001/mcp`; set `DOCHUB_TOKEN` in the shell or `.pi-agents/.env`.
 - `designhub`: defaults to `https://designhub.phoenixchumphon.com/mcp`; edit the endpoint in Studio if needed and set `DESIGNHUB_TOKEN` in the shell or `.pi-agents/.env`.
+- `taskhub`: defaults to `https://taskhub.phoenixchumphon.com/mcp`; edit the endpoint in Studio if needed and set `TASKHUB_TOKEN` in the shell or `.pi-agents/.env`.
 
 Static TypeScript agents normally save directly to `agent.ts` with their prompts kept in `prompt.md`; legacy `agent.json` definitions migrate to that layout when saved. The layered model remains available for dynamic TypeScript definitions: `source definition + saved global/project override + session draft = effective agent`.
 
@@ -461,6 +462,6 @@ The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent insp
 ## Limitations / roadmap
 
 - Agent Studio saves descriptions, colors, prompts, tool allowlists, MCP assignments, and subagent delegation settings to canonical `agent.ts` + `prompt.md` definitions. Legacy `agent.json` definitions are discovered and migrated on save. Dynamic/computed TypeScript definitions use explicit saved overlays. Other metadata, policies, and executable custom-tool code remain untouched.
-- MCP supports stdio and streamable HTTP transports (no SSE); custom server definitions are still configured statically, while the bundled Playwright, iOS Simulator, pen.dev, DocHub, and DesignHub recipes can be assigned in Studio.
+- MCP supports stdio and streamable HTTP transports (no SSE); custom server definitions are still configured statically, while the bundled Playwright, iOS Simulator, pen.dev, DocHub, DesignHub, and TaskHub recipes can be assigned in Studio.
 - External edits to `.pi-agents/` need `/reload` (or a new session); Studio drafts and saves are applied immediately.
 - Project-local installs (`pi install <repo> -l` / `pi-agents --local`) are recorded in `.pi/settings.json`, which git never checks out — freshly created worktrees of such a project have no extension. Use the default global install instead (the `.pi-agents/` configs remain per project)

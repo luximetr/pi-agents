@@ -29,6 +29,7 @@ The MCP selector always offers recipes shipped with the extension. They are opt-
 - `pen.dev`: uses the Apple-silicon MCP server bundled in `/Applications/Pen.app`; keep Pen running.
 - `dochub`: local Streamable HTTP at `http://localhost:3001/mcp`; set `DOCHUB_TOKEN` in the shell or `.pi-agents/.env`.
 - `designhub`: Streamable HTTP at `https://designhub.phoenixchumphon.com/mcp` by default; edit the endpoint in Studio if needed and set `DESIGNHUB_TOKEN` in the shell or `.pi-agents/.env`.
+- `taskhub`: Streamable HTTP at `https://taskhub.phoenixchumphon.com/mcp` by default; edit the endpoint in Studio if needed and set `TASKHUB_TOKEN` in the shell or `.pi-agents/.env`.
 
 ## Where agents live
 
