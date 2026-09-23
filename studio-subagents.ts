@@ -38,11 +38,13 @@ export async function editSubagents(ctx: ExtensionContext, parent: string, agent
 		]);
 		if (action === "remove") entries.splice(index, 1);
 		if (action === "model") {
-			const model = await ctx.ui.input("Model pattern or provider/model ID (blank = default)", entry.model);
+			const title = "Model pattern or provider/model ID (blank = default)";
+			const model = entry.model ? await ctx.ui.editor(title, entry.model) : await ctx.ui.input(title);
 			if (model !== undefined) entry.model = model.trim() || undefined;
 		}
 		if (action === "timeout") {
-			const value = await ctx.ui.input("Timeout in seconds (blank = no deadline)", entry.timeoutSeconds?.toString());
+			const title = "Timeout in seconds (blank = no deadline)";
+			const value = entry.timeoutSeconds === undefined ? await ctx.ui.input(title) : await ctx.ui.editor(title, entry.timeoutSeconds.toString());
 			if (value === undefined) continue;
 			const timeout = value.trim() ? Number(value) : undefined;
 			if (timeout !== undefined && (!Number.isFinite(timeout) || timeout <= 0)) {

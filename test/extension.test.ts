@@ -349,8 +349,12 @@ test("subagent editor validates timeouts and cancels without mutating existing s
 	const current = [{ name: "missing", model: "old/model", timeoutSeconds: 20 }];
 	const runtime = boot("/tmp", {
 		selectAnswers: ["1 · missing · old/model · 20s · disposable (missing agent)", "Set timeout (20s)", "Done"],
-		inputAnswers: ["-1"],
+		editorAnswers: ["-1"],
 	});
+	runtime.ctx.ui.editor = async (_title: string, prefill: string) => {
+		assert.equal(prefill, "20");
+		return "-1";
+	};
 	assert.deepEqual(await editSubagents(runtime.ctx, "parent", [], current), current);
 	assert.ok(runtime.notifications.some(item => item.message.includes("positive number")));
 	const cancelled = boot("/tmp", {
@@ -358,6 +362,24 @@ test("subagent editor validates timeouts and cancels without mutating existing s
 	});
 	assert.equal(await editSubagents(cancelled.ctx, "parent", [], current), undefined);
 	assert.equal(current.length, 1);
+
+	const populated = boot("/tmp", {
+		selectAnswers: ["1 · missing · old/model · 20s · disposable (missing agent)", "Set model (old/model)", "1 · missing · updated/model:max · 20s · disposable (missing agent)", "Set timeout (20s)", "Done"],
+	});
+	const seen: string[] = [];
+	populated.ctx.ui.editor = async (_title: string, prefill: string) => {
+		seen.push(prefill);
+		return seen.length === 1 ? "updated/model:max" : "45";
+	};
+	assert.deepEqual(await editSubagents(populated.ctx, "parent", [], current), [{ name: "missing", model: "updated/model:max", timeoutSeconds: 45 }]);
+	assert.deepEqual(seen, ["old/model", "20"]);
+	assert.deepEqual(current, [{ name: "missing", model: "old/model", timeoutSeconds: 20 }]);
+
+	const dismissed = boot("/tmp", {
+		selectAnswers: ["1 · missing · old/model · 20s · disposable (missing agent)", "Set model (old/model)", "Done"],
+		editorAnswers: [undefined],
+	});
+	assert.deepEqual(await editSubagents(dismissed.ctx, "parent", [], current), current);
 
 	const lifecycle = boot("/tmp", {
 		selectAnswers: ["1 · child · default model · no timeout · disposable (missing agent)", "Set lifecycle (disposable)", "Resumable (retain context for this assignment)", "Done"],
