@@ -401,7 +401,7 @@ export default function (pi: ExtensionAPI) {
 					publish();
 				};
 				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
-					model: subagent.model,
+					model: subagent.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
 					lifecycle,
 					rootSessionId: process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.(),
 					participantIdentity: subagentAssignmentIdentity(parent!, childAgent),

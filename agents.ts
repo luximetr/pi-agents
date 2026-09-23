@@ -65,7 +65,7 @@ export interface AgentCustomTool {
 export interface SubagentConfig {
 	/** Name of the allowed child agent. */
 	name: string;
-	/** Pi model pattern or provider/model ID used for this delegation. Omit to inherit Pi's default selection. */
+	/** Pi model pattern or provider/model ID used for this delegation. Omit to inherit the parent's currently selected Pi model. */
 	model?: string;
 	/** Total execution limit in seconds for this parent-to-child delegation. Omit for no deadline. */
 	timeoutSeconds?: number;

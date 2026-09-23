@@ -533,6 +533,52 @@ function bootExtension(root: string) {
 	return { handlers, registered, ctx };
 }
 
+test("delegation inherits the currently selected parent model unless configured otherwise", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegate-model-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	const previousBin = process.env.PI_CODING_AGENT_BIN;
+	try {
+		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
+		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
+			export default { name: "lead", description: "Lead", default: true, subagents: ["worker", { name: "fixed", model: "test/fixed-model" }] };
+		`);
+		for (const name of ["worker", "fixed"]) {
+			await mkdir(path.join(root, ".pi-agents", name), { recursive: true });
+			await writeFile(path.join(root, ".pi-agents", name, "agent.ts"), `export default { name: "${name}", description: "${name}" };`);
+		}
+		await writeFile(fakePi, `#!/usr/bin/env node
+			process.stdin.on("data", chunk => {
+				const command = JSON.parse(String(chunk).trim());
+				if (command.type === "prompt") {
+					process.stdout.write(JSON.stringify({ type: "message_end", message: { content: [{ type: "text", text: JSON.stringify(process.argv.slice(2)) }] } }) + "\\n");
+					process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+				}
+			});
+		`);
+		await chmod(fakePi, 0o755);
+		process.env.PI_CODING_AGENT_BIN = fakePi;
+		const { handlers, registered, ctx } = bootExtension(root);
+		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+		const delegate = registered.find(tool => tool.name === "delegate")!;
+		async function argsFor(agent: string): Promise<string[]> {
+			const result = await delegate.execute(`model-${agent}`, { agent, task: "report args" }, undefined, undefined, ctx);
+			assert.equal(result.details.status, "completed");
+			return JSON.parse(String(result.content[0].text).split("\n\n")[1]);
+		}
+		ctx.model = { provider: "test", id: "selected-one" };
+		assert.deepEqual(await argsFor("worker"), ["--mode", "rpc", "--no-session", "--agent", "worker", "--model", "test/selected-one"]);
+		ctx.model = { provider: "other", id: "selected-two" };
+		assert.deepEqual(await argsFor("worker"), ["--mode", "rpc", "--no-session", "--agent", "worker", "--model", "other/selected-two"]);
+		assert.deepEqual(await argsFor("fixed"), ["--mode", "rpc", "--no-session", "--agent", "fixed", "--model", "test/fixed-model"]);
+		ctx.model = undefined;
+		assert.deepEqual(await argsFor("worker"), ["--mode", "rpc", "--no-session", "--agent", "worker"]);
+	} finally {
+		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
+		else process.env.PI_CODING_AGENT_BIN = previousBin;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("end to end: configured subagent timeout returns control to the parent delegate", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegate-timeout-"));
 	const fakePi = path.join(root, "fake-pi.mjs");
