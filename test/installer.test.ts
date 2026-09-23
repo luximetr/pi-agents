@@ -54,15 +54,16 @@ test("installer performs a global package install and records project trust", as
 	}
 });
 
-test("local installer passes -l and bundled samples rewrite repository imports", async () => {
+test("local installer passes -l and copies the currently bundled samples", async () => {
 	const f = await fixture();
 	try {
 		await execFileAsync(process.execPath, [installer, "install", f.target, "--local", "--agents"], { env: f.env });
 		const calls = await readCalls(f.callsFile);
 		assert.deepEqual(calls, [["--version"], ["install", repoRoot, "-l"]]);
-		const lead = await readFile(path.join(f.target, ".pi-agents", "lead", "agent.ts"), "utf8");
-		assert.ok(lead.includes(`from ${JSON.stringify(path.join(repoRoot, "agents"))}`));
-		assert.equal(lead.includes('from "../../agents"'), false);
+		const dev = await readFile(path.join(f.target, ".pi-agents", "dev", "agent.ts"), "utf8");
+		assert.match(dev, /name: "dev"/);
+		const pm = await readFile(path.join(f.target, ".pi-agents", "test-pm-agent", "agent.ts"), "utf8");
+		assert.match(pm, /test-dev-agent/);
 		await assert.rejects(readFile(path.join(f.target, ".pi-agents", "doc", ".env"), "utf8"), /ENOENT/);
 	} finally {
 		await rm(f.root, { recursive: true, force: true });
