@@ -5,5 +5,5 @@ export default {
 	"mcp": [],
 	"systemPromptFile": "./prompt.md",
 	color: "#ff9f0a",
-	subagents: ["test-dev-agent"],
+	subagents: [{ name: "test-dev-agent", model: "openai-codex/gpt-6-luna:max" }],
 };
