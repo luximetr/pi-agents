@@ -9,6 +9,14 @@ import { OBSERVER_ENV, RUN_ID_ENV } from "./subagent-observer.ts";
 import { SubagentTranscript, messageText, type TranscriptEntry } from "./subagent-transcript.ts";
 
 export const MAX_SUBAGENT_DEPTH = 4;
+
+/** Preserve a requested thinking suffix when usage reports only the actual provider/model. */
+export function displaySubagentModel(selected: string | undefined, actual: string | undefined): string | undefined {
+	if (!actual) return selected;
+	if (!selected) return actual;
+	const base = selected.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "");
+	return base === actual ? selected : `${actual} (configured: ${selected})`;
+}
 export const ROOT_SESSION_ENV = "PI_AGENTS_ROOT_SESSION_ID";
 const RESUMABLE_ANCESTRY_ENV = "PI_AGENTS_RESUMABLE_ANCESTRY";
 

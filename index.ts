@@ -24,6 +24,7 @@ import {
 	type DelegateViewDetails,
 } from "./ui.ts";
 import {
+	displaySubagentModel,
 	formatArgs,
 	ROOT_SESSION_ENV,
 	SubagentStoppedError,
@@ -335,6 +336,9 @@ export default function (pi: ExtensionAPI) {
 			const timeoutSeconds = subagent.timeoutSeconds;
 			const childAgent = agents.find((agent) => agent.name === agentName)!;
 			const lifecycle = resolveSubagentLifecycle(subagent);
+			const inheritedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+			const thinkingLevel = pi.getThinkingLevel?.();
+			const selectedModel = subagent.model ?? (inheritedModel && thinkingLevel ? `${inheritedModel}:${thinkingLevel}` : inheritedModel);
 			try {
 				observerContext = ctx;
 				let observerEndpoint: string | undefined;
@@ -376,7 +380,7 @@ export default function (pi: ExtensionAPI) {
 						details: {
 							agent: agentName,
 							task,
-							model: [...callSubagentStats.models][0] ?? subagent.model,
+							model: displaySubagentModel(selectedModel, [...callSubagentStats.models][0]),
 							status: "running",
 							progress: true,
 							phase: progressPhase,
@@ -401,7 +405,7 @@ export default function (pi: ExtensionAPI) {
 					publish();
 				};
 				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
-					model: subagent.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
+					model: selectedModel,
 					lifecycle,
 					rootSessionId: process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.(),
 					participantIdentity: subagentAssignmentIdentity(parent!, childAgent),
@@ -443,7 +447,7 @@ export default function (pi: ExtensionAPI) {
 					details: {
 						agent: agentName,
 						task,
-						model: [...callSubagentStats.models][0] ?? subagent.model,
+						model: displaySubagentModel(selectedModel, [...callSubagentStats.models][0]),
 						status: "completed",
 						statsLine: subagentStatsLine(callSubagentStats, Date.now() - startedAt),
 						outputTruncated: truncation.truncated,
@@ -463,19 +467,22 @@ export default function (pi: ExtensionAPI) {
 						: err.reason === "user" ? "was interrupted by the user" : "was cancelled";
 					return {
 						content: [{ type: "text", text: `Subagent ${agentName} ${reason}.${operation}\nLast activity: ${formatElapsed(Date.now() - snapshot.lastActivityAt)} ago.${partial}\n\nChoose a different approach rather than blindly repeating the same delegation.` }],
-						details: { agent: agentName, task, model: snapshot.usage?.model ? [snapshot.usage.provider, snapshot.usage.model].filter(Boolean).join("/") : subagent.model, status, error: true } satisfies DelegateStatsDetails,
+						details: { agent: agentName, task, model: displaySubagentModel(selectedModel, snapshot.usage?.model ? [snapshot.usage.provider, snapshot.usage.model].filter(Boolean).join("/") : undefined), status, error: true } satisfies DelegateStatsDetails,
 					};
 				}
 				return {
 					content: [{ type: "text", text: `Subagent ${agentName} failed: ${err instanceof Error ? err.message : String(err)}` }],
-					details: { agent: agentName, task, model: subagent.model, status: "failed", error: true } satisfies DelegateStatsDetails,
+					details: { agent: agentName, task, model: selectedModel, status: "failed", error: true } satisfies DelegateStatsDetails,
 				};
 			}
 		},
 		renderCall(args, theme) {
 			const call = args as { agent?: unknown; task?: unknown };
 			const name = typeof call.agent === "string" ? call.agent.trim() : "";
-			const model = activeAgent?.subagents?.find(candidate => candidate.name === name)?.model;
+			const configured = activeAgent?.subagents?.find(candidate => candidate.name === name)?.model;
+			const inherited = observerContext?.model;
+			const level = pi.getThinkingLevel?.();
+			const model = configured ?? (inherited ? `${inherited.provider}/${inherited.id}${level ? `:${level}` : ""}` : undefined);
 			return renderDelegateCall({ ...call, model }, theme);
 		},
 		renderResult(result, options, theme) {
@@ -1008,6 +1015,7 @@ export default function (pi: ExtensionAPI) {
 	// --- Session lifecycle: discover, restore, persist ---
 
 	pi.on("session_start", async (event, ctx) => {
+		observerContext = ctx;
 		sessionCwd = ctx.cwd;
 		const handoff = event.reason === "new" ? takeSessionHandoff(ctx.cwd, event.previousSessionFile) : undefined;
 		sessionSubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };

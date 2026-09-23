@@ -2,7 +2,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Input, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { isActiveRun } from "./subagent-observer.ts";
-import type { RunningSubagentHandle, SubagentSnapshot } from "./subagents.ts";
+import { displaySubagentModel, type RunningSubagentHandle, type SubagentSnapshot } from "./subagents.ts";
 
 export interface RunTreeRow { run: SubagentSnapshot; depth: number; hasChildren: boolean }
 
@@ -47,7 +47,7 @@ function elapsed(ms: number): string {
 }
 function model(run: SubagentSnapshot): string {
 	const actual = run.usage?.model ? [run.usage.provider, run.usage.model].filter(Boolean).join("/") : undefined;
-	return actual && run.model && actual !== run.model ? `${actual} (configured: ${run.model})` : run.model ?? actual ?? "default model";
+	return displaySubagentModel(run.model, actual) ?? "default model";
 }
 
 /** A full-terminal overlay: viewing never replaces a session or owns its execution. */

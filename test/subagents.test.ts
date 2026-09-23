@@ -9,7 +9,7 @@ import test from "node:test";
 import { discoverAgents, findMainCheckoutRoot, resolveSubagentLifecycle, subagentAssignmentIdentity } from "../agents.ts";
 import extension, { matchesDeniedPath } from "../index.ts";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
+import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, displaySubagentModel, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
 import { renderDelegateCall, renderDelegateResult, showSubagentInspector } from "../ui.ts";
 
 const noAbort = new AbortController().signal;
@@ -466,6 +466,7 @@ test("subagent inspector renders live state and confirms a manual stop", async (
 			id: "call-inspect", agent: "worker", task: "run tests", model: "openai-codex/gpt-5.3-codex-spark:high", startedAt: now - 10_000,
 			lastActivityAt: now - 1_000, deadlineAt: now + 20_000, status: "running", phase: "tool execution",
 			currentTool: "bash", currentToolArgs: { command: "npm test" }, partialText: "testing...", recentEvents: ["→ bash"],
+			usage: { provider: "openai-codex", model: "gpt-5.3-codex-spark", input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 },
 		}),
 		stop: (reason) => { stopped = reason === "user"; },
 		steer: () => true,
@@ -523,15 +524,22 @@ function bootExtension(root: string) {
 		registerEntryRenderer: () => {},
 		registerFlag: () => {}, registerShortcut: () => {}, registerCommand: () => {},
 		getFlag: () => undefined, appendEntry: () => {},
+		getThinkingLevel: () => "max",
 		getAllTools: () => [{ name: "read" }, { name: "bash" }, ...registered],
 		getActiveTools: () => ["read", "bash"], setActiveTools: () => {},
 		exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 	};
 	extension(pi);
-	const theme = { fg: (role: string, text: string) => text, getColorMode: () => "truecolor" };
+	const theme = { fg: (role: string, text: string) => text, bold: (text: string) => text, getColorMode: () => "truecolor" };
 	const ctx: any = { cwd: root, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => undefined, getSessionId: () => "root-test-session" }, ui: { theme, setStatus: () => {}, notify: () => {} } };
 	return { handlers, registered, ctx };
 }
+
+test("usage model display retains configured reasoning levels", () => {
+	assert.equal(displaySubagentModel("openai-codex/gpt-6-luna:max", "openai-codex/gpt-6-luna"), "openai-codex/gpt-6-luna:max");
+	assert.equal(displaySubagentModel("test/old:high", "test/new"), "test/new (configured: test/old:high)");
+	assert.equal(displaySubagentModel(undefined, "test/new"), "test/new");
+});
 
 test("delegation inherits the currently selected parent model unless configured otherwise", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegate-model-"));
@@ -540,7 +548,7 @@ test("delegation inherits the currently selected parent model unless configured 
 	try {
 		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
-			export default { name: "lead", description: "Lead", default: true, subagents: ["worker", { name: "fixed", model: "test/fixed-model" }] };
+			export default { name: "lead", description: "Lead", default: true, subagents: ["worker", { name: "fixed", model: "test/fixed-model:high" }] };
 		`);
 		for (const name of ["worker", "fixed"]) {
 			await mkdir(path.join(root, ".pi-agents", name), { recursive: true });
@@ -550,7 +558,9 @@ test("delegation inherits the currently selected parent model unless configured 
 			process.stdin.on("data", chunk => {
 				const command = JSON.parse(String(chunk).trim());
 				if (command.type === "prompt") {
-					process.stdout.write(JSON.stringify({ type: "message_end", message: { content: [{ type: "text", text: JSON.stringify(process.argv.slice(2)) }] } }) + "\\n");
+					const selected = process.argv[process.argv.indexOf("--model") + 1];
+					const [provider, model] = selected ? selected.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "").split("/") : ["test", "default"];
+					process.stdout.write(JSON.stringify({ type: "message_end", message: { provider, model, content: [{ type: "text", text: JSON.stringify(process.argv.slice(2)) }], usage: { input: 1, output: 1 } } }) + "\\n");
 					process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
 				}
 			});
@@ -560,16 +570,22 @@ test("delegation inherits the currently selected parent model unless configured 
 		const { handlers, registered, ctx } = bootExtension(root);
 		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
 		const delegate = registered.find(tool => tool.name === "delegate")!;
-		async function argsFor(agent: string): Promise<string[]> {
-			const result = await delegate.execute(`model-${agent}`, { agent, task: "report args" }, undefined, undefined, ctx);
+		async function argsFor(agent: string, expectedModel?: string): Promise<string[]> {
+			const updates: any[] = [];
+			const result = await delegate.execute(`model-${agent}`, { agent, task: "report args" }, undefined, (update: any) => updates.push(update), ctx);
 			assert.equal(result.details.status, "completed");
+			if (expectedModel) {
+				assert.equal(result.details.model, expectedModel);
+				assert.ok(updates.some(update => update.details.model === expectedModel && update.details.status === "running"));
+				assert.match(delegate.renderCall({ agent, task: "report args" }, ctx.ui.theme).render(120).join("\n"), new RegExp(expectedModel));
+			}
 			return JSON.parse(String(result.content[0].text).split("\n\n")[1]);
 		}
 		ctx.model = { provider: "test", id: "selected-one" };
-		assert.deepEqual(await argsFor("worker"), ["--mode", "rpc", "--no-session", "--agent", "worker", "--model", "test/selected-one"]);
+		assert.deepEqual(await argsFor("worker", "test/selected-one:max"), ["--mode", "rpc", "--no-session", "--agent", "worker", "--model", "test/selected-one:max"]);
 		ctx.model = { provider: "other", id: "selected-two" };
-		assert.deepEqual(await argsFor("worker"), ["--mode", "rpc", "--no-session", "--agent", "worker", "--model", "other/selected-two"]);
-		assert.deepEqual(await argsFor("fixed"), ["--mode", "rpc", "--no-session", "--agent", "fixed", "--model", "test/fixed-model"]);
+		assert.deepEqual(await argsFor("worker", "other/selected-two:max"), ["--mode", "rpc", "--no-session", "--agent", "worker", "--model", "other/selected-two:max"]);
+		assert.deepEqual(await argsFor("fixed", "test/fixed-model:high"), ["--mode", "rpc", "--no-session", "--agent", "fixed", "--model", "test/fixed-model:high"]);
 		ctx.model = undefined;
 		assert.deepEqual(await argsFor("worker"), ["--mode", "rpc", "--no-session", "--agent", "worker"]);
 	} finally {
