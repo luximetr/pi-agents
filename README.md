@@ -11,7 +11,7 @@ The package also includes an independent message-timing module: every user messa
 Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.3.12        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.3.13        # all projects (user scope)
 ```
 
 Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
@@ -22,7 +22,7 @@ To track the latest commit on `main` instead of a pinned release:
 pi install git:github.com/luximetr/pi-agents
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.3.12`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+To update an existing installation, run the same command with the desired ref (for example `@v0.3.13`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
 
 Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
 
@@ -34,7 +34,7 @@ For local-checkout installs, bundled sample agents (`--agents`), and non-interac
 
 ```bash
 cd <this repo>
-npm install
+npm ci
 npm link            # once: makes the `pi-agents` command available on your machine
 ```
 
@@ -86,7 +86,7 @@ Installs are idempotent; after installing, `/reload` in a running pi session (or
 
 ```bash
 cd <this repo>
-npm install
+npm ci
 mkdir -p .pi/extensions/pi-agents
 ln -sf ../../index.ts .pi/extensions/pi-agents/index.ts
 ln -sf ../../agents.ts .pi/extensions/pi-agents/agents.ts
@@ -103,6 +103,14 @@ Project-local extensions load only in **trusted** projects — pi will ask on fi
 **Global** (use in all projects): symlink the repo to `~/.pi/agent/extensions/pi-agents` instead.
 
 Either way: `/reload` in pi (or restart) to pick up the extension.
+
+## Development dependencies and security audits
+
+For local checkouts, use `npm ci` to install the committed lockfile, then run `npm audit`, `npm test`, and `npm run typecheck`.
+
+The lockfile pins patched Pi development dependencies (`undici` 8.10.2 and `brace-expansion` 5.0.12), with matching overrides in `package.json`. Pi's bundled `npm-shrinkwrap.json` can cause `npm install` or `npm audit fix` to restore vulnerable upstream versions despite these overrides. If that happens, restore the committed `package-lock.json` (preserving any intentional local edits), then run `npm ci` and `npm audit` again. The install-time audit summary can still reflect the upstream shrinkwrap; check the separate `npm audit` result after installation.
+
+These fixes cover this checkout's development dependencies, not the Pi host installed on your machine. Managed installations use host-provided Pi packages; keep Pi itself updated separately.
 
 ## Worktrees
 
