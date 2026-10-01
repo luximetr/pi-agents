@@ -9,6 +9,7 @@ import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAg
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
 import messageTiming from "./message-timing.ts";
+import { CompletionInbox } from "./background-subagents.ts";
 import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } from "./subagent-observer.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
@@ -42,6 +43,7 @@ const DEFAULT_INSPECT_SHORTCUT = "f9";
 const DEFAULT_STALE_WARNING_MINUTES = 5;
 const DEFAULT_GRACEFUL_STOP_SECONDS = 5;
 const DELEGATE_TOOL = "delegate";
+const SUBAGENT_CONTROL_TOOL = "subagent_control";
 
 type DelegateStatsDetails = DelegateViewDetails & {
 	agent: string;
@@ -128,9 +130,10 @@ export default function (pi: ExtensionAPI) {
 	let turnSubagentStats: SubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 	let sessionSubagentStats: SubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 	let observerContext: ExtensionContext | undefined;
-	const observer = new SubagentObserver(process.env[OBSERVER_ENV], () => {
+	const createObserver = () => new SubagentObserver(process.env[OBSERVER_ENV], () => {
 		if (observerContext) refreshStatus(observerContext);
 	});
+	let observer = createObserver();
 
 	function formatSubagentUsage(stats: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }): string {
 		const formatTokens = (count: number) => {
@@ -175,12 +178,12 @@ export default function (pi: ExtensionAPI) {
 		} : undefined);
 	}
 
-	function recordSubagentUsage(usage: SubagentUsage, callStats?: SubagentStats) {
-		turnSubagentStats.input += usage.input;
-		turnSubagentStats.output += usage.output;
-		turnSubagentStats.cacheRead += usage.cacheRead;
-		turnSubagentStats.cacheWrite += usage.cacheWrite;
-		turnSubagentStats.cost += usage.cost;
+	function recordSubagentUsage(usage: SubagentUsage, callStats?: SubagentStats, turnStats = turnSubagentStats) {
+		turnStats.input += usage.input;
+		turnStats.output += usage.output;
+		turnStats.cacheRead += usage.cacheRead;
+		turnStats.cacheWrite += usage.cacheWrite;
+		turnStats.cost += usage.cost;
 		sessionSubagentStats.input += usage.input;
 		sessionSubagentStats.output += usage.output;
 		sessionSubagentStats.cacheRead += usage.cacheRead;
@@ -188,7 +191,7 @@ export default function (pi: ExtensionAPI) {
 		sessionSubagentStats.cost += usage.cost;
 		const model = [usage.provider, usage.model].filter(Boolean).join("/");
 		if (model) {
-			turnSubagentStats.models.add(model);
+			turnStats.models.add(model);
 			sessionSubagentStats.models.add(model);
 		}
 		if (callStats) {
@@ -296,6 +299,30 @@ export default function (pi: ExtensionAPI) {
 		rebuildEffectiveAgents();
 	}
 
+	type BackgroundResult = { runId: string; agent: string; task: string; text: string };
+	const backgroundRuns = new Map<string, { agent: string; task: string; controller: AbortController; status: string; result?: string }>();
+	let sessionGeneration = 0;
+	const completionMessage = (results: BackgroundResult[]) => ({
+		customType: "pi-agents-completions",
+		content: results.map(result => `Background task completed\nRun: ${result.runId}\nAgent: ${result.agent}\nTask: ${result.task}\n\n${result.text}`).join("\n\n---\n\n"),
+		display: true,
+		details: { runs: results.map(result => result.runId) },
+	});
+	const createInbox = () => new CompletionInbox<BackgroundResult>(
+		() => !!observerContext?.isIdle() && !observerContext.hasPendingMessages(),
+		results => pi.sendMessage(completionMessage(results), { triggerTurn: true, deliverAs: "followUp" }),
+	);
+	let inbox = createInbox();
+	pi.on("agent_start", (_event, ctx) => {
+		observerContext = ctx;
+		inbox.start();
+	});
+	pi.on("message_end", (event) => {
+		if (event.message.role === "assistant" && ["aborted", "error"].includes(event.message.stopReason)) inbox.pause();
+	});
+	pi.on("agent_settled", () => inbox.settle());
+	pi.on("input", () => { inbox.resume(); });
+
 	const mcpManager = new McpManager(pi);
 	/** Custom tool name -> agent name that registered it (for collision warnings). */
 	const customToolOwners = new Map<string, string>();
@@ -305,7 +332,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: DELEGATE_TOOL,
 		label: "Delegate",
-		description: `Delegate a focused task to one of the current agent's allowed subagents. Independent delegate calls can run in parallel. Results are capped at ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; full oversized output is saved to a temporary file.`,
+		description: `Delegate a focused task to one of the current agent's allowed subagents. Independent delegate calls can run in parallel. Use background: true to return a run ID immediately and receive results after the main agent settles; use subagent_control to list, steer, stop, or retrieve runs. Results are capped at ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; full oversized output is saved to a temporary file.`,
 		promptSnippet: "delegate: ask an allowed specialist to complete a focused task",
 		promptGuidelines: [
 			"Use delegate only for focused tasks that benefit from a fresh specialist context; include relevant paths, constraints, and expected output in the task.",
@@ -316,13 +343,14 @@ export default function (pi: ExtensionAPI) {
 			properties: {
 				agent: { type: "string", description: "Name of an allowed subagent" },
 				task: { type: "string", description: "Self-contained task; include relevant paths and expected output" },
+				background: { type: "boolean", description: "Run in the background without blocking the main agent (default false)" },
 			},
 			required: ["agent", "task"],
 			additionalProperties: false,
 		}),
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 			const parent = activeAgent;
-			const input = params as { agent?: unknown; task?: unknown };
+			const input = params as { agent?: unknown; task?: unknown; background?: boolean };
 			const agentName = String(input.agent ?? "").trim();
 			const task = String(input.task ?? "").trim();
 			const subagent = parent?.subagents?.find((candidate) => candidate.name === agentName);
@@ -339,14 +367,22 @@ export default function (pi: ExtensionAPI) {
 			const inheritedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 			const thinkingLevel = pi.getThinkingLevel?.();
 			const selectedModel = subagent.model ?? (inheritedModel && thinkingLevel ? `${inheritedModel}:${thinkingLevel}` : inheritedModel);
+			const runId = newRunId();
+			const generation = sessionGeneration;
+			const runObserver = observer;
+			const runTurnStats = turnSubagentStats;
+			const background = input.background === true;
+			const controller = new AbortController();
+			if (background) backgroundRuns.set(runId, { agent: agentName, task, controller, status: "running" });
+			const executeRun = async (): Promise<{ content: { type: "text"; text: string }[]; details: DelegateStatsDetails }> => {
 			try {
 				observerContext = ctx;
 				let observerEndpoint: string | undefined;
-				try { observerEndpoint = await observer.start(); }
+				try { observerEndpoint = await runObserver.start(); }
 				catch (error) { ctx.ui.notify(`Agent Explorer connection unavailable: ${error instanceof Error ? error.message : String(error)}. Direct runs remain inspectable.`, "warning"); }
-				const runId = newRunId();
+				if (generation !== sessionGeneration) throw new Error("Session closed before subagent started");
 				const startedAt = Date.now();
-				turnSubagentStats.calls++;
+				runTurnStats.calls++;
 				sessionSubagentStats.calls++;
 				const callSubagentStats: SubagentStats = { calls: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 				refreshStatus(ctx);
@@ -375,6 +411,7 @@ export default function (pi: ExtensionAPI) {
 					const bounded = boundProgressLines(allLines);
 					const summary = subagentStatsLine(callSubagentStats, Date.now() - startedAt);
 					const progressText = bounded.slice(-MAX_PROGRESS_LINES).join("\n") || "Starting child session…";
+					if (background) return;
 					onUpdate?.({
 						content: [{ type: "text", text: progressText }],
 						details: {
@@ -404,7 +441,7 @@ export default function (pi: ExtensionAPI) {
 					if (lines.length > MAX_PROGRESS_LINES) streamedText = lines.slice(-MAX_PROGRESS_LINES).join("\n");
 					publish();
 				};
-				const result = await runSubagent(agentName, task, ctx.cwd, signal ?? new AbortController().signal, {
+				const result = await runSubagent(agentName, task, ctx.cwd, background ? controller.signal : signal ?? controller.signal, {
 					model: selectedModel,
 					lifecycle,
 					rootSessionId: process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.(),
@@ -412,19 +449,20 @@ export default function (pi: ExtensionAPI) {
 					id: runId,
 					observerEndpoint,
 					parentRunId: process.env[RUN_ID_ENV],
-					onSnapshot: snapshot => observer.publish(snapshot),
+					onSnapshot: snapshot => runObserver.publish(snapshot),
 					timeoutSeconds,
 					gracefulStopSeconds: config.subagents?.gracefulStopSeconds ?? DEFAULT_GRACEFUL_STOP_SECONDS,
 					runtimeAgentOverrides: Object.fromEntries(studioDrafts),
 					onHandle: (handle) => {
-						if (handle) observer.attach(handle);
+						if (handle) runObserver.attach(handle);
 						refreshStatus(ctx);
 					},
 					onProgress: (event) => {
+						if (generation !== sessionGeneration) return;
 						switch (event.type) {
 							case "started": update(`▶ ${event.agent}: running`, "running"); break;
 							case "text": progressPhase = "responding"; stream(event.delta); break;
-							case "stats": recordSubagentUsage(event.usage, callSubagentStats); refreshStatus(ctx); publish(); break;
+							case "stats": recordSubagentUsage(event.usage, callSubagentStats, runTurnStats); refreshStatus(ctx); publish(); break;
 							case "tool-start": update(`→ ${event.tool}${formatArgs(event.args)}`, `using ${event.tool}`); break;
 							case "tool-update": update(`  ${event.text}`, "tool running"); break;
 							case "tool-end": update(`${event.error ? "✗" : "✓"} ${event.tool}`, event.error ? `${event.tool} failed` : "running"); break;
@@ -475,6 +513,25 @@ export default function (pi: ExtensionAPI) {
 					details: { agent: agentName, task, model: selectedModel, status: "failed", error: true } satisfies DelegateStatsDetails,
 				};
 			}
+			};
+			if (!background) return executeRun();
+			void executeRun().then(result => {
+				if (generation !== sessionGeneration) return;
+				const run = backgroundRuns.get(runId)!;
+				run.status = result.details.status ?? "completed";
+				run.result = result.content.map(item => item.text).join("\n");
+				inbox.push({ runId, agent: agentName, task, text: run.result });
+			}).catch(error => {
+				if (generation !== sessionGeneration) return;
+				const run = backgroundRuns.get(runId)!;
+				run.status = "failed";
+				run.result = String(error);
+				inbox.push({ runId, agent: agentName, task, text: run.result });
+			});
+			return {
+				content: [{ type: "text", text: `Started background subagent ${agentName}. Run ID: ${runId}. Continue working or respond to the user; completion will be delivered after your current flow finishes.` }],
+				details: { agent: agentName, task, runId, status: "running" },
+			};
 		},
 		renderCall(args, theme) {
 			const call = args as { agent?: unknown; task?: unknown };
@@ -487,6 +544,41 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderResult(result, options, theme) {
 			return renderDelegateResult(result, options, theme);
+		},
+	});
+
+	pi.registerTool({
+		name: SUBAGENT_CONTROL_TOOL,
+		label: "Subagent control",
+		description: "List session-owned background runs, retrieve a result, steer a running subagent, or stop it. Does not wait for completion.",
+		parameters: jsonSchemaToTypeBox({
+			type: "object",
+			properties: {
+				action: { type: "string", enum: ["list", "result", "steer", "stop"] },
+				runId: { type: "string", description: "Run ID returned by background delegate" },
+				message: { type: "string", description: "Instructions for steer" },
+			},
+			required: ["action"], additionalProperties: false,
+		}),
+		execute: async (_id, params) => {
+			const { action, runId, message } = params as { action: string; runId?: string; message?: string };
+			const reply = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
+			if (action === "list") return reply(JSON.stringify([...backgroundRuns].map(([id, run]) => ({ runId: id, agent: run.agent, task: run.task, status: run.status }))));
+			const run = runId ? backgroundRuns.get(runId) : undefined;
+			if (!run || !runId) return reply("Unknown background run ID.");
+			if (action === "result") return reply(run.result ?? `Run ${runId} is ${run.status}.`);
+			if (run.status !== "running") return reply(`Run ${runId} is ${run.status}.`);
+			const handle = observer.handles().find(handle => handle.id === runId);
+			if (action === "stop") {
+				observer.stopTree(runId, "user");
+				run.controller.abort();
+				return reply(`Stop requested for ${runId}.`);
+			}
+			if (action === "steer") {
+				if (!message?.trim()) return reply("Steer requires a non-empty message.");
+				return reply(handle?.steer(message) ? `Instructions sent to ${runId}.` : "Run is not ready for steering; try again later.");
+			}
+			return reply("Unknown action.");
 		},
 	});
 
@@ -605,14 +697,14 @@ export default function (pi: ExtensionAPI) {
 			}
 			base = valid;
 		} else {
-			base = pi.getActiveTools().filter(tool => tool !== DELEGATE_TOOL);
+			base = pi.getActiveTools().filter(tool => tool !== DELEGATE_TOOL && tool !== SUBAGENT_CONTROL_TOOL);
 		}
 		const allowedSubagents = (agent.subagents ?? []).filter((subagent) => agents.some((candidate) => candidate.name === subagent.name));
 		const unknownSubagents = (agent.subagents ?? []).filter((subagent) => !agents.some((candidate) => candidate.name === subagent.name));
 		if (unknownSubagents.length > 0 && !opts?.silent) {
 			ctx.ui.notify(`Agent "${name}": unknown subagents: ${unknownSubagents.map((subagent) => subagent.name).join(", ")}`, "warning");
 		}
-		const delegationTools = allowedSubagents.length > 0 ? [DELEGATE_TOOL] : [];
+		const delegationTools = allowedSubagents.length > 0 ? [DELEGATE_TOOL, SUBAGENT_CONTROL_TOOL] : [];
 		const active = [...new Set([...base, ...customToolNames, ...mcpToolNames, ...delegationTools])];
 		// Apply even when empty: an explicit [] allowlist means "no tools".
 		pi.setActiveTools(active);
@@ -764,7 +856,7 @@ export default function (pi: ExtensionAPI) {
 		const method = await selectMenu(ctx, "Create agent", CREATE_MENU);
 		if (!method) return;
 		const available = {
-			tools: pi.getAllTools().map(tool => tool.name).filter(name => name !== DELEGATE_TOOL && name !== "powershell" && !name.includes("__")),
+			tools: pi.getAllTools().map(tool => tool.name).filter(name => name !== DELEGATE_TOOL && name !== SUBAGENT_CONTROL_TOOL && name !== "powershell" && !name.includes("__")),
 			mcp: Object.keys(config.mcpServers ?? {}),
 		};
 		let draft: DeclarativeAgentInput;
@@ -992,10 +1084,12 @@ export default function (pi: ExtensionAPI) {
 			"You may delegate focused work to these allowed subagents:",
 			...lines,
 			"Use a self-contained task with relevant paths and expected output. Issue independent delegate calls together to run them in parallel.",
+			"Use background: true to keep working or respond to the user while subagents run. Results arrive after your current flow finishes; do not repeatedly poll. Use subagent_control to list, steer, stop, or retrieve background runs. Parallel workers share the working directory: assign separate files or worktrees to avoid conflicting edits.",
 		].join("\n");
 	}
 
 	pi.on("before_agent_start", async (event) => {
+		const completions = inbox.take();
 		const parts: string[] = [];
 		if (activeAgent?.systemPrompt) parts.push(activeAgent.systemPrompt);
 		const delegateGuide = activeAgent ? delegationPrompt(activeAgent) : undefined;
@@ -1006,8 +1100,9 @@ export default function (pi: ExtensionAPI) {
 				`The user asked a question about the pi-agents extension. Answer it using the bundled guide:\n\n${GUIDE}`,
 			);
 		}
-		if (parts.length === 0) return;
+		if (parts.length === 0 && completions.length === 0) return;
 		return {
+			...(completions.length ? { message: completionMessage(completions) } : {}),
 			systemPrompt: `${event.systemPrompt}\n\n${parts.join("\n\n")}`,
 		};
 	});
@@ -1113,12 +1208,20 @@ export default function (pi: ExtensionAPI) {
 				drafts: Object.fromEntries(studioDrafts),
 			});
 		}
+		sessionGeneration++;
+		inbox.close();
+		for (const run of backgroundRuns.values()) run.controller.abort();
+		backgroundRuns.clear();
+		inbox = createInbox();
 		observerContext = undefined;
 		await observer.shutdown(config.subagents?.gracefulStopSeconds ?? DEFAULT_GRACEFUL_STOP_SECONDS);
+		observer = createObserver();
 		await mcpManager.disconnectAll();
 	});
 
-	pi.on("turn_start", async () => {
+	pi.on("turn_start", async (_event, ctx) => {
+		const currentInbox = inbox;
+		ctx.signal?.addEventListener("abort", () => currentInbox.pause(), { once: true });
 		turnSubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 		persistSelection(activeName);
 	});

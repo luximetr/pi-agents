@@ -518,7 +518,9 @@ test("delegate renderer keeps routine results compact", () => {
 function bootExtension(root: string) {
 	const handlers = new Map<string, (event: any, ctx?: any) => any>();
 	const registered: any[] = [];
+	const messages: any[] = [];
 	const pi: any = {
+		sendMessage: (message: any, options: any) => messages.push({ message, options }),
 		on: (name: string, handler: any) => handlers.set(name, handler),
 		registerTool: (tool: any) => registered.push(tool),
 		registerEntryRenderer: () => {},
@@ -531,9 +533,84 @@ function bootExtension(root: string) {
 	};
 	extension(pi);
 	const theme = { fg: (role: string, text: string) => text, bold: (text: string) => text, getColorMode: () => "truecolor" };
-	const ctx: any = { cwd: root, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => undefined, getSessionId: () => "root-test-session" }, ui: { theme, setStatus: () => {}, notify: () => {} } };
-	return { handlers, registered, ctx };
+	const ctx: any = { cwd: root, isIdle: () => true, hasPendingMessages: () => false, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => undefined, getSessionId: () => "root-test-session" }, ui: { theme, setStatus: () => {}, notify: () => {} } };
+	return { handlers, registered, ctx, messages };
 }
+
+test("background delegation returns immediately, survives parent abort, and batches completion after settlement", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-background-"));
+	const previousBin = process.env.PI_CODING_AGENT_BIN;
+	let runtime: ReturnType<typeof bootExtension> | undefined;
+	try {
+		for (const name of ["lead", "worker"]) {
+			await mkdir(path.join(root, ".pi-agents", name), { recursive: true });
+			await writeFile(path.join(root, ".pi-agents", name, "agent.ts"), `export default { name: "${name}", description: "${name}", ${name === "lead" ? 'default: true, subagents: ["worker"]' : ""} };`);
+		}
+		const fakePi = path.join(root, "fake-pi.mjs");
+		await writeFile(fakePi, `#!/usr/bin/env node
+			let buffer = "";
+			process.stdin.on("data", chunk => {
+				buffer += chunk;
+				let end;
+				while ((end = buffer.indexOf("\\n")) >= 0) {
+					const command = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
+					if (command.type === "prompt") setTimeout(() => {
+						process.stdout.write(JSON.stringify({type:"message_end",message:{content:[{type:"text",text:"done " + command.message}]}}) + "\\n");
+						process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
+					}, 150);
+				}
+			});
+		`);
+		await chmod(fakePi, 0o755);
+		process.env.PI_CODING_AGENT_BIN = fakePi;
+		runtime = bootExtension(root);
+		const { handlers, registered, ctx, messages } = runtime;
+		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+		await handlers.get("agent_start")?.({}, ctx);
+		const delegate = registered.find(tool => tool.name === "delegate");
+		const control = registered.find(tool => tool.name === "subagent_control");
+		const parent = new AbortController();
+		const a = await delegate.execute("a", { agent: "worker", task: "A", background: true }, parent.signal, () => assert.fail("background runs must not update finished tool calls"), ctx);
+		const b = await delegate.execute("b", { agent: "worker", task: "B", background: true }, parent.signal, undefined, ctx);
+		assert.equal(a.details.status, "running");
+		assert.notEqual(a.details.runId, b.details.runId);
+		parent.abort();
+		for (let i = 0; i < 100; i++) {
+			const result = await control.execute("list", { action: "list" });
+			if (JSON.parse(result.content[0].text).every((run: any) => run.status === "completed")) break;
+			await new Promise(resolve => setTimeout(resolve, 25));
+		}
+		assert.match((await control.execute("result", { action: "result", runId: a.details.runId })).content[0].text, /done A/);
+		assert.equal(messages.length, 0, "active main flow is never interrupted");
+		await handlers.get("agent_settled")?.({}, ctx);
+		await new Promise(resolve => setTimeout(resolve, 60));
+		assert.equal(messages.length, 1);
+		assert.deepEqual(messages[0].message.details.runs.sort(), [a.details.runId, b.details.runId].sort());
+		assert.deepEqual(messages[0].options, { triggerTurn: true, deliverAs: "followUp" });
+		const abort = new AbortController();
+		ctx.signal = abort.signal;
+		await handlers.get("agent_start")?.({}, ctx);
+		await handlers.get("turn_start")?.({}, ctx);
+		const c = await delegate.execute("c", { agent: "worker", task: "C", background: true }, abort.signal, undefined, ctx);
+		abort.abort();
+		await handlers.get("agent_settled")?.({}, ctx);
+		for (let i = 0; i < 100; i++) {
+			const result = await control.execute("result", { action: "result", runId: c.details.runId });
+			if (result.content[0].text.includes("done C")) break;
+			await new Promise(resolve => setTimeout(resolve, 25));
+		}
+		await new Promise(resolve => setTimeout(resolve, 60));
+		assert.equal(messages.length, 1, "Escape must not wake the main agent");
+		await handlers.get("input")?.({ source: "interactive" }, ctx);
+		const next = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx);
+		assert.match(next.message.content, /done C/);
+	} finally {
+		await runtime?.handlers.get("session_shutdown")?.({ reason: "quit" }, runtime.ctx);
+		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
+		else process.env.PI_CODING_AGENT_BIN = previousBin;
+		await rm(root, { recursive: true, force: true });
+	}
+});
 
 test("usage model display retains configured reasoning levels", () => {
 	assert.equal(displaySubagentModel("openai-codex/gpt-6-luna:max", "openai-codex/gpt-6-luna"), "openai-codex/gpt-6-luna:max");

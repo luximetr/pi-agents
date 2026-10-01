@@ -236,7 +236,7 @@ function projectedTools(agent: DiscoveredAgent, agents: DiscoveredAgent[], optio
 	const unknown = agent.tools.filter((name) => !known.has(name));
 	const base = agent.tools.filter((name) => known.has(name));
 	const custom = Object.keys(agent.customTools ?? {});
-	const delegates = agent.subagents?.some((child) => agents.some((candidate) => candidate.name === child.name)) ? ["delegate"] : [];
+	const delegates = agent.subagents?.some((child) => agents.some((candidate) => candidate.name === child.name)) ? ["delegate", "subagent_control"] : [];
 	const mcp = (agent.mcp ?? []).flatMap((name) => options.mcpStatuses[name]?.toolNames ?? []);
 	return { names: [...new Set([...base, ...custom, ...delegates, ...mcp])], unknown };
 }
@@ -519,7 +519,7 @@ export async function showAgentStudio(
 	const currentSourceFileName = agent.filePath.split(/[\\/]/).at(-1) ?? "agent source";
 	const savedSourceFileName = currentSourceFileName === "agent.json" ? "agent.ts" : currentSourceFileName;
 	const available = {
-		tools: [...new Set([...options.allTools.map(tool => tool.name).filter(name => name !== "delegate" && name !== "powershell" && !name.includes("__")), ...Object.keys(agent.customTools ?? {})])],
+		tools: [...new Set([...options.allTools.map(tool => tool.name).filter(name => name !== "delegate" && name !== "subagent_control" && name !== "powershell" && !name.includes("__")), ...Object.keys(agent.customTools ?? {})])],
 		mcp: [...new Set([...Object.keys(options.mcpServers), ...Object.keys(agent.mcpServers ?? {})])],
 	};
 	const currentDraft = () => ({ name: agent.name, description, color, tools: inheritsTools ? undefined : tools, mcp, systemPrompt });
@@ -570,7 +570,7 @@ export async function showAgentStudio(
 		if (choice === StudioAction.Tools) {
 			const ownCustom = new Set(Object.keys(agent.customTools ?? {}));
 			const choices = options.allTools
-				.filter((tool) => tool.name !== "delegate" && tool.name !== "powershell" && !tool.name.includes("__") && !ownCustom.has(tool.name))
+				.filter((tool) => tool.name !== "delegate" && tool.name !== "subagent_control" && tool.name !== "powershell" && !tool.name.includes("__") && !ownCustom.has(tool.name))
 				.map((tool) => ({ id: tool.name, label: tool.name, description: tool.description }));
 			tools = await showToggleEditor(ctx, `Tools · ${agent.name}`, choices, tools);
 			inheritsTools = false;
