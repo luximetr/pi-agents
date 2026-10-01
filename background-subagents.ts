@@ -1,3 +1,42 @@
+import { displaySubagentModel, type SubagentSnapshot } from "./subagents.ts";
+
+export interface BackgroundRunState {
+	agent: string;
+	task: string;
+	status: string;
+	model?: string;
+	startedAt: number;
+	deadlineAt?: number;
+	endedAt?: number;
+}
+
+/** Compact, read-only progress metadata; never expose transcripts or consume results. */
+export function backgroundRunStatus(runId: string, run: BackgroundRunState, snapshot?: SubagentSnapshot, now = Date.now()) {
+	const active = run.status === "running";
+	const startedAt = snapshot?.startedAt ?? run.startedAt;
+	const endedAt = run.endedAt ?? snapshot?.endedAt;
+	const deadlineAt = snapshot?.deadlineAt ?? run.deadlineAt;
+	const lastActivityAt = snapshot?.lastActivityAt ?? startedAt;
+	const observedModel = snapshot?.usage?.model
+		? [snapshot.usage.provider, snapshot.usage.model].filter(Boolean).join("/") : undefined;
+	return {
+		runId,
+		agent: run.agent,
+		task: run.task,
+		status: active && snapshot?.status === "stopping" ? "stopping" : run.status,
+		phase: active ? snapshot?.phase ?? "starting" : run.status,
+		model: displaySubagentModel(run.model, observedModel),
+		currentTool: active ? snapshot?.currentTool : undefined,
+		startedAt,
+		lastActivityAt,
+		deadlineAt,
+		endedAt,
+		elapsedMs: Math.max(0, (endedAt ?? now) - startedAt),
+		idleMs: Math.max(0, (endedAt ?? now) - lastActivityAt),
+		remainingMs: active && deadlineAt !== undefined ? Math.max(0, deadlineAt - now) : undefined,
+	};
+}
+
 /** Session-owned completion inbox. Never inject results into an active agent loop. */
 export class CompletionInbox<T> {
 	private pending: T[] = [];

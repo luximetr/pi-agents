@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -96,6 +96,100 @@ function boot(root: string, options?: {
 	};
 	return { pi, handlers, commands, activeToolsets, notifications, entries, tools, statuses, getCustomComponent: () => customComponent, ctx };
 }
+
+test("background control exposes live and terminal status without consuming completion delivery", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-background-status-"));
+	const executable = path.join(root, "fake-pi.mjs");
+	const previousExecutable = process.env.PI_CODING_AGENT_BIN;
+	const runtime = boot(root);
+	const deliveries: any[] = [];
+	runtime.pi.sendMessage = (message: any) => deliveries.push(message);
+	runtime.ctx.isIdle = () => true;
+	runtime.ctx.hasPendingMessages = () => false;
+	const control = (action: string, runId?: string) => runtime.tools.get("subagent_control").execute("control", { action, runId });
+	const readStatus = async (runId: string) => JSON.parse((await control("status", runId)).content[0].text);
+	async function waitFor(check: () => Promise<boolean>) {
+		const deadline = Date.now() + 5000;
+		while (!await check()) {
+			assert.ok(Date.now() < deadline, "background status did not reach expected state");
+			await new Promise(resolve => setTimeout(resolve, 20));
+		}
+	}
+	try {
+		await makeAgent(root, "lead", 'default: true, subagents: [{ name: "worker", model: "test/model:high", timeoutSeconds: 30 }]');
+		await makeAgent(root, "worker");
+		await writeFile(executable, `#!/usr/bin/env node
+			import { existsSync } from "node:fs";
+			const send = event => process.stdout.write(JSON.stringify(event) + "\\n");
+			let buffer = "";
+			process.stdin.on("data", chunk => {
+				buffer += chunk;
+				let newline;
+				while ((newline = buffer.indexOf("\\n")) !== -1) {
+					const command = JSON.parse(buffer.slice(0, newline));
+					buffer = buffer.slice(newline + 1);
+					if (command.type === "abort") process.exit(0);
+					if (command.type !== "prompt") continue;
+					send({ type: "agent_start" });
+					send({ type: "tool_execution_start", toolCallId: "read-1", toolName: "read", args: { path: "private.txt" } });
+					const timer = setInterval(() => {
+						if (!existsSync(command.message + ".finish")) return;
+						clearInterval(timer);
+						if (command.message === "fail") process.exit(1);
+						send({ type: "tool_execution_end", toolCallId: "read-1", toolName: "read", isError: false });
+						send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "worker-result" }] } });
+						send({ type: "agent_settled" });
+					}, 20);
+				}
+			});
+		`);
+		await chmod(executable, 0o755);
+		process.env.PI_CODING_AGENT_BIN = executable;
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		assert.ok(runtime.activeToolsets.at(-1)?.includes("subagent_control"));
+		await runtime.handlers.get("agent_start")?.({}, runtime.ctx);
+		assert.deepEqual(JSON.parse((await control("list")).content[0].text), []);
+		assert.match((await control("status")).content[0].text, /Unknown background run ID/);
+		assert.match((await control("status", "unknown")).content[0].text, /Unknown background run ID/);
+
+		for (const [task, terminalStatus] of [["complete", "completed"], ["fail", "failed"], ["stop", "interrupted"]]) {
+			const result = await runtime.tools.get("delegate").execute("delegate", { agent: "worker", task, background: true }, undefined, undefined, runtime.ctx);
+			const runId = result.details.runId;
+			const initial = await readStatus(runId);
+			assert.equal(initial.status, "running");
+			assert.equal(initial.model, "test/model:high");
+			assert.ok(initial.deadlineAt > initial.startedAt);
+			await waitFor(async () => (await readStatus(runId)).currentTool === "read");
+			const live = await readStatus(runId);
+			assert.equal(live.phase, "tool execution");
+			assert.ok(live.elapsedMs >= 0);
+			assert.ok(live.remainingMs > 0);
+			assert.doesNotMatch(JSON.stringify(live), /private.txt|transcript/);
+			const listed = JSON.parse((await control("list")).content[0].text).find((run: any) => run.runId === runId);
+			assert.equal(listed.currentTool, "read");
+			if (task === "stop") await control("stop", runId);
+			else await writeFile(path.join(root, `${task}.finish`), "");
+			await waitFor(async () => (await readStatus(runId)).status === terminalStatus);
+			const terminal = await readStatus(runId);
+			assert.ok(terminal.endedAt >= terminal.startedAt);
+			assert.equal(terminal.currentTool, undefined);
+			assert.equal(terminal.remainingMs, undefined);
+			await control("status", runId);
+			if (task === "complete") assert.match((await control("result", runId)).content[0].text, /worker-result/);
+		}
+		assert.equal(deliveries.length, 0, "status checks do not deliver completions during the main flow");
+		await runtime.handlers.get("agent_settled")?.({}, runtime.ctx);
+		await waitFor(async () => deliveries.length === 1);
+		assert.equal(deliveries[0].details.runs.length, 3, "status checks leave every completion in the inbox");
+		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		assert.deepEqual(JSON.parse((await control("list")).content[0].text), []);
+	} finally {
+		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		if (previousExecutable === undefined) delete process.env.PI_CODING_AGENT_BIN;
+		else process.env.PI_CODING_AGENT_BIN = previousExecutable;
+		await rm(root, { recursive: true, force: true });
+	}
+});
 
 test("dashboard reorder and whole-folder deletion take effect without reload", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-manage-"));

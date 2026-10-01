@@ -9,7 +9,7 @@ import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAg
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
 import messageTiming from "./message-timing.ts";
-import { CompletionInbox } from "./background-subagents.ts";
+import { CompletionInbox, backgroundRunStatus, type BackgroundRunState } from "./background-subagents.ts";
 import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } from "./subagent-observer.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
@@ -300,7 +300,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	type BackgroundResult = { runId: string; agent: string; task: string; text: string };
-	const backgroundRuns = new Map<string, { agent: string; task: string; controller: AbortController; status: string; result?: string }>();
+	const backgroundRuns = new Map<string, BackgroundRunState & { controller: AbortController; result?: string }>();
 	let sessionGeneration = 0;
 	const completionMessage = (results: BackgroundResult[]) => ({
 		customType: "pi-agents-completions",
@@ -332,7 +332,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: DELEGATE_TOOL,
 		label: "Delegate",
-		description: `Delegate a focused task to one of the current agent's allowed subagents. Independent delegate calls can run in parallel. Use background: true to return a run ID immediately and receive results after the main agent settles; use subagent_control to list, steer, stop, or retrieve runs. Results are capped at ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; full oversized output is saved to a temporary file.`,
+		description: `Delegate a focused task to one of the current agent's allowed subagents. Independent delegate calls can run in parallel. Use background: true to return a run ID immediately and receive results after the main agent settles; use subagent_control to list runs, check live status, steer, stop, or retrieve results. Results are capped at ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; full oversized output is saved to a temporary file.`,
 		promptSnippet: "delegate: ask an allowed specialist to complete a focused task",
 		promptGuidelines: [
 			"Use delegate only for focused tasks that benefit from a fresh specialist context; include relevant paths, constraints, and expected output in the task.",
@@ -373,7 +373,11 @@ export default function (pi: ExtensionAPI) {
 			const runTurnStats = turnSubagentStats;
 			const background = input.background === true;
 			const controller = new AbortController();
-			if (background) backgroundRuns.set(runId, { agent: agentName, task, controller, status: "running" });
+			if (background) {
+				const startedAt = Date.now();
+				backgroundRuns.set(runId, { agent: agentName, task, controller, status: "running", model: selectedModel, startedAt,
+					deadlineAt: timeoutSeconds === undefined ? undefined : startedAt + timeoutSeconds * 1000 });
+			}
 			const executeRun = async (): Promise<{ content: { type: "text"; text: string }[]; details: DelegateStatsDetails }> => {
 			try {
 				observerContext = ctx;
@@ -519,12 +523,14 @@ export default function (pi: ExtensionAPI) {
 				if (generation !== sessionGeneration) return;
 				const run = backgroundRuns.get(runId)!;
 				run.status = result.details.status ?? "completed";
+				run.endedAt = Date.now();
 				run.result = result.content.map(item => item.text).join("\n");
 				inbox.push({ runId, agent: agentName, task, text: run.result });
 			}).catch(error => {
 				if (generation !== sessionGeneration) return;
 				const run = backgroundRuns.get(runId)!;
 				run.status = "failed";
+				run.endedAt = Date.now();
 				run.result = String(error);
 				inbox.push({ runId, agent: agentName, task, text: run.result });
 			});
@@ -550,12 +556,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: SUBAGENT_CONTROL_TOOL,
 		label: "Subagent control",
-		description: "List session-owned background runs, retrieve a result, steer a running subagent, or stop it. Does not wait for completion.",
+		description: "List session-owned background runs, check live status (phase, current tool, model, elapsed/idle time, deadline), retrieve a result, steer a running subagent, or stop it. List and status are read-only and do not wait for completion or consume pending results.",
 		parameters: jsonSchemaToTypeBox({
 			type: "object",
 			properties: {
-				action: { type: "string", enum: ["list", "result", "steer", "stop"] },
-				runId: { type: "string", description: "Run ID returned by background delegate" },
+				action: { type: "string", enum: ["list", "status", "result", "steer", "stop"] },
+				runId: { type: "string", description: "Run ID returned by background delegate; required for status, result, steer, and stop" },
 				message: { type: "string", description: "Instructions for steer" },
 			},
 			required: ["action"], additionalProperties: false,
@@ -563,9 +569,11 @@ export default function (pi: ExtensionAPI) {
 		execute: async (_id, params) => {
 			const { action, runId, message } = params as { action: string; runId?: string; message?: string };
 			const reply = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
-			if (action === "list") return reply(JSON.stringify([...backgroundRuns].map(([id, run]) => ({ runId: id, agent: run.agent, task: run.task, status: run.status }))));
+			const snapshots = new Map(observer.handles().map(handle => [handle.id, handle.snapshot()]));
+			if (action === "list") return reply(JSON.stringify([...backgroundRuns].map(([id, run]) => backgroundRunStatus(id, run, snapshots.get(id)))));
 			const run = runId ? backgroundRuns.get(runId) : undefined;
 			if (!run || !runId) return reply("Unknown background run ID.");
+			if (action === "status") return reply(JSON.stringify(backgroundRunStatus(runId, run, snapshots.get(runId))));
 			if (action === "result") return reply(run.result ?? `Run ${runId} is ${run.status}.`);
 			if (run.status !== "running") return reply(`Run ${runId} is ${run.status}.`);
 			const handle = observer.handles().find(handle => handle.id === runId);
@@ -1084,7 +1092,7 @@ export default function (pi: ExtensionAPI) {
 			"You may delegate focused work to these allowed subagents:",
 			...lines,
 			"Use a self-contained task with relevant paths and expected output. Issue independent delegate calls together to run them in parallel.",
-			"Use background: true to keep working or respond to the user while subagents run. Results arrive after your current flow finishes; do not repeatedly poll. Use subagent_control to list, steer, stop, or retrieve background runs. Parallel workers share the working directory: assign separate files or worktrees to avoid conflicting edits.",
+			"Use background: true to keep working or respond to the user while subagents run. Results arrive after your current flow finishes; do not repeatedly poll. Use subagent_control to list runs, check live status, steer, stop, or retrieve background results. Parallel workers share the working directory: assign separate files or worktrees to avoid conflicting edits.",
 		].join("\n");
 	}
 
