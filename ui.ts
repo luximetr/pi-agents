@@ -682,7 +682,7 @@ export async function showAgentStudio(
 	}
 }
 
-/** Agent dashboard and picker. Enter activates; e opens Agent Studio. */
+/** Agent dashboard and picker. Enter activates; F4 opens Agent Studio. */
 export function showAgentSelector(
 	ctx: ExtensionContext,
 	agents: DiscoveredAgent[],
@@ -766,7 +766,7 @@ export function showAgentSelector(
 				}
 				lines.push(
 					theme.fg("dim", " type to filter · ↑↓ agent · tab/←→ details · enter activate · esc cancel"),
-					theme.fg("dim", " e edit · n new · r reorder · ctrl+d delete"),
+					theme.fg("dim", " F4 edit · F5 new · F6 reorder · ctrl+d delete"),
 					border,
 				);
 				return lines.map((line) => truncateToWidth(line, width));
@@ -783,14 +783,14 @@ export function showAgentSelector(
 					detailOffset = Math.min(maxDetailOffset, detailOffset + 10);
 				} else if (matchesKey(data, Key.pageUp)) {
 					detailOffset = Math.max(0, detailOffset - 10);
-				} else if (data.toLowerCase() === "e") {
+				} else if (matchesKey(data, Key.f4)) {
 					const selected = selectList.getSelectedItem()?.value;
 					if (selected && selected !== "(none)") done({ action: "edit", agent: selected });
-				} else if (data.toLowerCase() === "n") {
+				} else if (matchesKey(data, Key.f5)) {
 					done({ action: "create" });
-				} else if (data.toLowerCase() === "r" || matchesKey(data, Key.delete) || matchesKey(data, Key.ctrl("d"))) {
+				} else if (matchesKey(data, Key.f6) || matchesKey(data, Key.delete) || matchesKey(data, Key.ctrl("d"))) {
 					const selected = selectList.getSelectedItem()?.value;
-					if (selected && selected !== "(none)") done({ action: data.toLowerCase() === "r" ? "reorder" : "delete", agent: selected });
+					if (selected && selected !== "(none)") done({ action: matchesKey(data, Key.f6) ? "reorder" : "delete", agent: selected });
 				} else if (matchesKey(data, Key.up) || matchesKey(data, Key.down) || matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
 					selectList.handleInput(data);
 				} else {

@@ -10,6 +10,7 @@ import extension from "../index.ts";
 import { startAuthenticatedMcp } from "./http-mcp-fixture.ts";
 import { mcpToolName } from "../mcp.ts";
 import { STUDIO_LABELS, StudioAction } from "../studio-menu.ts";
+import { showAgentSelector } from "../ui.ts";
 import { editSubagents } from "../studio-subagents.ts";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 initTheme("dark", false);
@@ -556,6 +557,41 @@ test("background control exposes live and terminal status without consuming comp
 	}
 });
 
+test("picker letters filter while F4/F5/F6 perform actions with terminal key sequences", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-picker-keys-"));
+	try {
+		for (const name of ["designer", "engineer", "runner"]) await makeAgent(root, name);
+		const { agents } = await discoverAgents(root);
+		const runtime = boot(root);
+		const options = { projectName: "test", projectRoot: root, trusted: true, allTools: [], activeTools: [], mcpServers: {}, mcpServerSources: {}, mcpStatuses: {} };
+		for (const query of ["designer", "engineer", "runner", "DESIGNER"]) {
+			runtime.ctx.ui.custom = async (factory: any) => {
+				let result: unknown;
+				const component = factory({ requestRender() {} }, runtime.ctx.ui.theme, {}, (value: unknown) => { result = value; });
+				assert.match(component.render(120).join("\n"), /F4 edit · F5 new · F6 reorder/);
+				for (const character of query) {
+					component.handleInput(character);
+					assert.equal(result, undefined, `typing ${character} must not trigger an action`);
+				}
+				component.handleInput("\r");
+				assert.equal(result, query.toLowerCase());
+				return result;
+			};
+			await showAgentSelector(runtime.ctx, agents, "runner", options);
+		}
+		for (const [sequence, action] of [["\x1bOS", "edit"], ["\x1b[14~", "edit"], ["\x1b[15~", "create"], ["\x1b[17~", "reorder"]]) {
+			runtime.ctx.ui.custom = async (factory: any) => {
+				let result: unknown;
+				const component = factory({ requestRender() {} }, runtime.ctx.ui.theme, {}, (value: unknown) => { result = value; });
+				component.handleInput(sequence);
+				assert.deepEqual(result, action === "create" ? { action } : { action, agent: "runner" });
+				return result;
+			};
+			await showAgentSelector(runtime.ctx, agents, "runner", options);
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("dashboard reorder and whole-folder deletion take effect without reload", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-manage-"));
 	try {
@@ -565,7 +601,7 @@ test("dashboard reorder and whole-folder deletion take effect without reload", a
 		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({ custom: "preserved" }));
 		const runtime = boot(root, {
 			selectAnswers: ["2 · beta", "Project (commit with this repository)"],
-			customActions: [(component) => component.handleInput("r")],
+			customActions: [(component) => component.handleInput("\x1b[17~")],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("agent").handler("", runtime.ctx);
@@ -657,7 +693,7 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 		async function save(value: string, cancel = false) {
 			selectAnswers.push("Manage MCP servers (1)", "Back without applying");
 			customActions.push(
-				component => component.handleInput("e"),
+				component => component.handleInput("\x1bOS"),
 				component => {
 					const details = component.render(120).join("\n");
 					assert.match(details, /authenticated/);
@@ -692,7 +728,7 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 			const notificationsBefore = runtime.notifications.length;
 			selectAnswers.push("Manage MCP servers (1)", "Back without applying");
 			customActions.push(
-				component => component.handleInput("e"),
+				component => component.handleInput("\x1bOS"),
 				component => {
 					component.handleInput("\r");
 					component.handleInput("\x1b[B");
@@ -850,7 +886,7 @@ test("Studio adds configured subagents, restores drafts, and saves an empty dele
 		const runtime = boot(root, {
 			selectAnswers: ["Manage subagents (0)", "Add subagent", "beta · beta", "1 · beta · default model · no timeout", "Set model (default)", "1 · beta · test/model · no timeout", "Set timeout (none)", "Done", "Apply as session draft"],
 			inputAnswers: ["test/model", "30"],
-			customActions: [component => component.handleInput("e")],
+			customActions: [component => component.handleInput("\x1bOS")],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("agent").handler("", runtime.ctx);
@@ -862,7 +898,7 @@ test("Studio adds configured subagents, restores drafts, and saves an empty dele
 		const restored = boot(root, {
 			branchEntries: [{ type: "custom", ...draft }],
 			selectAnswers: ["Manage subagents (1)", "1 · beta · test/model · 30s", "Remove subagent", "Done", "Save agent.ts (project)"],
-			customActions: [component => component.handleInput("e")],
+			customActions: [component => component.handleInput("\x1bOS")],
 		});
 		await restored.handlers.get("session_start")?.({ reason: "startup" }, restored.ctx);
 		assert.ok(restored.activeToolsets.at(-1)?.includes("delegate"));
@@ -884,7 +920,7 @@ test("Studio routes renamed labels by ID and persists description and color over
 		const runtime = boot(root, {
 			selectAnswers: ["Change agent summary", "Color (automatic)", "Custom hex/theme role", "Save agent.ts (project)"],
 			inputAnswers: ["invalid-color", "#ABCDEF"], editorAnswers: ["Refined responsibility"],
-			customActions: [component => component.handleInput("e"), component => component.handleInput("\x1b")],
+			customActions: [component => component.handleInput("\x1bOS"), component => component.handleInput("\x1b")],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("agent").handler("", runtime.ctx);
@@ -921,7 +957,7 @@ test("Studio creates a reviewed AI draft with color using the selected model and
 			selectAnswers: ["Project (commit with this repository)", "Describe with AI", "Orange (#ff9f0a)", "Back without applying"],
 			inputAnswers: ["Create a PM who clarifies product scope"],
 			editorAnswers: [JSON.stringify({ ...generated, description: "Reviewed product planner" })],
-			customActions: [component => component.handleInput("n"), component => component.handleInput("\x1b")],
+			customActions: [component => component.handleInput("\x1b[15~"), component => component.handleInput("\x1b")],
 		});
 		const requests = enableStudioAI(runtime, JSON.stringify(generated));
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
@@ -950,7 +986,7 @@ test("Studio AI prompt help reviews a draft without exposing credentials or chan
 			mode: "tui", selectAnswers: ["Edit prompt (1 lines)", "Apply as session draft"],
 			inputAnswers: ["Make the prompt test-driven"],
 			customActions: [
-				component => component.handleInput("e"),
+				component => component.handleInput("\x1bOS"),
 				component => {
 					assert.match(component.render(120).join("\n"), /F2 AI assistance/);
 					component.handleInput(" plus manual changes");
@@ -987,7 +1023,7 @@ for (const outcome of ["save", "undo", "cancel", "cancel-request", "failure"] as
 				mode: "tui", selectAnswers: ["Edit description", "Apply as session draft"],
 				inputAnswers: [outcome === "cancel-request" ? undefined : "Make the description concise"],
 				customActions: [
-					component => component.handleInput("e"),
+					component => component.handleInput("\x1bOS"),
 					component => {
 						assert.match(component.render(120).join("\n"), /Description · alpha/);
 						component.handleInput(" manual edit");
@@ -1027,7 +1063,7 @@ test("cancelling AI draft review does not create an agent", async () => {
 		const runtime = boot(root, {
 			mode: "tui", selectAnswers: ["Project (commit with this repository)", "Describe with AI"],
 			inputAnswers: ["Create a developer"], editorAnswers: [undefined],
-			customActions: [component => component.handleInput("n"), component => component.handleInput("\x1b")],
+			customActions: [component => component.handleInput("\x1b[15~"), component => component.handleInput("\x1b")],
 		});
 		enableStudioAI(runtime, JSON.stringify({ name: "dev", description: "Developer", systemPrompt: "Test changes" }));
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
@@ -1173,7 +1209,7 @@ test("Agent Studio applies a live session prompt draft without rewriting agent.t
 			selectAnswers: ["Edit prompt (empty)", "Apply as session draft"],
 			editorAnswers: ["You are an experimental browser verifier."],
 			customActions: [
-				(component, _done) => component.handleInput("e"),
+				(component, _done) => component.handleInput("\x1bOS"),
 				(component, _done) => component.handleInput("\u001b"),
 			],
 		});
@@ -1216,7 +1252,7 @@ test("Agent Studio creates an agent from the empty dashboard", async () => {
 			inputAnswers: ["new-agent"],
 			editorAnswers: ["Experiments with project tools", "Use the available tools carefully."],
 			customActions: [
-				(component, _done) => component.handleInput("n"),
+				(component, _done) => component.handleInput("\x1b[15~"),
 				(component, _done) => component.handleInput("\u001b"),
 			],
 		});
@@ -1385,7 +1421,7 @@ test("project source saves preserve global overlays and other projects while app
 				flag: "alpha",
 				selectAnswers: ["Edit description", "Edit prompt (1 lines)", "Save agent.ts (project)"],
 				editorAnswers: [`${revision} draft`, `${revision} prompt`],
-				customActions: [component => component.handleInput("e")],
+				customActions: [component => component.handleInput("\x1bOS")],
 			});
 			await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 			await runtime.commands.get("agent").handler("", runtime.ctx);
@@ -1511,7 +1547,7 @@ test("Studio migrates JSON-backed agent edits to agent.ts and removes saved over
 				"Save agent.ts (project)",
 			],
 			inputAnswers: ["openai-codex/gpt-5.3-codex-spark:high"],
-			customActions: [component => component.handleInput("e")],
+			customActions: [component => component.handleInput("\x1bOS")],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("agent").handler("", runtime.ctx);
@@ -1543,7 +1579,7 @@ test("dynamic TypeScript definitions keep explicit config override saves", async
 			flag: "dynamic",
 			selectAnswers: ["Edit description", "Save project override (.pi-agents/config.json)"],
 			editorAnswers: ["overridden"],
-			customActions: [component => component.handleInput("e")],
+			customActions: [component => component.handleInput("\x1bOS")],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("agent").handler("", runtime.ctx);
@@ -1612,7 +1648,7 @@ test("Agent Studio selectors show highlighted tool and MCP details in a right pa
 		const runtime = boot(root, {
 			selectAnswers: ["Choose tools (1)", "Manage MCP servers (0)", "Back without applying"],
 			customActions: [
-				(component, _done) => component.handleInput("e"),
+				(component, _done) => component.handleInput("\x1bOS"),
 				(component, _done) => {
 					toolDetails = component.render(100).join("\n");
 					component.handleInput("\u001b[B");
@@ -1653,7 +1689,7 @@ test("Agent Studio edits and persists an HTTP MCP endpoint URL", async () => {
 			selectAnswers: ["Manage MCP servers (1)", "Save agent.ts (project)"],
 			inputAnswers: [endpoint],
 			customActions: [
-				component => component.handleInput("e"),
+				component => component.handleInput("\x1bOS"),
 				component => {
 					component.handleInput("\r");
 					component.handleInput("\x1b[B");

@@ -130,7 +130,7 @@ If the main checkout was never trusted, the normal pi trust prompt applies in th
 | Action | How |
 |---|---|
 | Open Agent Studio / picker | `f7` (also accepts configured shortcuts) |
-| Edit or create an agent | In `f7`: select an agent and press `e`, or press `n` to create a canonical `agent.ts` + `prompt.md` agent |
+| Edit or create an agent | In `f7`: select an agent and press `F4`, or press `F5` to create a canonical `agent.ts` + `prompt.md` agent |
 | Rotate to next agent | `f8` (cycles: plain pi → dev → doc → … → plain pi; also accepts configured shortcuts) |
 | Explore subagents and descendants (live + completed) | `f9` or `/subagents` |
 | Switch directly | `/agent dev`, `/agent none` |
@@ -145,12 +145,12 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 
 `f7` is both the agent dashboard and the entry point to Agent Studio:
 
-- Press `r` on an agent to choose its new position and save the order globally or for this project. Project order takes precedence; unlisted agents follow alphabetically. Rotation uses the same order.
+- Press `F6` on an agent to choose its new position and save the order globally or for this project. Project order takes precedence; unlisted agents follow alphabetically. Rotation uses the same order.
 - Press `Ctrl+D` (or `Delete`) on an agent to remove its entire folder, including prompts and `.env`, after confirmation. Standalone agents only have their source file removed. Config overrides are retained. Deleting the active agent restores plain pi; deleting a project override can reveal its global definition. Delegation references are not rewritten.
 - Reorder and delete refresh the dashboard and available agents immediately; no reload is needed.
 
-- Select an agent and press `e` to edit its description, color, prompt, built-in/extension tool allowlist, and MCP assignments. Tool and MCP selectors show details for the highlighted item in a right-side pane.
-- Press `n` to create a project or global agent manually or **Describe with AI**. Review/edit the AI draft, choose its color, and confirm before anything is saved. Manual creation uses the same assisted description and prompt editors. Studio creates the canonical folder layout with configuration in `agent.ts` and the system prompt in `prompt.md`; it does not create `agent.json`.
+- Select an agent and press `F4` to edit its description, color, prompt, built-in/extension tool allowlist, and MCP assignments. Tool and MCP selectors show details for the highlighted item in a right-side pane.
+- Press `F5` to create a project or global agent manually or **Describe with AI**. Review/edit the AI draft, choose its color, and confirm before anything is saved. Manual creation uses the same assisted description and prompt editors. Studio creates the canonical folder layout with configuration in `agent.ts` and the system prompt in `prompt.md`; it does not create `agent.json`.
 - Open **Edit description** or **Edit prompt** to edit normally or press **F2** for AI help with that field’s current text, including unsaved edits. Suggestions appear in the same editor for review and further editing. **F3** restores the pre-AI text; **Enter/Ctrl+S** accepts the field into the Studio draft; **Escape** discards the field edits. Use **Shift+Enter** for newlines. There are no separate top-level AI refinement actions.
 - Assistance is a neutral, tool-free Pi model request using the current provider/model, authentication, and reasoning level—not the active agent’s persona. It receives only the editable draft and available tool/MCP names, never agent `.env` values, MCP headers, or conversation history. PM, developer, documentation, designer, and dev-lead patterns guide the assistant internally; there is no template-selection menu. Requests are cancellable and time out after two minutes; normal provider usage charges apply.
 - **Color** offers automatic coloring, named palette colors, or a custom `#rrggbb`/theme role. Color and description edits also work as session drafts.

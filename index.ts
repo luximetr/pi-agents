@@ -1055,7 +1055,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		const name = draft.name;
 		if (agents.some(agent => agent.name === name)) {
-			ctx.ui.notify(`Agent "${name}" already exists; select it and press e to edit`, "warning");
+			ctx.ui.notify(`Agent "${name}" already exists; select it and press F4 to edit`, "warning");
 			return;
 		}
 		const color = await chooseAgentColor(ctx, draft.color);

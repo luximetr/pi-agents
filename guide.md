@@ -12,7 +12,7 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 
 ## Agent Studio
 
-Open `f7`, select an agent, and press `e`. Studio can edit the effective system prompt, direct tool allowlist, MCP assignments and HTTP endpoint URLs, and subagents. Tool and MCP selectors show the highlighted item's description and connection details in a right-side pane. In **Manage MCP servers**, open a server's settings and choose **Edit endpoint URL**; **Save agent.ts** persists it as an agent-local definition.
+Open `f7`, select an agent, and press `F4`. Studio can edit the effective system prompt, direct tool allowlist, MCP assignments and HTTP endpoint URLs, and subagents. Tool and MCP selectors show the highlighted item's description and connection details in a right-side pane. In **Manage MCP servers**, open a server's settings and choose **Edit endpoint URL**; **Save agent.ts** persists it as an agent-local definition.
 
 - **Apply as session draft**: activates immediately, persists in session history, follows session-tree navigation, and is inherited by delegated children. The dashboard marks it `◆ draft`.
 - **Save agent.ts**: writes edits directly to the agent definition, copies selected MCP definitions into its local `mcpServers`, removes stale unselected local MCP definitions, and removes saved overlays folded into it. Static TypeScript object exports retain imports, comments, custom tools, and unrelated fields; direct Studio saves keep the system prompt in `prompt.md` via `systemPromptFile`. A discovered legacy `agent.json` is migrated to canonical `agent.ts` + `prompt.md` files when saved.
@@ -20,7 +20,7 @@ Open `f7`, select an agent, and press `e`. Studio can edit the effective system 
 - **Save global override (~/.pi/agent/pi-agents/config.json)**: writes the same dynamic-agent overlay to the global config.
 - **Revert session draft**: restores the saved source/global/project composition. The dashboard identifies active saved overlays and their scope.
 
-Press `n` in the dashboard to create a project or global agent interactively. It captures the current direct toolset as a starting point, then opens Studio. Studio creates the canonical folder layout with configuration in `agent.ts` and the prompt in `prompt.md`; it does not create `agent.json`. TypeScript definitions support imports, factories, and executable custom tools; Studio patches static object exports directly and offers explicit config overlays for dynamic definitions.
+Press `F5` in the dashboard to create a project or global agent interactively. It captures the current direct toolset as a starting point, then opens Studio. Studio creates the canonical folder layout with configuration in `agent.ts` and the prompt in `prompt.md`; it does not create `agent.json`. TypeScript definitions support imports, factories, and executable custom tools; Studio patches static object exports directly and offers explicit config overlays for dynamic definitions.
 
 The MCP selector always offers recipes shipped with the extension. They are opt-in and disconnected until assigned. A project/global server definition with the same name overrides its bundled recipe:
 
