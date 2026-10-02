@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
+import { stripVTControlCharacters } from "node:util";
 import path from "node:path";
 import test from "node:test";
 import * as ts from "typescript";
@@ -309,6 +310,77 @@ process.stdin.once('data', () => {
 		else process.env.PI_CODING_AGENT_BIN = previousExecutable;
 		try { if (retainedPath) assert.equal(await readFile(path.join(retainedPath, "change"), "utf8"), "retained"); }
 		finally { await rm(root, { recursive: true, force: true }); }
+	}
+});
+
+test("truncated foreground/background worktree cards preserve expanded management metadata", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-truncated-cards-"));
+	const repo = path.join(root, "repo");
+	const executable = path.join(root, "fake-pi.mjs");
+	const previousExecutable = process.env.PI_CODING_AGENT_BIN;
+	const runtime = boot(repo);
+	const completions: any[] = [];
+	const outputDirs = new Set<string>();
+	runtime.pi.sendMessage = (message: any) => completions.push(message);
+	runtime.ctx.isIdle = () => true;
+	runtime.ctx.hasPendingMessages = () => false;
+	try {
+		await makeAgent(repo, "lead", 'default: true, subagents: ["worker"]');
+		await makeAgent(repo, "worker");
+		const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { stdio: "pipe" });
+		git("init"); git("add", "."); git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "initial");
+		await writeFile(executable, `#!/usr/bin/env node
+process.stdin.once("data", () => {
+ const text = Array.from({length:3000}, (_, i) => "report-line-" + i + "-" + "x".repeat(30)).join("\\n") + "\\nUNRENDERED_PRIVATE_TAIL";
+ console.log(JSON.stringify({type:"agent_start"}));
+ console.log(JSON.stringify({type:"message_end", message:{role:"assistant", stopReason:"stop", content:[{type:"text", text}]}}));
+ console.log(JSON.stringify({type:"agent_settled"}));
+});
+`);
+		await chmod(executable, 0o755);
+		process.env.PI_CODING_AGENT_BIN = executable;
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		const tool = runtime.tools.get("delegate");
+		for (const background of [false, true]) {
+			const ack = await tool.execute("delegate", { agent: "worker", task: "report", workspace: "worktree", background }, undefined, undefined, runtime.ctx);
+			let result = ack;
+			let completion: any;
+			if (background) {
+				const deadline = Date.now() + 10000;
+				while (!(completion = completions.find(message => message.details.runs.includes(ack.details.runId)))) {
+					assert.ok(Date.now() < deadline, "background completion must arrive");
+					await new Promise(resolve => setTimeout(resolve, 20));
+				}
+				result = completion.details.results.find((entry: any) => entry.runId === ack.details.runId);
+			}
+			assert.equal(result.details.outputTruncated, true);
+			assert.equal(result.details.workspace, "worktree");
+			outputDirs.add(path.dirname(result.details.fullOutputPath));
+			assert.match(await readFile(result.details.fullOutputPath, "utf8"), /UNRENDERED_PRIVATE_TAIL/);
+			const renderers = [(expanded: boolean) => tool.renderResult(ack, { expanded }, runtime.ctx.ui.theme)];
+			if (completion) renderers.push(expanded => runtime.messageRenderers.get("pi-agents-completions")(completion, { expanded }, runtime.ctx.ui.theme));
+			for (const render of renderers) {
+				for (const expanded of [false, true, false]) {
+					const text = stripVTControlCharacters(render(expanded).render(300).join("\n"));
+					assert.doesNotMatch(text, /\[Output truncated:|UNRENDERED_PRIVATE_TAIL|report-line-2999/);
+					assert.equal(text.split(result.details.fullOutputPath).length - 1, 1, "one full-output link, without loading its contents");
+					assert.equal(text.split("report-line-0-").length - 1, 1);
+					if (expanded) {
+						for (const value of [`Thread ID: ${result.details.threadId}`, `Run ID: ${result.details.runId}`, "Workspace: worktree", `Cwd: ${result.details.workspaceCwd}`, `Worktree: ${result.details.worktreePath}`, `Base commit: ${result.details.workspaceBaseCommit}`, "Changes are retained; review/apply manually (not merged)."])
+							assert.ok(text.includes(value), `expanded result must include ${value}`);
+					} else {
+						assert.ok(text.split("\n").length < 20, "collapsed preview remains bounded");
+						assert.doesNotMatch(text, /report-line-20-/);
+					}
+				}
+			}
+		}
+	} finally {
+		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		if (previousExecutable === undefined) delete process.env.PI_CODING_AGENT_BIN;
+		else process.env.PI_CODING_AGENT_BIN = previousExecutable;
+		for (const directory of outputDirs) await rm(directory, { recursive: true, force: true });
+		await rm(root, { recursive: true, force: true });
 	}
 });
 

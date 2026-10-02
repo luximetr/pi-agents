@@ -176,7 +176,12 @@ export function renderDelegateResult(
 	}
 	if (details.outputTruncated) {
 		const noticeStart = body.lastIndexOf("\n\n[Output truncated:");
-		if (noticeStart >= 0) body = body.slice(0, noticeStart);
+		if (noticeStart >= 0) {
+			// The notice precedes thread/run/workspace metadata. Remove only its
+			// own line, never the suffix; the full-output link is rendered below.
+			const notice = /^\n\n\[Output truncated: [^\r\n]*\](?=\r?\n|$)/.exec(body.slice(noticeStart));
+			if (notice) body = body.slice(0, noticeStart) + body.slice(noticeStart + notice[0].length);
+		}
 	}
 
 	if (body.trim()) {
