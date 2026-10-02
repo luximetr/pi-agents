@@ -13,6 +13,7 @@ import extension, { matchesDeniedPath } from "../index.ts";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, displaySubagentModel, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
 import { renderDelegateCall, renderDelegateResult, showSubagentInspector } from "../ui.ts";
+import { SubagentObserver } from "../subagent-observer.ts";
 
 const noAbort = new AbortController().signal;
 
@@ -481,6 +482,91 @@ test("running handle can steer and manually stop a subagent", async () => {
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
+});
+
+test("stop clears acknowledged steering before abort and bounds rejection, missing responses, startup and descendants", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-stop-queue-test-"));
+	const executable = path.join(root, "fake-pi.mjs");
+	const log = path.join(root, "commands.jsonl");
+	const observer = new SubagentObserver();
+	try {
+		await writeFile(executable, `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+const send = event => process.stdout.write(JSON.stringify(event) + '\\n');
+let buffer='', mode='', queued=false;
+process.on('SIGTERM', () => { if (mode !== 'unresponsive') process.exit(0); });
+process.stdin.on('data', chunk => {
+ buffer += chunk;
+ let end;
+ while ((end=buffer.indexOf('\\n')) >= 0) {
+  const command=JSON.parse(buffer.slice(0,end)); buffer=buffer.slice(end+1);
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify({pid:process.pid, type:command.type, mode})+'\\n');
+  if (command.type==='prompt') { mode=command.message; send({type:'agent_start'}); send({type:'tool_execution_start',toolName:'bash',args:{command:'sleep'}}); }
+  if (command.type==='steer') {
+   setTimeout(() => { queued=mode!=='steer-rejected'; send({type:'response',id:command.id,command:'steer',success:!queued ? false : true}); },40);
+  }
+  if (command.type==='clear_queue') {
+   send({type:'response',id:'unrelated',command:'clear_queue',success:true});
+   if (mode==='missing' || mode==='unresponsive') continue;
+   if (mode==='clear-rejected') { send({type:'response',id:command.id,command:'clear_queue',success:false,error:'test rejection'}); continue; }
+   queued=false;
+   send({type:'response',id:command.id,command:'clear_queue',success:true,data:{steering:[],followUp:[]}});
+  }
+  if (command.type==='abort') {
+   if (queued) appendFileSync(${JSON.stringify(log)}, JSON.stringify({pid:process.pid,type:'EXECUTED_QUEUED'})+'\\n');
+   send({type:'response',id:command.id,command:'abort',success:mode!=='abort-rejected',error:'test rejection'});
+  }
+ }
+});
+process.stdin.on('end', () => process.exit(0));
+`);
+		await chmod(executable, 0o755);
+		const rows = () => readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line));
+		for (const mode of ["normal", "steer-rejected", "clear-rejected", "abort-rejected", "missing", "unresponsive", "startup"]) {
+			let handle: RunningSubagentHandle | undefined;
+			const start = Date.now();
+			const run = runSubagent("worker", mode, root, noAbort, {
+				executable, participantSessionDir: path.join(root, "sessions"), gracefulStopSeconds: 0.3,
+				onHandle: value => { if (value) handle = value; },
+				onSnapshot: snapshot => { if (mode === "startup" && snapshot.phase === "starting") handle!.stop("user"); },
+				onProgress: event => {
+					if (event.type === "tool-start") {
+						assert.equal(handle!.steer("queued action"), true);
+						handle!.stop("user");
+						assert.equal(handle!.steer("late race"), false);
+					}
+				},
+			});
+			await assert.rejects(run, error => error instanceof SubagentStoppedError && error.reason === "user");
+			assert.ok(Date.now() - start < 3000, "cancellation remains bounded");
+			const commands = rows().filter(row => row.pid === rows().at(-1).pid).map(row => row.type);
+			assert.ok(!commands.includes("EXECUTED_QUEUED"));
+			assert.ok(commands.includes("clear_queue"));
+			if (["clear-rejected", "missing", "unresponsive"].includes(mode)) assert.ok(!commands.includes("abort"));
+			else assert.ok(commands.indexOf("clear_queue") < commands.indexOf("abort"));
+			if (mode === "startup") assert.ok(!commands.includes("prompt"));
+			handle!.stop("user"); // Already reaped: no callbacks/commands or restart.
+		}
+		const handles: RunningSubagentHandle[] = [];
+		let ready = 0;
+		const runs = ["parent", "child"].map(id => runSubagent(id, "normal", root, noAbort, {
+			executable, id, parentRunId: id === "child" ? "parent" : undefined,
+			participantSessionDir: path.join(root, "sessions"), gracefulStopSeconds: 0.3,
+			onHandle: handle => { if (handle) { handles.push(handle); observer.attach(handle); } },
+			onSnapshot: snapshot => observer.publish(snapshot),
+			onProgress: event => {
+				if (event.type === "tool-start" && ++ready === 2) {
+					for (const handle of handles) assert.equal(handle.steer("queued descendant action"), true);
+					observer.stopTree("parent", "user");
+				}
+			},
+		}).catch(error => error));
+		const outcomes = await Promise.all(runs);
+		assert.ok(outcomes.every(error => error instanceof SubagentStoppedError));
+		assert.equal(outcomes[0].reason, "user");
+		assert.equal(outcomes[1].reason, "parent");
+		assert.ok(!rows().some(row => row.type === "EXECUTED_QUEUED"));
+	} finally { await observer.shutdown(0.1); await rm(root, { recursive: true, force: true }); }
 });
 
 test("subagent inspector renders live state and confirms a manual stop", async () => {

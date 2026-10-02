@@ -369,6 +369,10 @@ function runSubagentProcess(
 		let settled = false;
 		let gracefulExit = false;
 		let protocolComplete = false;
+		const pendingSteers = new Set<string>();
+		let steerSequence = 0;
+		let clearingQueue = false;
+		let abortSent = false;
 		let stopEscalationTimer: NodeJS.Timeout | undefined;
 		let deadlineTimer: NodeJS.Timeout | undefined;
 		const decoder = new StringDecoder("utf8");
@@ -388,6 +392,13 @@ function runSubagentProcess(
 				return false;
 			}
 		};
+		const clearQueueBeforeAbort = () => {
+			if (settled || !state.stopReason || pendingSteers.size || clearingQueue) return;
+			clearingQueue = true;
+			// RPC handlers can be asynchronous. Do not race in-flight steering or
+			// abort until clear_queue acknowledges that no queued work remains.
+			if (!send({ id: `clear-stop-${state.id}`, type: "clear_queue" })) child.kill("SIGTERM");
+		};
 		const stop = (reason: SubagentStopReason = "user") => {
 			if (settled || state.stopReason) return;
 			state.stopReason = reason;
@@ -397,7 +408,7 @@ function runSubagentProcess(
 			addEvent(notice);
 			transcript.add("event", notice);
 			publishSnapshot();
-			send({ id: `abort-${state.id}`, type: "abort" });
+			clearQueueBeforeAbort();
 			stopEscalationTimer = setTimeout(() => {
 				if (settled) return;
 				addEvent("■ child did not stop gracefully; sending SIGTERM");
@@ -424,7 +435,10 @@ function runSubagentProcess(
 			steer: (message: string) => {
 				const text = message.trim();
 				if (!text || settled || state.status !== "running") return false;
-				const sent = send({ id: `steer-${state.id}-${Date.now()}`, type: "steer", message: text });
+				const requestId = `steer-${state.id}-${++steerSequence}`;
+				pendingSteers.add(requestId);
+				const sent = send({ id: requestId, type: "steer", message: text });
+				if (!sent) pendingSteers.delete(requestId);
 				if (sent) {
 					addEvent(`↪ user steering: ${text}`);
 					transcript.add("event", `Steering requested (queued, not yet delivered): ${text}`);
@@ -555,6 +569,20 @@ function runSubagentProcess(
 					break;
 				}
 				case "response":
+					if (event.command === "steer" && typeof event.id === "string" && pendingSteers.delete(event.id)) clearQueueBeforeAbort();
+					if (state.stopReason && clearingQueue && event.id === `clear-stop-${state.id}` && event.command === "clear_queue" && !abortSent) {
+						if (event.success === true) {
+							abortSent = true;
+							if (!send({ id: `abort-${state.id}`, type: "abort" })) child.kill("SIGTERM");
+						} else {
+							addEvent("■ queue clearing failed; terminating child without running queued work");
+							child.kill("SIGTERM");
+						}
+					}
+					if (state.stopReason && abortSent && event.id === `abort-${state.id}` && event.command === "abort") {
+						if (event.success === true) closeChild(); // An idle/startup abort may emit no agent_settled.
+						else { addEvent("■ RPC abort failed; terminating child"); child.kill("SIGTERM"); }
+					}
 					if (promptPending && event.id === "prompt" && event.command === "prompt") {
 						promptPending = false;
 						if (event.success === false) {
@@ -676,7 +704,7 @@ function runSubagentProcess(
 				resolve(finalText.trim() || "Subagent completed without a textual result.");
 			}
 		}));
-		send({ id: "prompt", type: "prompt", message: task });
+		if (!state.stopReason) send({ id: "prompt", type: "prompt", message: task });
 	});
 }
 

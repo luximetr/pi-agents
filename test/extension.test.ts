@@ -584,6 +584,7 @@ test("background control exposes live and terminal status without consuming comp
 				while ((newline = buffer.indexOf("\\n")) !== -1) {
 					const command = JSON.parse(buffer.slice(0, newline));
 					buffer = buffer.slice(newline + 1);
+					if (command.type === "clear_queue") send({ type: "response", id: command.id, command: "clear_queue", success: true, data: { steering: [], followUp: [] } });
 					if (command.type === "abort") process.exit(0);
 					if (command.type !== "prompt") continue;
 					send({ type: "agent_start" });
