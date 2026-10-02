@@ -125,6 +125,60 @@ test("end to end: delegate launches an isolated child with the target agent", as
 	}
 });
 
+test("clean child exit requires a protocol completion boundary, not assistant text or agent_end", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-protocol-close-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	const answer = { type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "answer" }] } };
+	const accepted = { type: "response", id: "prompt", command: "prompt", success: true, data: { disposition: "started" } };
+	const cases = [
+		{ name: "no events", events: [], error: /before agent_settled/ },
+		{ name: "accepted only", events: [accepted], error: /before agent_settled/ },
+		{ name: "partial answer", events: [accepted, { type: "agent_start" }, answer], error: /before agent_settled/ },
+		{ name: "agent_end is not settlement", events: [answer, { type: "agent_end", messages: [answer.message], willRetry: false }], error: /before agent_settled/ },
+		{ name: "pending retry", events: [{ type: "agent_start" }, { type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "retryable provider error" } }, { type: "agent_end", willRetry: true }, { type: "auto_retry_start", attempt: 1 }], error: /retryable provider error/ },
+		{ name: "settled", events: [accepted, { type: "agent_start" }, answer, { type: "agent_end", willRetry: false }, { type: "agent_settled" }], result: "answer" },
+		{ name: "handled no run", events: [{ ...accepted, data: { disposition: "handled" } }], result: "Subagent prompt was handled without starting an agent run." },
+	];
+	try {
+		for (const scenario of cases) {
+			// Deliberately omit the final LF: EOF must flush the final protocol record.
+			await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.once("data", () => process.stdout.write(${JSON.stringify(scenario.events.map(event => JSON.stringify(event)).join("\n"))}, () => process.exit(0)));
+`);
+			await chmod(fakePi, 0o755);
+			let handle: RunningSubagentHandle | undefined;
+			const progress: string[] = [];
+			const run = runSubagent("worker", scenario.name, root, noAbort, {
+				executable: fakePi, participantSessionDir: path.join(root, "sessions"),
+				onHandle: value => { if (value) handle = value; },
+				onProgress: event => progress.push(event.type),
+			});
+			if (scenario.error) {
+				await assert.rejects(run, scenario.error);
+				assert.equal(handle?.snapshot().status, "failed", scenario.name);
+				assert.ok(!progress.includes("finished"), scenario.name);
+			} else {
+				assert.equal(await run, scenario.result, scenario.name);
+				assert.equal(handle?.snapshot().status, "finished", scenario.name);
+			}
+		}
+		await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on("data", chunk => {
+ const command = JSON.parse(String(chunk));
+ if (command.type === "abort") process.exit(0);
+ else process.stdout.write(JSON.stringify({type:"agent_start"}) + "\\n");
+});
+`);
+		await chmod(fakePi, 0o755);
+		let handle: RunningSubagentHandle | undefined;
+		await assert.rejects(runSubagent("worker", "cancel", root, noAbort, {
+			executable: fakePi, participantSessionDir: path.join(root, "sessions"),
+			onHandle: value => { if (value) handle = value; },
+			onProgress: event => { if (event.type === "started") handle!.stop("user"); },
+		}), error => error instanceof SubagentStoppedError && error.reason === "user");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("task threads run in parallel and explicit continuations reuse only their thread history", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-resumable-"));
 	const fakePi = path.join(root, "fake-pi.mjs");

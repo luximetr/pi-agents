@@ -52,7 +52,15 @@ process.stdin.on('data', chunk => {
   append({role:'user', content:command.message});
   append({role:'assistant', content:[{type:'text',text:'saved answer'}], stopReason:'stop'});
   emit({type:'message_end', message:{role:'assistant', content:[{type:'text',text:'saved answer'}], stopReason:'stop'}});
-  if (command.message.includes('HOLD')) {
+  if (command.message.includes('EARLY_EXIT')) {
+   process.stdout.end();
+   writeFileSync(${JSON.stringify(path.join(base, "closing"))}, 'ready');
+   busy=setInterval(()=>{
+    if (!existsSync(${JSON.stringify(path.join(base, "allow-close"))})) return;
+    append({role:'assistant', content:[{type:'text',text:'shutdown flushed'}], stopReason:'stop'});
+    process.exit(0);
+   },10);
+  } else if (command.message.includes('HOLD')) {
    busy=setInterval(()=>{},1000);
    if (command.message.includes('PENDING')) setTimeout(()=>{
     append({role:'assistant', content:[{type:'toolCall',id:'unfinished',name:'bash',arguments:{command:'external effect'}}], stopReason:'toolUse'});
@@ -82,7 +90,7 @@ process.stdin.on('end',()=>{
 	return { base, project, options, backend, executable, launches };
 }
 
-for (const disposition of ["RPC_REJECT", "RPC_HANDLED"]) {
+for (const disposition of ["RPC_REJECT", "RPC_HANDLED", "EARLY_EXIT"]) {
 	test(`initial prompt ${disposition} closes the child before releasing history and preserves recovery`, async t => {
 		const f = await fixture(t);
 		await f.backend.run(input, signal(), { executable: f.executable });
@@ -97,11 +105,12 @@ for (const disposition of ["RPC_REJECT", "RPC_HANDLED"]) {
 			await writeFile(path.join(f.base, "allow-close"), "close");
 			const result = await outcome;
 			if (disposition === "RPC_REJECT") assert.equal((result as Error).message, "initial prompt denied");
+			else if (disposition === "EARLY_EXIT") assert.match((result as Error).message, /before agent_settled/);
 			else { assert.ok(!(result instanceof Error)); assert.match(result.text, /handled without starting an agent run/); }
 			const pid = (await f.launches())[1].pid;
 			assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
 			const [saved] = await other.list();
-			assert.equal(saved.record?.status, disposition === "RPC_REJECT" ? "failed" : "completed");
+			assert.equal(saved.record?.status, disposition === "RPC_HANDLED" ? "completed" : "failed");
 			assert.equal(saved.recoverable, true, saved.error);
 			await other.recover({ ...input, latestRunId: "run-2", runId: "run-3", instruction: "Continue explicitly" }, signal(), { executable: f.executable });
 			assert.match(JSON.stringify((await f.launches())[2].prior), /shutdown flushed/);

@@ -368,6 +368,7 @@ function runSubagentProcess(
 		let runStarted = false;
 		let settled = false;
 		let gracefulExit = false;
+		let protocolComplete = false;
 		let stopEscalationTimer: NodeJS.Timeout | undefined;
 		let deadlineTimer: NodeJS.Timeout | undefined;
 		const decoder = new StringDecoder("utf8");
@@ -564,6 +565,7 @@ function runSubagentProcess(
 							progress?.({ type: "error", message: promptError });
 							closeChild();
 						} else if (event.success === true && (event.data as { disposition?: string } | undefined)?.disposition === "handled" && !runStarted) {
+							protocolComplete = true;
 							finalText = "Subagent prompt was handled without starting an agent run.";
 							state.partialText = finalText;
 							state.phase = "prompt handled without agent run";
@@ -583,6 +585,7 @@ function runSubagentProcess(
 				case "auto_retry_start": state.phase = "retrying"; addEvent("↻ provider retry"); transcript.add("event", "Provider retry"); break;
 				case "compaction_start": state.phase = "compacting"; addEvent("◇ compacting context"); break;
 				case "agent_settled":
+					protocolComplete = true;
 					// An aborted child also emits agent_settled while shutting down. Keep
 					// the stop phase in that case so diagnostics do not claim that a
 					// timed-out or interrupted delegation finished successfully.
@@ -658,6 +661,14 @@ function runSubagentProcess(
 				state.phase = "process failed";
 				const message = stderr.trim() || `subagent exited with code ${code}`;
 				transcript.add("event", message);
+				reject(new Error(message));
+			} else if (!protocolComplete) {
+				state.status = "failed";
+				state.phase = "protocol incomplete";
+				const message = "Subagent exited before agent_settled; completion is unavailable (partial output is not a completed result).";
+				addEvent(`✗ ${message}`);
+				transcript.add("event", message);
+				progress?.({ type: "error", message });
 				reject(new Error(message));
 			} else {
 				state.status = "finished";
