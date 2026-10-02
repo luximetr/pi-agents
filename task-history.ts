@@ -109,6 +109,12 @@ export function taskHistoryKey(rootSessionId: string, threadId: string): string 
 	return hash(`${rootSessionId}\0${threadId}`);
 }
 
+/** Expected lock contention, including crash-left ownership; never authorizes lock stealing. */
+export class TaskHistoryBusyError extends Error {
+	readonly code = "EEXIST";
+	constructor(message: string) { super(message); this.name = "TaskHistoryBusyError"; }
+}
+
 export class TaskHistoryStore {
 	private constructor(private options: HistoryOptions, private project: Identity, readonly directory: string) {}
 
@@ -202,7 +208,12 @@ export class TaskHistoryStore {
 		await privatePath(this.directory, true);
 		await privatePath(p.directory, true);
 		const lock = path.join(p.directory, ".metadata-lock");
-		await mkdir(lock, { mode: 0o700 });
+		try { await mkdir(lock, { mode: 0o700 }); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			await privatePath(lock, true);
+			throw new TaskHistoryBusyError(`Task history: metadata transaction is busy at ${lock}.`);
+		}
 		try { return await action(await this.load(threadId)); }
 		finally { await rmdir(lock); }
 	}
@@ -213,7 +224,8 @@ export class TaskHistoryStore {
 		for (const lock of [path.join(this.directory, ".executions", key), path.join(this.paths(threadId).directory, ".locks", key), path.join(this.paths(threadId).directory, ".metadata-lock")]) {
 			try { await lstat(lock); }
 			catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
-			throw new Error(`Task history ownership is unresolved at ${lock}. Stop the owning runtime; after a crash, verify child exit before manual lock cleanup. No automatic lock stealing.`);
+			await privatePath(lock, true);
+			throw new TaskHistoryBusyError(`Task history ownership is unresolved at ${lock}. Stop the owning runtime; after a crash, verify child exit before manual lock cleanup. No automatic lock stealing.`);
 		}
 	}
 
@@ -230,8 +242,9 @@ export class TaskHistoryStore {
 		const lock = path.join(locks, taskHistoryKey(this.options.scope.rootSessionId, threadId));
 		try { await mkdir(lock, { mode: 0o700 }); }
 		catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`Task history: execution ownership is still reserved at ${lock}. Stop the owning runtime and verify its child has exited. Crash-left locks require manual inspection; recovery never steals them.`);
-			throw error;
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			await privatePath(lock, true);
+			throw new TaskHistoryBusyError(`Task history: execution ownership is still reserved at ${lock}. Stop the owning runtime and verify its child has exited. Crash-left locks require manual inspection; recovery never steals them.`);
 		}
 		const token = randomUUID();
 		const ownerFile = path.join(lock, "owner.json");
@@ -242,13 +255,13 @@ export class TaskHistoryStore {
 		try {
 			const participantLock = path.join(this.paths(threadId).directory, ".locks", taskHistoryKey(this.options.scope.rootSessionId, threadId));
 			try {
-				await lstat(participantLock);
-				throw new Error(`Task history: participant lock remains at ${participantLock}; verify the old child has exited before manual cleanup. No history was restored.`);
+				await privatePath(participantLock, true);
+				throw new TaskHistoryBusyError(`Task history: participant lock remains at ${participantLock}; verify the old child has exited before manual cleanup. No history was restored.`);
 			} catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 			const metadataLock = path.join(this.paths(threadId).directory, ".metadata-lock");
 			try {
-				await lstat(metadataLock);
-				throw new Error(`Task history: interrupted metadata transaction at ${metadataLock}; inspect it before manual cleanup.`);
+				await privatePath(metadataLock, true);
+				throw new TaskHistoryBusyError(`Task history: interrupted metadata transaction at ${metadataLock}; inspect it before manual cleanup.`);
 			} catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 			return await action();
 		} finally {
@@ -376,20 +389,27 @@ export class TaskHistoryStore {
 		});
 	}
 
-	/** Explicit retention sweep. No timer/default retention; skips running and invalid records. */
+	/** Explicit retention sweep. Skips live/busy records; invalid records and I/O failures remain errors. */
 	async prune(before: number): Promise<string[]> {
 		requireValue(time(before), "invalid retention cutoff");
 		const deleted: string[] = [];
-		for (const row of await this.list()) {
-			if (!row.record) continue;
-			if (row.record.updatedAt >= before) continue;
-			await this.withExecutionLock(row.threadId, async () => {
-				const record = await this.load(row.threadId);
-				if (record.status === "running" || record.updatedAt >= before) return;
-				await rm(this.paths(row.threadId).directory, { recursive: true, force: false });
-				await syncDirectory(this.directory);
-				deleted.push(row.threadId);
-			});
+		const rows = await this.list();
+		// Report known invalid records before deleting anything. A later I/O failure
+		// can still interrupt this non-atomic sweep and must not be hidden as busy.
+		for (const row of rows) requireValue(row.record, `cannot prune invalid history ${row.threadId}: ${row.error}`);
+		for (const row of rows) {
+			if (row.record!.updatedAt >= before) continue;
+			try {
+				await this.withExecutionLock(row.threadId, async () => {
+					const record = await this.load(row.threadId);
+					if (record.status === "running" || record.updatedAt >= before) return;
+					await rm(this.paths(row.threadId).directory, { recursive: true, force: false });
+					await syncDirectory(this.directory);
+					deleted.push(row.threadId);
+				});
+			} catch (error) {
+				if (!(error instanceof TaskHistoryBusyError)) throw error;
+			}
 		}
 		return deleted;
 	}

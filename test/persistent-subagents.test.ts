@@ -211,6 +211,23 @@ test("cross-runtime ownership blocks recovery and deletion while a child is stil
 	} finally { await other.shutdown(); await f.backend.shutdown(); await outcome; }
 });
 
+test("prune zero-day retention deletes finished histories while a real child retains ownership", async t => {
+	const f = await fixture(t);
+	await f.backend.run(input, signal(), { executable: f.executable });
+	const live = f.backend.run({ ...input, threadId: "live", instruction: "HOLD" }, signal(), { executable: f.executable, gracefulStopSeconds: 0.05 });
+	const outcome = live.catch(error => error);
+	try {
+		await waitFor(async () => (await f.backend.list()).some(row => row.threadId === "live" && !!row.record?.checkpoint));
+		await f.backend.run({ ...input, threadId: "finished-too" }, signal(), { executable: f.executable });
+		const removed = await f.backend.prune(Date.now() + 1);
+		assert.deepEqual(removed.sort(), ["finished-too", "thread"]);
+		assert.deepEqual((await f.backend.list()).map(row => row.threadId), ["live"]);
+		const pid = (await f.launches()).find(row => row.task === "HOLD").pid;
+		process.kill(pid, 0);
+		await assert.rejects(f.backend.delete("live"), /ownership is still reserved/);
+	} finally { await f.backend.shutdown(); await outcome; }
+});
+
 test("unavailable/corrupt saved state fails before launch, never a fresh session", async t => {
 	const f = await fixture(t);
 	await f.backend.run(input, signal(), { executable: f.executable });

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { TaskHistoryStore, captureHistoryWorkspace, taskHistoryKey, type HistoryOptions } from "../task-history.ts";
+import { TaskHistoryStore, TaskHistoryBusyError, captureHistoryWorkspace, taskHistoryKey, type HistoryOptions } from "../task-history.ts";
 
 const expected = { owner: "parent", agent: "worker", latestRunId: "run-1" };
 const validateSession = (bytes: Buffer) => {
@@ -212,6 +212,67 @@ test("explicit retention deletes terminal histories only, leaves running data an
 	assert.deepEqual((await f.store.list()).map(row => row.threadId), ["running"]);
 	await f.store.delete("running");
 	assert.deepEqual(await f.store.list(), []);
+});
+
+test("retention skips typed busy locks and rechecks running state under ownership", async t => {
+	const f = await fixture(t);
+	await f.store.checkpoint("thread-1", "run-1");
+	await f.store.finish("thread-1", "run-1", "completed");
+	for (const id of ["execution", "participant", "metadata", "running", "recent"]) {
+		await f.store.create({ ...f.input, threadId: id });
+		if (id !== "running") await f.store.finish(id, "run-1", "completed");
+	}
+	const cutoff = (await f.store.list()).find(row => row.threadId === "recent")!.record!.updatedAt;
+	// Exact-cutoff records must be retained. All older terminal records can go.
+	assert.deepEqual(await f.store.prune(0), []);
+	const lockPaths = [
+		path.join(f.store.directory, ".executions", taskHistoryKey("root-session", "execution")),
+		path.join(f.store.paths("participant").directory, ".locks", taskHistoryKey("root-session", "participant")),
+		path.join(f.store.paths("metadata").directory, ".metadata-lock"),
+	];
+	for (const lock of lockPaths) await mkdir(lock, { recursive: true, mode: 0o700 });
+	for (const id of ["execution", "participant", "metadata"]) await assert.rejects(f.store.delete(id), TaskHistoryBusyError);
+	const removed = await f.store.prune(cutoff);
+	assert.deepEqual(removed, ["thread-1"]);
+	for (const lock of lockPaths) assert.ok((await lstat(lock)).isDirectory(), "never remove or steal pre-existing locks");
+	assert.deepEqual((await f.store.list()).map(row => row.threadId).sort(), ["execution", "metadata", "participant", "recent", "running"]);
+	// Simulate a recovery starting between discovery and the under-lock state read.
+	await writeFile(f.store.paths("recent").sessionFile, session(f.project), { mode: 0o600 });
+	const original = f.store.withExecutionLock.bind(f.store);
+	f.store.withExecutionLock = (id, action) => original(id, async () => {
+		if (id === "recent") {
+			// A new run may have changed both state and timestamp since list().
+			const metadata = f.store.paths(id).metadata;
+			const envelope = JSON.parse(await readFile(metadata, "utf8"));
+			const record = JSON.parse(envelope.payload);
+			record.status = "running";
+			envelope.payload = JSON.stringify(record);
+			envelope.sha256 = createHash("sha256").update(envelope.payload).digest("hex");
+			await writeFile(metadata, JSON.stringify(envelope));
+		}
+		return action();
+	});
+	assert.deepEqual(await f.store.prune(Date.now() + 1), []);
+	assert.ok((await lstat(f.store.paths("recent").directory)).isDirectory());
+});
+
+test("prune reports corruption and unsafe permissions rather than treating them as busy", async t => {
+	const f = await fixture(t);
+	await f.store.finish("thread-1", "run-1", "completed");
+	const other = await f.store.create({ ...f.input, threadId: "corrupt" });
+	const metadata = path.join(other.participantSessionDir, "metadata.json");
+	await writeFile(metadata, "broken");
+	await assert.rejects(f.store.prune(Date.now() + 1), /cannot prune invalid history/);
+	assert.ok((await lstat(f.created.participantSessionDir)).isDirectory(), "known corruption is reported before deleting eligible histories");
+	await rm(other.participantSessionDir, { recursive: true });
+	const lock = path.join(f.store.directory, ".executions", taskHistoryKey("root-session", "thread-1"));
+	await mkdir(lock, { recursive: true, mode: 0o700 });
+	await chmod(lock, 0o755);
+	await assert.rejects(f.store.prune(Date.now() + 1), /unsafe permissions/);
+	await chmod(lock, 0o700);
+	await rm(lock, { recursive: true });
+	await chmod(f.created.participantSessionDir, 0o755);
+	await assert.rejects(f.store.prune(Date.now() + 1), /unsafe permissions/);
 });
 
 test("worktree identity persists, rejects unrelated repositories and removed worktrees", async t => {
