@@ -363,6 +363,9 @@ function runSubagentProcess(
 		let stderr = "";
 		let finalText = "";
 		let assistantError: string | undefined;
+		let promptError: string | undefined;
+		let promptPending = true;
+		let runStarted = false;
 		let settled = false;
 		let gracefulExit = false;
 		let stopEscalationTimer: NodeJS.Timeout | undefined;
@@ -448,6 +451,20 @@ function runSubagentProcess(
 			publishSnapshot();
 			options.onHandle?.(undefined);
 		};
+		const closeChild = () => {
+			gracefulExit = true;
+			// Resolve/reject only on close, after EOF flushes history and shutdown.
+			child.stdin.end();
+			if (!stopEscalationTimer) {
+				stopEscalationTimer = setTimeout(() => {
+					if (settled) return;
+					child.kill("SIGTERM");
+					stopEscalationTimer = setTimeout(() => { if (!settled) child.kill("SIGKILL"); }, gracefulStopMs);
+					stopEscalationTimer.unref?.();
+				}, gracefulStopMs);
+				stopEscalationTimer.unref?.();
+			}
+		};
 		const parentAbort = () => stop("parent");
 		const handleEvent = (event: Record<string, unknown>) => {
 			// Footer/widget RPC notifications are not evidence of agent progress.
@@ -460,6 +477,7 @@ function runSubagentProcess(
 			}
 			switch (event.type) {
 				case "agent_start":
+					runStarted = true;
 					state.phase = "agent running";
 					addEvent(`▶ ${agentName}: running`);
 					progress?.({ type: "started", agent: agentName });
@@ -536,6 +554,25 @@ function runSubagentProcess(
 					break;
 				}
 				case "response":
+					if (promptPending && event.id === "prompt" && event.command === "prompt") {
+						promptPending = false;
+						if (event.success === false) {
+							promptError = String(event.error ?? "Child rejected the initial prompt.");
+							state.status = "failed";
+							state.phase = "prompt rejected";
+							addEvent(`✗ ${promptError}`);
+							progress?.({ type: "error", message: promptError });
+							closeChild();
+						} else if (event.success === true && (event.data as { disposition?: string } | undefined)?.disposition === "handled" && !runStarted) {
+							finalText = "Subagent prompt was handled without starting an agent run.";
+							state.partialText = finalText;
+							state.phase = "prompt handled without agent run";
+							addEvent(finalText);
+							transcript.add("event", finalText);
+							progress?.({ type: "finished" });
+							closeChild();
+						}
+					}
 					if (event.command === "steer") transcript.add("event", event.success ? "Steering accepted by child; delivery occurs between turns." : `Steering rejected: ${String(event.error ?? "unknown error")}`);
 					if (event.success === false && event.command !== "steer") transcript.add("event", `RPC ${String(event.command)} failed: ${String(event.error)}`);
 					break;
@@ -555,19 +592,7 @@ function runSubagentProcess(
 						addEvent(`${assistantError ? "✗" : "✓"} ${agentName}: ${state.phase}`);
 						progress?.(assistantError ? { type: "error", message: assistantError } : { type: "finished" });
 					}
-					gracefulExit = true;
-					// EOF lets Pi flush history and run session_shutdown (including nested
-					// thread cleanup). Bound shutdown if an extension refuses to exit.
-					child.stdin.end();
-					if (!stopEscalationTimer) {
-						stopEscalationTimer = setTimeout(() => {
-							if (settled) return;
-							child.kill("SIGTERM");
-							stopEscalationTimer = setTimeout(() => { if (!settled) child.kill("SIGKILL"); }, gracefulStopMs);
-							stopEscalationTimer.unref?.();
-						}, gracefulStopMs);
-						stopEscalationTimer.unref?.();
-					}
+					closeChild();
 					break;
 				case "extension_error": {
 					const message = String(event.error ?? "child extension error");
@@ -620,6 +645,10 @@ function runSubagentProcess(
 			} else if (state.stopReason) {
 				state.status = "failed";
 				reject(new SubagentStoppedError(state.stopReason, handle.snapshot()));
+			} else if (promptError) {
+				state.status = "failed";
+				state.phase = "prompt rejected";
+				reject(new Error(promptError));
 			} else if (assistantError) {
 				state.status = "failed";
 				state.phase = "assistant failed";

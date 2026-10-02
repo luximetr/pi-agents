@@ -22,7 +22,7 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
 	const log = path.join(base, "launches.jsonl");
 	const executable = path.join(base, "fake-pi.mjs");
 	await writeFile(executable, `#!/usr/bin/env node
-import { appendFileSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync, statSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 const file = process.argv[process.argv.indexOf('--session') + 1];
 const entries = readFileSync(file, 'utf8').trim().split('\\n').map(JSON.parse);
@@ -32,7 +32,7 @@ const append = message => {
  const id = randomUUID(); appendFileSync(file, JSON.stringify({type:'message', id, parentId, timestamp:new Date().toISOString(), message:{...message, timestamp:Date.now()}})+'\\n'); parentId=id;
 };
 const emit = event => process.stdout.write(JSON.stringify(event)+'\\n');
-let buffer = '', busy;
+let buffer = '', busy, noRun = false;
 process.stdin.on('data', chunk => {
  buffer += chunk;
  let n;
@@ -41,6 +41,14 @@ process.stdin.on('data', chunk => {
   if (command.type === 'abort') { clearInterval(busy); emit({type:'agent_settled'}); continue; }
   if (command.type !== 'prompt') continue;
   appendFileSync(${JSON.stringify(log)}, JSON.stringify({pid:process.pid, task:command.message, cwd:process.cwd(), file, prior:entries})+'\\n');
+  emit({type:'response', id:'unrelated', command:'prompt', success:false, error:'unrelated rejection'});
+  if (command.message.includes('RPC_REJECT') || command.message.includes('RPC_HANDLED')) {
+   noRun = true;
+   emit({type:'response', id:command.id, command:'prompt', success:!command.message.includes('RPC_REJECT'), error:'initial prompt denied', data:{disposition:'handled'}});
+   continue;
+  }
+  emit({type:'agent_start'});
+  if (command.message.startsWith('ACTIVE_HANDLED')) emit({type:'response', id:command.id, command:'prompt', success:true, data:{disposition:'handled'}});
   append({role:'user', content:command.message});
   append({role:'assistant', content:[{type:'text',text:'saved answer'}], stopReason:'stop'});
   emit({type:'message_end', message:{role:'assistant', content:[{type:'text',text:'saved answer'}], stopReason:'stop'}});
@@ -54,7 +62,16 @@ process.stdin.on('data', chunk => {
   } else emit({type:'agent_settled'});
  }
 });
-process.stdin.on('end',()=>{ if (!busy || busy._destroyed) process.exit(0); });
+process.stdin.on('end',()=>{
+ if (noRun) {
+  writeFileSync(${JSON.stringify(path.join(base, "closing"))}, 'ready');
+  setInterval(()=>{
+   if (!existsSync(${JSON.stringify(path.join(base, "allow-close"))})) return;
+   append({role:'assistant', content:[{type:'text',text:'shutdown flushed'}], stopReason:'stop'});
+   process.exit(0);
+  },10);
+ } else if (!busy || busy._destroyed) process.exit(0);
+});
 `);
 	await chmod(executable, 0o755);
 	const options: PersistentBackendOptions = { scope: { rootSessionId: "stable-root", projectCwd: project }, directory: path.join(base, "history"),
@@ -64,6 +81,42 @@ process.stdin.on('end',()=>{ if (!busy || busy._destroyed) process.exit(0); });
 	const launches = async () => { try { return (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line)); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; } };
 	return { base, project, options, backend, executable, launches };
 }
+
+for (const disposition of ["RPC_REJECT", "RPC_HANDLED"]) {
+	test(`initial prompt ${disposition} closes the child before releasing history and preserves recovery`, async t => {
+		const f = await fixture(t);
+		await f.backend.run(input, signal(), { executable: f.executable });
+		const other = (await PersistentSubagentBackend.open(f.options))!;
+		let completed = false;
+		const outcome = f.backend.recover({ ...input, latestRunId: "run-1", runId: "run-2", instruction: disposition }, AbortSignal.timeout(5000), { executable: f.executable, gracefulStopSeconds: 2 })
+			.then(value => { completed = true; return value; }, error => { completed = true; return error as Error; });
+		try {
+			await waitFor(async () => { try { await lstat(path.join(f.base, "closing")); return true; } catch { return false; } });
+			assert.equal(completed, false, "EOF alone must not release execution ownership");
+			await assert.rejects(other.delete(input.threadId), /ownership is still reserved/);
+			await writeFile(path.join(f.base, "allow-close"), "close");
+			const result = await outcome;
+			if (disposition === "RPC_REJECT") assert.equal((result as Error).message, "initial prompt denied");
+			else { assert.ok(!(result instanceof Error)); assert.match(result.text, /handled without starting an agent run/); }
+			const pid = (await f.launches())[1].pid;
+			assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+			const [saved] = await other.list();
+			assert.equal(saved.record?.status, disposition === "RPC_REJECT" ? "failed" : "completed");
+			assert.equal(saved.recoverable, true, saved.error);
+			await other.recover({ ...input, latestRunId: "run-2", runId: "run-3", instruction: "Continue explicitly" }, signal(), { executable: f.executable });
+			assert.match(JSON.stringify((await f.launches())[2].prior), /shutdown flushed/);
+		} finally {
+			await writeFile(path.join(f.base, "allow-close"), "close");
+			await other.shutdown();
+			await outcome;
+		}
+	});
+}
+
+test("handled prompt with an already active run still waits for its result", async t => {
+	const f = await fixture(t);
+	assert.equal((await f.backend.run({ ...input, instruction: "ACTIVE_HANDLED" }, signal(), { executable: f.executable })).text, "saved answer");
+});
 
 test("opt-in is exact and default off performs no storage or authorization work", async () => {
 	for (const flag of [undefined, "0", "true", ""]) {
