@@ -558,7 +558,7 @@ function mergeAgentOverrides(
 
 /** Curated, opt-in MCP recipes shown by Agent Studio. Project/global config can override them by name. */
 export const BUILTIN_MCP_SERVERS: Record<string, McpServerConfig> = {
-	playwright: { command: "npx", args: ["-y", "@playwright/mcp@0.0.80"] },
+	playwright: { command: "npx", args: ["-y", "@playwright/mcp@0.0.80", "--headless"] },
 	"ios-simulator": { command: "npx", args: ["-y", "ios-simulator-mcp@2.1.0"] },
 	"pen.dev": {
 		command: "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/out/mcp-server-darwin-arm64",

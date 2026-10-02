@@ -11,7 +11,7 @@ The package also includes an independent message-timing module: every user messa
 Install through pi's package manager — nothing is copied and the target project needs no node_modules of its own. **Install globally (the default):** the extension then loads in **every** project — including newly created **git worktrees**, which is exactly why global is the default (see [Worktrees](#worktrees) below):
 
 ```bash
-pi install git:github.com/luximetr/pi-agents@v0.4.0        # all projects (user scope)
+pi install git:github.com/luximetr/pi-agents@v0.4.1        # all projects (user scope)
 ```
 
 Agent definitions stay **per project**: commit `<git-root>/.pi-agents/` to the repo and every checkout — main branch, feature branch, worktree — gets the same agents. Global agents in `~/.pi/agent/pi-agents/` apply everywhere.
@@ -22,7 +22,7 @@ To track the latest commit on `main` instead of a pinned release:
 pi install git:github.com/luximetr/pi-agents
 ```
 
-To update an existing installation, run the same command with the desired ref (for example `@v0.4.0`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
+To update an existing installation, run the same command with the desired ref (for example `@v0.4.1`). This replaces the existing checkout; it does not install a second active copy. For a `main` installation, use `pi update --extensions` or run the unpinned `pi install` command again. After updating, `/reload` in a running pi session (or restart).
 
 Project agents and configs load only in projects pi considers **trusted** (the default unless the project carries trust-requiring resources such as `.pi/` or `.agents/skills` — then pi asks on first interactive start, or run `/trust`). Worktrees of an already-trusted repo are trusted automatically (they contain the same committed code); see [Worktrees](#worktrees). Manage with `pi list` / `pi remove`.
 
@@ -163,7 +163,7 @@ Use **Manage subagents** to add existing agents, remove assignments, or set each
 
 The MCP editor includes curated recipes for Playwright, iOS Simulator, pen.dev, DocHub, DesignHub, and TaskHub. They remain disconnected until assigned to an agent. Project/global `mcpServers` with the same name override the bundled recipe.
 
-- `playwright`: pinned `@playwright/mcp@0.0.80`.
+- `playwright`: pinned `@playwright/mcp@0.0.80`, headless by default.
 - `ios-simulator`: pinned `ios-simulator-mcp@2.1.0`; requires Xcode/iOS Simulator.
 - `pen.dev`: connects to the Apple-silicon MCP server inside `/Applications/Pen.app`; keep Pen running.
 Use **Manage MCP servers** in Studio to browse servers on the left and inspect the selected server’s details and settings on the right. Press Enter or Tab to focus its **Enable/Disable server**, **Manage credentials**, **Test connection**, and (for HTTP servers) **Edit endpoint URL** actions; use ↑↓ and Enter to choose an action. Escape returns to the server list, then to Studio. Space toggles enablement directly from the list. For directly editable agents, endpoint edits remain pending in Studio and are persisted as an agent-local definition by **Save agent.ts**. Credential entry and testing return to the same server’s settings, with test results shown inline. **Test connection** uses the edited endpoint, initializes an isolated MCP client, and discovers tools with a 10-second timeout; it does not enable the server, register tools, or change the active agent. Tests report missing credentials, connection failures, or the discovered tool count without exposing tokens.

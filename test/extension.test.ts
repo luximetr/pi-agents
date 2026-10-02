@@ -1190,7 +1190,7 @@ test("project Studio overrides preserve config and expose curated MCP recipes", 
 		assert.equal(alpha?.systemPromptPath, undefined);
 		assert.deepEqual(alpha?.savedOverrideSources, ["project"]);
 		assert.equal(discovered.config.mcpServerSources?.playwright, "builtin");
-		assert.deepEqual(discovered.config.mcpServers?.playwright.args, ["-y", "@playwright/mcp@0.0.80"]);
+		assert.deepEqual(discovered.config.mcpServers?.playwright.args, ["-y", "@playwright/mcp@0.0.80", "--headless"]);
 		assert.equal(discovered.config.mcpServers?.["pen.dev"].command, "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/out/mcp-server-darwin-arm64");
 		assert.deepEqual(discovered.config.mcpServers?.dochub, {
 			url: "https://dochub.phoenixchumphon.com/mcp",
