@@ -264,7 +264,7 @@ function normalizeAgent(
 	// In a linked worktree the gitignored `.env` lives in the main checkout, so
 	// fall back to it: the agent's own dir wins, the main checkout fills gaps.
 	const mcpServers = normalizeMcpServers(cfg.mcpServers);
-	const agentEnv = mergeEnv(loadEnvFile(dir), ...(envFallbackDirs ?? []).map((fallback) => loadEnvFile(fallback)));
+	const agentEnv = mergeEnv(...(envFallbackDirs ?? []).map((fallback) => loadEnvFile(fallback)), loadEnvFile(dir));
 
 	const customTools = normalizeCustomTools(cfg.customTools);
 

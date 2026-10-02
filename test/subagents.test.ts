@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { discoverAgents, findMainCheckoutRoot } from "../agents.ts";
+import { saveCredential } from "../credentials.ts";
 import extension, { matchesDeniedPath } from "../index.ts";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, displaySubagentModel, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
@@ -743,13 +744,14 @@ test("worktree discovery falls back to the main checkout's gitignored .env files
 		await writeFile(path.join(root, ".pi-agents", "dev", "agent.ts"), `
 			export default { name: "dev", description: "Dev", mcp: ["gh"] };
 		`);
+		await writeFile(path.join(root, ".pi-agents", "flat.ts"), 'export default { name: "flat", description: "Flat" };');
 		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({ mcpServers: { gh: { command: "npx", args: ["x"] } } }));
 		execFileSync("git", ["add", "."], { cwd: root });
 		execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: root });
 
 		// Secrets exist only in the main checkout.
-		await writeFile(path.join(root, ".pi-agents", ".env"), "PROJECT_SECRET=main\n");
-		await writeFile(path.join(root, ".pi-agents", "dev", ".env"), "GH_TOKEN=main-token\n");
+		await writeFile(path.join(root, ".pi-agents", ".env"), "PROJECT_SECRET=main\nPROJECT_FALLBACK=main-only\n");
+		await writeFile(path.join(root, ".pi-agents", "dev", ".env"), "GH_TOKEN=main-token\nAGENT_FALLBACK=main-only\nEMPTY_OVERRIDE=main\n");
 
 		const worktree = path.join(root, "wt");
 		execFileSync("git", ["worktree", "add", "-q", "-b", "wt-branch", worktree], { cwd: root });
@@ -766,9 +768,24 @@ test("worktree discovery falls back to the main checkout's gitignored .env files
 
 		// A .env created in the worktree itself wins per key over the main checkout.
 		await writeFile(path.join(worktree, ".pi-agents", ".env"), "PROJECT_SECRET=worktree\n");
+		const localAgentDir = path.join(worktree, ".pi-agents", "dev");
+		await writeFile(path.join(localAgentDir, ".env"), "GH_TOKEN=local-token\nLOCAL_ONLY=local-only\nEMPTY_OVERRIDE=\n");
 		const result2 = await discoverAgents(worktree);
 		assert.equal(result2.config.env?.PROJECT_SECRET, "worktree");
+		assert.equal(result2.config.env?.PROJECT_FALLBACK, "main-only");
 		assert.equal(result2.config.env?.GH_TOKEN, undefined); // agent-level, not project-level
+		assert.deepEqual(result2.agents.find(agent => agent.name === "dev")?.env, {
+			GH_TOKEN: "local-token", AGENT_FALLBACK: "main-only", LOCAL_ONLY: "local-only", EMPTY_OVERRIDE: "",
+		});
+		assert.equal(result2.agents.find(agent => agent.name === "flat")?.env?.PROJECT_SECRET, "worktree");
+		assert.equal(result2.agents.find(agent => agent.name === "flat")?.env?.PROJECT_FALLBACK, "main-only");
+
+		// Studio's immediate save must survive a subsequent full discovery/reload.
+		saveCredential(localAgentDir, "GH_TOKEN", "refreshed-local-token");
+		const refreshed = (await discoverAgents(worktree)).agents.find(agent => agent.name === "dev");
+		assert.equal(refreshed?.env?.GH_TOKEN, "refreshed-local-token");
+		assert.equal(refreshed?.env?.AGENT_FALLBACK, "main-only");
+		assert.equal((await discoverAgents(root)).agents.find(agent => agent.name === "dev")?.env?.GH_TOKEN, "main-token");
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
