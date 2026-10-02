@@ -1001,9 +1001,18 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		let savedPath: string;
+		let savedOverlayPath: string | undefined;
 		if (result.action === "save-source") {
 			savedPath = saveAgentSource(agent, result.override, result.mcpServers);
-			for (const scope of agent.savedOverrideSources ?? []) removeAgentOverride(ctx.cwd, scope, name);
+			if (agent.source === "project") {
+				// Global overlays belong to every project. Keep them untouched, and
+				// shadow them locally so rediscovery applies the draft we just saved.
+				if (loadConfig(ctx.cwd, { includeProject: false }).agentOverrides?.[name]) {
+					savedOverlayPath = saveAgentOverride(ctx.cwd, "project", name, result.override);
+				} else removeAgentOverride(ctx.cwd, "project", name);
+			} else {
+				for (const scope of agent.savedOverrideSources ?? []) removeAgentOverride(ctx.cwd, scope, name);
+			}
 		} else {
 			const scope = result.action === "save-global" ? "global" : "project";
 			savedPath = saveAgentOverride(ctx.cwd, scope, name, result.override);
@@ -1014,7 +1023,7 @@ export default function (pi: ExtensionAPI) {
 		config = discovered.config;
 		rebuildEffectiveAgents();
 		await reapplyAgent(name, ctx);
-		ctx.ui.notify(`Agent "${name}" saved to ${savedPath}`, "info");
+		ctx.ui.notify(`Agent "${name}" saved to ${savedPath}${savedOverlayPath ? `; project settings saved to ${savedOverlayPath} to preserve global overrides` : ""}`, "info");
 	}
 
 	async function createAgent(ctx: ExtensionContext): Promise<void> {

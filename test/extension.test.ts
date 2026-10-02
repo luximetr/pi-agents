@@ -1318,6 +1318,59 @@ test("source save failures leave existing prompts and definitions intact", async
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("project source saves preserve global overlays and other projects while applying the saved draft", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-source-scopes-"));
+	const previousHome = process.env.PI_CODING_AGENT_DIR;
+	try {
+		process.env.PI_CODING_AGENT_DIR = path.join(root, "home");
+		const globalDir = path.join(process.env.PI_CODING_AGENT_DIR, "pi-agents");
+		await mkdir(path.join(globalDir, "alpha"), { recursive: true });
+		const globalSource = path.join(globalDir, "alpha", "agent.ts");
+		await writeFile(globalSource, 'export default { name: "alpha", description: "global source", tools: ["read"], systemPrompt: "global source prompt" };');
+		const a = path.join(root, "a"), b = path.join(root, "b");
+		await makeAgent(a, "alpha", 'systemPrompt: "project source prompt",');
+		await mkdir(b);
+		saveAgentOverride(a, "global", "alpha", { description: "global overlay", systemPrompt: "global overlay prompt", color: "warning" });
+		saveAgentOverride(a, "project", "alpha", { description: "old project overlay" });
+		saveAgentOverride(b, "project", "alpha", { color: "success" });
+		const globalConfig = path.join(globalDir, "config.json");
+		const globalBefore = await readFile(globalConfig, "utf8");
+		const sourceBefore = await readFile(globalSource, "utf8");
+		const bBefore = await readFile(path.join(b, ".pi-agents", "config.json"), "utf8");
+		for (const revision of ["first", "second"]) {
+			const runtime = boot(a, {
+				flag: "alpha",
+				selectAnswers: ["Edit description", "Edit prompt (1 lines)", "Save agent.ts (project)"],
+				editorAnswers: [`${revision} draft`, `${revision} prompt`],
+				customActions: [component => component.handleInput("e")],
+			});
+			await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+			await runtime.commands.get("agent").handler("", runtime.ctx);
+			const saved = (await discoverAgents(a)).agents.find(agent => agent.name === "alpha")!;
+			assert.equal(saved.description, `${revision} draft`);
+			assert.equal(saved.systemPrompt, `${revision} prompt`);
+			assert.equal(saved.source, "project");
+			assert.match(await readFile(saved.filePath, "utf8"), new RegExp(`${revision} draft`));
+			assert.equal(await readFile(saved.sourceSystemPromptPath!, "utf8"), `${revision} prompt`);
+			const applied = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
+			assert.equal(applied.systemPrompt, `base\n\n${revision} prompt`);
+			assert.ok(runtime.notifications.some(entry => entry.level === "info" && /saved to.*preserve global overrides/.test(entry.message)));
+			assert.equal(await readFile(globalConfig, "utf8"), globalBefore);
+			assert.equal(await readFile(globalSource, "utf8"), sourceBefore);
+			assert.equal(await readFile(path.join(b, ".pi-agents", "config.json"), "utf8"), bBefore);
+			const other = (await discoverAgents(b)).agents.find(agent => agent.name === "alpha")!;
+			assert.equal(other.source, "global");
+			assert.equal(other.description, "global overlay");
+			assert.equal(other.systemPrompt, "global overlay prompt");
+			assert.equal(other.color, "success");
+		}
+	} finally {
+		if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousHome;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("direct legacy JSON saves migrate metadata and prompt to TypeScript", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-json-prompt-"));
 	try {
