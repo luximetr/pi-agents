@@ -1298,6 +1298,49 @@ test("source saves isolate flat TS/JS/MJS prompts and preserve folder and overla
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("MJS rediscovery and application observe successive saves with relative imports and async factories", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-mjs-reload-"));
+	try {
+		const dir = path.join(root, ".pi-agents");
+		await mkdir(path.join(dir, "lib"), { recursive: true });
+		await writeFile(path.join(dir, "lib", "values.mjs"), 'export const description = "imported description"; export const tools = ["read"];');
+		const filePath = path.join(dir, "editable.mjs");
+		await writeFile(filePath, `import { description, tools } from "./lib/values.mjs";
+import { fileURLToPath } from "node:url";
+export default { name: "editable", description, tools, systemPrompt: fileURLToPath(import.meta.url) };
+`);
+		const find = async (name: string) => (await discoverAgents(root)).agents.find(agent => agent.name === name)!;
+		let agent = await find("editable");
+		assert.equal(agent.description, "imported description");
+		assert.equal(agent.systemPrompt, filePath);
+		for (const revision of ["one", "two", "one"]) {
+			saveAgentSource(agent, { description: revision, systemPrompt: `${revision} prompt` });
+			agent = await find("editable");
+			assert.equal(agent.description, revision);
+			assert.equal(agent.systemPrompt, `${revision} prompt`);
+			assert.deepEqual(agent.tools, ["read"]);
+			assert.match(await readFile(filePath, "utf8"), /import.*\.\/lib\/values\.mjs/);
+			const runtime = boot(root, { flag: "editable" });
+			await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+			const applied = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
+			assert.equal(applied.systemPrompt, `base\n\n${revision} prompt`);
+		}
+		const factoryPath = path.join(dir, "factory.mjs");
+		for (const revision of ["one", "two"]) {
+			await writeFile(factoryPath, `import { description, tools } from "./lib/values.mjs";
+const suffix = await Promise.resolve(${JSON.stringify(revision)});
+export default async () => ({ name: "factory", description: description + suffix, tools });
+`);
+			const factory = await find("factory");
+			assert.equal(factory.description, `imported description${revision}`);
+			assert.deepEqual(factory.tools, ["read"]);
+			const before = await readFile(factoryPath, "utf8");
+			assert.throws(() => saveAgentSource(factory, { description: "unsafe rewrite" }), /not a static object/);
+			assert.equal(await readFile(factoryPath, "utf8"), before);
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("source save failures leave existing prompts and definitions intact", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-prompt-failure-"));
 	try {
