@@ -38,6 +38,7 @@ function boot(root: string, options?: {
 	const notifications: Array<{ message: string; level: string }> = [];
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	const statuses: string[] = [];
+	const lifecycleEvents: Array<{ channel: string; data: any }> = [];
 	let customComponent: any;
 	const tools = new Map<string, any>([
 		["read", { name: "read", description: "Read file contents from disk." }],
@@ -46,6 +47,7 @@ function boot(root: string, options?: {
 		["delegate", { name: "delegate", description: "Delegate work to a child agent." }],
 	]);
 	const pi: any = {
+		events: { emit: (channel: string, data: any) => lifecycleEvents.push({ channel, data }) },
 		on: (name: string, handler: any) => handlers.set(name, handler),
 		registerTool: (tool: any) => tools.set(tool.name, tool),
 		registerEntryRenderer: () => {},
@@ -94,7 +96,7 @@ function boot(root: string, options?: {
 			},
 		},
 	};
-	return { pi, handlers, commands, activeToolsets, notifications, entries, tools, statuses, getCustomComponent: () => customComponent, ctx };
+	return { pi, handlers, commands, activeToolsets, notifications, entries, tools, statuses, lifecycleEvents, getCustomComponent: () => customComponent, ctx };
 }
 
 test("background control exposes live and terminal status without consuming completion delivery", async () => {
@@ -155,6 +157,9 @@ test("background control exposes live and terminal status without consuming comp
 		for (const [task, terminalStatus] of [["complete", "completed"], ["fail", "failed"], ["stop", "interrupted"]]) {
 			const result = await runtime.tools.get("delegate").execute("delegate", { agent: "worker", task, background: true }, undefined, undefined, runtime.ctx);
 			const runId = result.details.runId;
+			assert.deepEqual(runtime.lifecycleEvents.at(-1), {
+				channel: "task:subagent:lifecycle", data: { runId, agent: "worker", status: "started" },
+			});
 			const initial = await readStatus(runId);
 			assert.equal(initial.status, "running");
 			assert.equal(initial.model, "test/model:high");
@@ -171,6 +176,10 @@ test("background control exposes live and terminal status without consuming comp
 			else await writeFile(path.join(root, `${task}.finish`), "");
 			await waitFor(async () => (await readStatus(runId)).status === terminalStatus);
 			const terminal = await readStatus(runId);
+			assert.deepEqual(runtime.lifecycleEvents.filter(event => event.data.runId === runId), [
+				{ channel: "task:subagent:lifecycle", data: { runId, agent: "worker", status: "started" } },
+				{ channel: "task:subagent:lifecycle", data: { runId, agent: "worker", status: terminalStatus === "interrupted" ? "aborted" : terminalStatus } },
+			]);
 			assert.ok(terminal.endedAt >= terminal.startedAt);
 			assert.equal(terminal.currentTool, undefined);
 			assert.equal(terminal.remainingMs, undefined);
@@ -181,7 +190,14 @@ test("background control exposes live and terminal status without consuming comp
 		await runtime.handlers.get("agent_settled")?.({}, runtime.ctx);
 		await waitFor(async () => deliveries.length === 1);
 		assert.equal(deliveries[0].details.runs.length, 3, "status checks leave every completion in the inbox");
+		const pending = await runtime.tools.get("delegate").execute("delegate", { agent: "worker", task: "shutdown", background: true }, undefined, undefined, runtime.ctx);
+		await waitFor(async () => (await readStatus(pending.details.runId)).currentTool === "read");
 		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		assert.deepEqual(runtime.lifecycleEvents.filter(event => event.data.runId === pending.details.runId), [
+			{ channel: "task:subagent:lifecycle", data: { runId: pending.details.runId, agent: "worker", status: "started" } },
+			{ channel: "task:subagent:lifecycle", data: { runId: pending.details.runId, agent: "worker", status: "aborted" } },
+		]);
+		assert.equal(runtime.lifecycleEvents.length, 8, "each run emits exactly one start and terminal event");
 		assert.deepEqual(JSON.parse((await control("list")).content[0].text), []);
 	} finally {
 		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);

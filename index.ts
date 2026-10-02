@@ -302,6 +302,11 @@ export default function (pi: ExtensionAPI) {
 	type BackgroundResult = { runId: string; agent: string; task: string; text: string };
 	const backgroundRuns = new Map<string, BackgroundRunState & { controller: AbortController; result?: string }>();
 	let sessionGeneration = 0;
+	// Orca observes this shared lifecycle channel to keep the pane working
+	// after the main agent settles. Use run IDs, not child process IDs.
+	const emitBackgroundLifecycle = (runId: string, agent: string, status: "started" | "completed" | "failed" | "aborted") => {
+		pi.events?.emit("task:subagent:lifecycle", { runId, agent, status });
+	};
 	const completionMessage = (results: BackgroundResult[]) => ({
 		customType: "pi-agents-completions",
 		content: results.map(result => `Background task completed\nRun: ${result.runId}\nAgent: ${result.agent}\nTask: ${result.task}\n\n${result.text}`).join("\n\n---\n\n"),
@@ -377,6 +382,7 @@ export default function (pi: ExtensionAPI) {
 				const startedAt = Date.now();
 				backgroundRuns.set(runId, { agent: agentName, task, controller, status: "running", model: selectedModel, startedAt,
 					deadlineAt: timeoutSeconds === undefined ? undefined : startedAt + timeoutSeconds * 1000 });
+				emitBackgroundLifecycle(runId, agentName, "started");
 			}
 			const executeRun = async (): Promise<{ content: { type: "text"; text: string }[]; details: DelegateStatsDetails }> => {
 			try {
@@ -525,6 +531,7 @@ export default function (pi: ExtensionAPI) {
 				run.status = result.details.status ?? "completed";
 				run.endedAt = Date.now();
 				run.result = result.content.map(item => item.text).join("\n");
+				emitBackgroundLifecycle(runId, agentName, run.status === "completed" ? "completed" : run.status === "interrupted" ? "aborted" : "failed");
 				inbox.push({ runId, agent: agentName, task, text: run.result });
 			}).catch(error => {
 				if (generation !== sessionGeneration) return;
@@ -532,6 +539,7 @@ export default function (pi: ExtensionAPI) {
 				run.status = "failed";
 				run.endedAt = Date.now();
 				run.result = String(error);
+				emitBackgroundLifecycle(runId, agentName, "failed");
 				inbox.push({ runId, agent: agentName, task, text: run.result });
 			});
 			return {
@@ -1218,7 +1226,10 @@ export default function (pi: ExtensionAPI) {
 		}
 		sessionGeneration++;
 		inbox.close();
-		for (const run of backgroundRuns.values()) run.controller.abort();
+		for (const [runId, run] of backgroundRuns) {
+			run.controller.abort();
+			if (run.status === "running") emitBackgroundLifecycle(runId, run.agent, "aborted");
+		}
 		backgroundRuns.clear();
 		inbox = createInbox();
 		observerContext = undefined;
