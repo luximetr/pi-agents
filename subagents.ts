@@ -8,6 +8,9 @@ import { StringDecoder } from "node:string_decoder";
 import { OBSERVER_ENV, RUN_ID_ENV } from "./subagent-observer.ts";
 import { SubagentTranscript, messageText, type TranscriptEntry } from "./subagent-transcript.ts";
 
+import { prepareSubagentWorkspace, type SubagentWorkspace, type SubagentWorkspaceInfo } from "./subagent-workspace.ts";
+export type { SubagentWorkspace, SubagentWorkspaceInfo } from "./subagent-workspace.ts";
+
 export const MAX_SUBAGENT_DEPTH = 4;
 
 /** Preserve a requested thinking suffix when usage reports only the actual provider/model. */
@@ -41,7 +44,7 @@ export type SubagentProgress =
 
 export type SubagentStopReason = "user" | "timeout" | "parent" | "session";
 
-export interface SubagentSnapshot {
+export interface SubagentSnapshot extends Partial<SubagentWorkspaceInfo> {
 	id: string;
 	parentRunId?: string;
 	agent: string;
@@ -83,6 +86,8 @@ export class SubagentStoppedError extends Error {
 }
 
 export interface RunSubagentOptions {
+	/** Fresh threads default to shared. Replies reuse the saved mode/directory; mode changes fail. */
+	workspace?: SubagentWorkspace;
 	onProgress?: (event: SubagentProgress) => void;
 	onHandle?: (handle: RunningSubagentHandle | undefined) => void;
 	/** Display-only observation, independent of model-visible delegate progress. */
@@ -108,6 +113,10 @@ export interface RunSubagentOptions {
 	resume?: boolean;
 	/** Override the private participant-session directory (primarily for tests). */
 	participantSessionDir?: string;
+	/** Backend authorization/workspace check, awaited under the participant lock before spawn. */
+	beforeLaunch?: (workspace: SubagentWorkspaceInfo) => Promise<void>;
+	/** Persistence hint only: finalized RPC events do not themselves prove file stability. */
+	onHistoryBoundary?: () => void;
 }
 
 let nextSubagentId = 1;
@@ -188,7 +197,11 @@ const SESSION_ENTRY_TYPES = new Set(["message", "model_change", "thinking_level_
 /** Pi's loader skips malformed JSONL lines, so validate private history before giving it to Pi. */
 async function validateParticipantSession(sessionFile: string): Promise<void> {
 	if (!existsSync(sessionFile)) return;
-	const bytes = await readFile(sessionFile);
+	validateParticipantSessionBytes(await readFile(sessionFile), sessionFile);
+}
+
+/** Strict parser shared by live replies and durable checkpoints; never use Pi's forgiving loader for validation. */
+export function validateParticipantSessionBytes(bytes: Buffer, sessionFile = "saved conversation"): void {
 	let content: string;
 	try { content = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
 	catch { throw new Error(`resumable participant session is not valid UTF-8: ${sessionFile}`); }
@@ -250,6 +263,29 @@ async function validateParticipantSession(sessionFile: string): Promise<void> {
 	}
 }
 
+/** Conservative recovery boundary: never restore pending tool calls or a header-only conversation. */
+export function validateRecoverableParticipantSession(bytes: Buffer): void {
+	validateParticipantSessionBytes(bytes);
+	const entries = bytes.toString("utf8").trimEnd().split("\n").map(line => JSON.parse(line));
+	const pending = new Set<string>();
+	let hasUser = false;
+	for (const entry of entries) {
+		const message = entry.type === "message" ? entry.message : undefined;
+		if (message?.role === "user") hasUser = true;
+		if (message?.role === "assistant") {
+			if (message.stopReason === "pending") throw new Error("History contains an unfinished assistant message; waiting for a safe checkpoint.");
+			for (const block of Array.isArray(message.content) ? message.content : []) {
+				if (block.type !== "toolCall") continue;
+				if (typeof block.id !== "string" || !block.id || pending.has(block.id)) throw new Error("History contains invalid tool-call identities.");
+				pending.add(block.id);
+			}
+		}
+		if (message?.role === "toolResult") pending.delete(message.toolCallId);
+	}
+	if (!hasUser) throw new Error("No saved user conversation yet; recovery cannot start fresh.");
+	if (pending.size) throw new Error("History has unresolved tool calls; retaining the previous safe checkpoint. Inspect workspace effects before recovery.");
+}
+
 /** Run an isolated child pi session, forwarding live RPC progress and exposing a controllable handle. */
 function runSubagentProcess(
 	agentName: string,
@@ -257,7 +293,7 @@ function runSubagentProcess(
 	cwd: string,
 	signal: AbortSignal,
 	options: RunSubagentOptions = {},
-	timing?: { startedAt: number; deadlineAt?: number; depth?: number },
+	timing?: { startedAt: number; deadlineAt?: number; depth?: number; workspaceInfo?: SubagentWorkspaceInfo },
 ): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const depth = timing?.depth ?? Number(process.env.PI_AGENTS_SUBAGENT_DEPTH ?? "0");
@@ -305,6 +341,7 @@ function runSubagentProcess(
 		const startedAt = timing?.startedAt ?? processStartedAt;
 		const deadlineAt = timing?.deadlineAt ?? (timeoutSeconds === undefined ? undefined : processStartedAt + timeoutSeconds * 1000);
 		const state: SubagentSnapshot = {
+			...timing?.workspaceInfo,
 			id,
 			parentRunId: options.parentRunId,
 			agent: agentName,
@@ -418,6 +455,9 @@ function runSubagentProcess(
 			state.lastActivityAt = Date.now();
 			observationDirty = true;
 			transcript.consume(event);
+			if (["message_end", "turn_end", "compaction_end", "agent_settled"].includes(String(event.type))) {
+				try { options.onHistoryBoundary?.(); } catch { /* Backend owns asynchronous checkpoint errors. */ }
+			}
 			switch (event.type) {
 				case "agent_start":
 					state.phase = "agent running";
@@ -568,14 +608,16 @@ function runSubagentProcess(
 		}
 		if (signal.aborted) parentAbort();
 		signal.addEventListener("abort", parentAbort, { once: true });
-		child.on("error", error => finish(() => {
-			state.status = "failed";
-			state.phase = "failed to launch";
-			transcript.add("event", error.message);
-			reject(error);
-		}));
+		// An error (e.g. failed kill) does not prove process exit. Only close releases
+		// history ownership. Node emits close after a failed spawn as well.
+		let processError: Error | undefined;
+		child.on("error", error => { processError = error; transcript.add("event", error.message); });
 		child.on("close", (code) => finish(() => {
-			if (state.stopReason) {
+			if (processError) {
+				state.status = "failed";
+				state.phase = "process failed";
+				reject(processError);
+			} else if (state.stopReason) {
 				state.status = "failed";
 				reject(new SubagentStoppedError(state.stopReason, handle.snapshot()));
 			} else if (assistantError) {
@@ -617,6 +659,7 @@ export async function runSubagent(
 	const delegationDepth = Number(process.env.PI_AGENTS_SUBAGENT_DEPTH ?? "0");
 	const state: SubagentSnapshot = {
 		id, parentRunId: options.parentRunId, agent: agentName, task,
+		workspace: options.workspace,
 		model: options.model?.trim() || undefined,
 		startedAt, lastActivityAt: startedAt, deadlineAt,
 		status: "running", phase: "preparing task thread",
@@ -677,6 +720,7 @@ export async function runSubagent(
 	let lock: ParticipantLock | undefined;
 	let spawned = false;
 	try {
+		if (delegationDepth >= MAX_SUBAGENT_DEPTH) throw new Error(`maximum subagent depth (${MAX_SUBAGENT_DEPTH}) reached`);
 		const key = participantKey(options.rootSessionId ?? "", options.threadId!);
 		const sessionDir = options.participantSessionDir ?? path.join(getAgentDir(), "pi-agents-subagent-sessions");
 		// Never fall back to --no-session, which would silently discard context.
@@ -691,20 +735,27 @@ export async function runSubagent(
 		if (options.resume && !existsSync(sessionFile)) throw new Error("Thread history is missing; cannot reply without its context.");
 		await validateParticipantSession(sessionFile);
 		if (requestedStop) throw finishQueued(requestedStop);
+		const historyCwd: string | false = existsSync(sessionFile) ? JSON.parse((await readFile(sessionFile, "utf8")).split("\n")[0]).cwd : false;
+		const workspaceInfo = await prepareSubagentWorkspace(cwd, path.join(sessionDir, `${key}.workspace.json`), options.workspace, historyCwd, waitController.signal);
+		Object.assign(state, workspaceInfo);
+		await options.beforeLaunch?.(workspaceInfo);
+		publish();
+		if (requestedStop) throw finishQueued(requestedStop);
 		if (signal.aborted) throw finishQueued("parent");
 		if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw finishQueued("timeout");
 
 		if (deadlineTimer) clearTimeout(deadlineTimer);
 		signal.removeEventListener("abort", parentAbort);
-		return await runSubagentProcess(agentName, task, cwd, signal, {
+		return await runSubagentProcess(agentName, task, workspaceInfo.workspaceCwd, signal, {
 			...options,
 			id,
 			onHandle: value => {
 				if (value) { childHandle = value; spawned = true; }
 			},
-		}, { startedAt, deadlineAt, depth: delegationDepth });
+		}, { startedAt, deadlineAt, depth: delegationDepth, workspaceInfo });
 	} catch (error) {
 		if (error instanceof SubagentStoppedError) throw error;
+		if (!spawned && requestedStop) throw finishQueued(requestedStop);
 		if (error instanceof ParticipantWaitError) throw finishQueued(error.reason === "timeout" ? "timeout" : requestedStop ?? "parent");
 		if (!spawned) failQueued(error);
 		throw error;

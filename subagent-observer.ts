@@ -10,6 +10,32 @@ export const RUN_ID_ENV = "PI_AGENTS_RUN_ID";
 const MAX_FRAME = 2_000_000;
 const MAX_RETAINED_TRANSCRIPTS = 100;
 
+/** Normalized display metadata. Producers publish workspace, workspaceCwd,
+ * worktreePath, workspaceBaseCommit and optional workspaceBranch on snapshots.
+ * workspaceBranch: null means detached HEAD; undefined means not reported.
+ * Retain these fields on final snapshots and thread replies; never infer mode.
+ */
+export interface SubagentWorkspaceMetadata {
+	mode: "shared" | "worktree";
+	cwd?: string;
+	worktreePath?: string;
+	branch?: string | null;
+	baseCommit?: string;
+}
+
+/** Tolerate older producers and malformed optional socket metadata. */
+export function getSubagentWorkspace(snapshot: SubagentSnapshot): SubagentWorkspaceMetadata | undefined {
+	const data = snapshot as unknown as Record<string, unknown>;
+	if (data.workspace !== "shared" && data.workspace !== "worktree") return undefined;
+	return {
+		mode: data.workspace,
+		cwd: typeof data.workspaceCwd === "string" ? data.workspaceCwd : undefined,
+		worktreePath: typeof data.worktreePath === "string" ? data.worktreePath : undefined,
+		branch: typeof data.workspaceBranch === "string" || data.workspaceBranch === null ? data.workspaceBranch : undefined,
+		baseCommit: typeof data.workspaceBaseCommit === "string" ? data.workspaceBaseCommit : undefined,
+	};
+}
+
 export function isActiveRun(snapshot: SubagentSnapshot): boolean {
 	return snapshot.status === "running" || snapshot.status === "stopping";
 }

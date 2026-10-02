@@ -1,3 +1,4 @@
+import "./subagent-workspace.test.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
@@ -38,6 +39,7 @@ test("end to end: active agent blocks denied file-tool calls", async () => {
 			on: (name: string, handler: any) => handlers.set(name, handler),
 			registerTool: (tool: any) => registered.push(tool),
 			registerEntryRenderer: () => {},
+			registerMessageRenderer: () => {},
 			registerFlag: () => {}, registerShortcut: () => {}, registerCommand: () => {},
 			getFlag: () => undefined, appendEntry: () => {},
 			getAllTools: () => [{ name: "read" }, { name: "bash" }, ...registered],
@@ -406,12 +408,15 @@ test("running handle can steer and manually stop a subagent", async () => {
 			});
 		`);
 		await chmod(fakePi, 0o755);
+		let started!: () => void;
+		const ready = new Promise<void>(resolve => { started = resolve; });
 		const running = runSubagent("worker", "wait", root, noAbort, {
 			executable: fakePi,
 			gracefulStopSeconds: 0.1,
 			onHandle: (value) => { if (value) handle = value; },
+			onProgress: event => { if (event.type === "started") started(); },
 		});
-		await new Promise((resolve) => setTimeout(resolve, 30));
+		await Promise.race([ready, running]);
 		assert.ok(handle);
 		assert.equal(handle.steer("try another way"), true);
 		await new Promise((resolve) => setTimeout(resolve, 30));
@@ -490,6 +495,7 @@ function bootExtension(root: string) {
 		on: (name: string, handler: any) => handlers.set(name, handler),
 		registerTool: (tool: any) => registered.push(tool),
 		registerEntryRenderer: () => {},
+		registerMessageRenderer: () => {},
 		registerFlag: () => {}, registerShortcut: () => {}, registerCommand: () => {},
 		getFlag: () => undefined, appendEntry: () => {},
 		getThinkingLevel: () => "max",

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -25,6 +26,7 @@ async function makeAgent(root: string, name: string, extra = "") {
 function boot(root: string, options?: {
 	flag?: string;
 	sessionFile?: string;
+	sessionId?: string;
 	trusted?: boolean;
 	mode?: string;
 	branchEntries?: any[];
@@ -35,6 +37,7 @@ function boot(root: string, options?: {
 }) {
 	const handlers = new Map<string, (event: any, ctx: any) => any>();
 	const commands = new Map<string, any>();
+	const messageRenderers = new Map<string, any>();
 	const activeToolsets: string[][] = [];
 	const notifications: Array<{ message: string; level: string }> = [];
 	const entries: Array<{ customType: string; data: unknown }> = [];
@@ -52,6 +55,7 @@ function boot(root: string, options?: {
 		on: (name: string, handler: any) => handlers.set(name, handler),
 		registerTool: (tool: any) => tools.set(tool.name, tool),
 		registerEntryRenderer: () => {},
+		registerMessageRenderer: (type: string, renderer: any) => messageRenderers.set(type, renderer),
 		registerFlag: () => {},
 		registerShortcut: () => {},
 		registerCommand: (name: string, command: any) => commands.set(name, command),
@@ -71,6 +75,7 @@ function boot(root: string, options?: {
 		isProjectTrusted: () => options?.trusted ?? true,
 		sessionManager: {
 			getSessionFile: () => options?.sessionFile,
+			getSessionId: () => options?.sessionId,
 			getBranch: () => options?.branchEntries ?? [],
 			getEntries: () => options?.branchEntries ?? [],
 		},
@@ -97,8 +102,214 @@ function boot(root: string, options?: {
 			},
 		},
 	};
-	return { pi, handlers, commands, activeToolsets, notifications, entries, tools, statuses, lifecycleEvents, getCustomComponent: () => customComponent, ctx };
+	return { pi, handlers, commands, messageRenderers, activeToolsets, notifications, entries, tools, statuses, lifecycleEvents, getCustomComponent: () => customComponent, ctx };
 }
+
+test("opt-in task history is wired through delegation, shutdown, reload, explicit user/agent recovery and deletion", async () => {
+	const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-history-extension-")));
+	const root = path.join(base, "project");
+	const executable = path.join(base, "fake-pi.mjs");
+	const log = path.join(base, "launches.jsonl");
+	const environment = ["PI_AGENTS_TASK_HISTORY", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_BIN", "PI_AGENTS_ROOT_SESSION_ID"];
+	const previous = Object.fromEntries(environment.map(key => [key, process.env[key]]));
+	let runtime: ReturnType<typeof boot> | undefined;
+	const start = async (sessionId?: string) => {
+		const value = boot(root, { sessionId });
+		value.pi.sendMessage = () => {};
+		value.ctx.isIdle = () => true;
+		value.ctx.hasPendingMessages = () => false;
+		await value.handlers.get("session_start")?.({ reason: "startup" }, value.ctx);
+		return value;
+	};
+	const control = (action: string, runId?: string, message?: string) => runtime!.tools.get("subagent_control").execute("control", { action, runId, message }, undefined, undefined, runtime!.ctx);
+	const list = async () => JSON.parse((await control("list")).content[0].text);
+	const waitFor = async (predicate: () => Promise<boolean>) => {
+		const end = Date.now() + 10000;
+		while (!await predicate()) { assert.ok(Date.now() < end, "history integration timed out"); await new Promise(resolve => setTimeout(resolve, 20)); }
+	};
+	try {
+		process.env.PI_AGENTS_TASK_HISTORY = "1";
+		process.env.PI_CODING_AGENT_DIR = path.join(base, "pi-home");
+		process.env.PI_CODING_AGENT_BIN = executable;
+		delete process.env.PI_AGENTS_ROOT_SESSION_ID;
+		await makeAgent(root, "lead", 'default: true, subagents: ["worker"]');
+		await makeAgent(root, "other", 'subagents: ["worker"]');
+		await makeAgent(root, "worker");
+		execFileSync("git", ["-C", root, "init"], { stdio: "pipe" });
+		execFileSync("git", ["-C", root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial"], { stdio: "pipe" });
+		await writeFile(executable, `#!/usr/bin/env node
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+const file = process.argv[process.argv.indexOf('--session')+1];
+const prior = readFileSync(file,'utf8').trim().split('\\n').map(JSON.parse);
+let parentId = prior.length > 1 ? prior.at(-1).id : null;
+let timer, buffer='';
+const emit = event => console.log(JSON.stringify(event));
+process.stdin.on('data',chunk=>{
+ buffer+=chunk; let n;
+ while((n=buffer.indexOf('\\n'))>=0){
+  const command=JSON.parse(buffer.slice(0,n)); buffer=buffer.slice(n+1);
+  if(command.type==='abort'){clearInterval(timer); emit({type:'agent_settled'}); continue;}
+  if(command.type!=='prompt')continue;
+  appendFileSync(${JSON.stringify(log)},JSON.stringify({task:command.message,file,cwd:process.cwd(),prior})+'\\n');
+  for(const message of [{role:'user',content:command.message},{role:'assistant',content:[{type:'text',text:'saved result'}],stopReason:'stop'}]){
+   const id=randomUUID(); appendFileSync(file,JSON.stringify({type:'message',id,parentId,timestamp:new Date().toISOString(),message:{...message,timestamp:Date.now()}})+'\\n'); parentId=id;
+  }
+  writeFileSync('retained-work','keep');
+  emit({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'saved result'}],stopReason:'stop'}});
+  if(command.message==='HOLD')timer=setInterval(()=>{},1000);else emit({type:'agent_settled'});
+ }
+});
+process.stdin.on('end',()=>process.exit(0));
+`);
+		await chmod(executable, 0o755);
+		runtime = await start("stable-session");
+		const first = await runtime.tools.get("delegate").execute("delegate", { agent: "worker", task: "original", workspace: "worktree" }, undefined, undefined, runtime.ctx);
+		assert.equal(first.details.status, "completed");
+		const worktree = first.details.workspaceCwd;
+		const held = await runtime.tools.get("delegate").execute("hold", { agent: "worker", task: "HOLD", background: true }, undefined, undefined, runtime.ctx);
+		await waitFor(async () => (await list()).some((row: any) => row.runId === held.details.runId && row.savedAt));
+		await runtime.handlers.get("session_shutdown")?.({ reason: "reload" }, runtime.ctx);
+		runtime = await start("stable-session");
+		let rows = await list();
+		assert.equal(rows.find((row: any) => row.runId === first.details.runId).status, "completed");
+		assert.equal(rows.find((row: any) => row.runId === held.details.runId).status, "interrupted");
+		assert.equal(rows.find((row: any) => row.runId === held.details.runId).recoverable, true);
+		const restoredCard = runtime.tools.get("delegate").renderResult(held, { expanded: false }, runtime.ctx.ui.theme).render(100).join("\n");
+		assert.match(restoredCard, /worker interrupted/);
+		assert.match(restoredCard, /Result preview was not retained/);
+		assert.doesNotMatch(restoredCard, /worker running|Started background subagent/);
+		const completedCard = runtime.tools.get("delegate").renderResult({ ...first, details: { ...first.details, status: "running" } }, { expanded: false }, runtime.ctx.ui.theme).render(100).join("\n");
+		assert.match(completedCard, /worker completed/);
+		assert.match(completedCard, /Result preview was not retained/);
+		const unknownCard = runtime.tools.get("delegate").renderResult({ ...held, details: { ...held.details, runId: "not-retained" } }, { expanded: false }, runtime.ctx.ui.theme).render(100).join("\n");
+		assert.match(unknownCard, /worker unavailable/);
+		assert.doesNotMatch(unknownCard, /worker running/);
+		assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 2, "startup never re-executes tasks");
+		await assert.rejects(control("recover", held.details.runId, " "), /fresh/);
+		await runtime.commands.get("agent").handler("other", runtime.ctx);
+		await assert.rejects(control("recover", held.details.runId, "continue"), /another parent/);
+		await runtime.commands.get("agent").handler("lead", runtime.ctx);
+		await runtime.commands.get("task-history").handler(`recover ${held.details.runId} inspect current effects before continuing`, runtime.ctx);
+		await waitFor(async () => (await list()).some((row: any) => row.threadId === held.details.threadId && row.runId !== held.details.runId && row.status === "completed"));
+		const launches = (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+		assert.match(launches[2].task, /was interrupted/);
+		assert.match(launches[2].task, /inspect current effects before continuing/);
+		assert.ok(launches[2].prior.some((entry: any) => entry.message?.content === "HOLD"));
+		await runtime.commands.get("task-history").handler(`delete ${first.details.runId}`, runtime.ctx);
+		assert.equal(await readFile(path.join(worktree, "retained-work"), "utf8"), "keep");
+		rows = await list();
+		assert.ok(!rows.some((row: any) => row.runId === first.details.runId));
+		await runtime.commands.get("task-history").handler("prune 0", runtime.ctx);
+		assert.deepEqual(await list(), []);
+		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		runtime = await start("other-session");
+		assert.deepEqual(await list(), []);
+		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		runtime = await start();
+		assert.ok(runtime.notifications.some(item => /stable root session ID/.test(item.message)));
+		await assert.rejects(runtime.tools.get("delegate").execute("invalid-scope", { agent: "worker", task: "do not silently run" }, undefined, undefined, runtime.ctx), /no temporary fallback/);
+	} finally {
+		await runtime?.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		for (const key of environment) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
+		await rm(base, { recursive: true, force: true });
+	}
+});
+
+test("delegate workspace schema, execution, results, completions and replies preserve per-call isolation", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-workspace-tool-"));
+	const repo = path.join(root, "repo");
+	const executable = path.join(root, "fake-pi.mjs");
+	const previousExecutable = process.env.PI_CODING_AGENT_BIN;
+	const runtime = boot(repo);
+	const completions: any[] = [];
+	runtime.pi.sendMessage = (message: any) => completions.push(message);
+	runtime.ctx.isIdle = () => true;
+	runtime.ctx.hasPendingMessages = () => false;
+	const control = (action: string, runId: string, message?: string) => runtime.tools.get("subagent_control").execute("control", { action, runId, message }, undefined, undefined, runtime.ctx);
+	const waitFor = async (predicate: () => Promise<boolean> | boolean) => {
+		const deadline = Date.now() + 10000;
+		while (!await predicate()) {
+			assert.ok(Date.now() < deadline, "workspace task did not complete");
+			await new Promise(resolve => setTimeout(resolve, 20));
+		}
+	};
+	let retainedPath: string | undefined;
+	try {
+		await makeAgent(repo, "lead", 'default: true, subagents: ["worker"],');
+		await makeAgent(repo, "worker");
+		const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+		git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test");
+		await writeFile(path.join(repo, "source"), "committed");
+		git("add", "."); git("commit", "-m", "initial");
+		const base = git("rev-parse", "HEAD");
+		await writeFile(path.join(repo, "source"), "parent dirty");
+		await writeFile(executable, `#!/usr/bin/env node
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+const session = process.argv[process.argv.indexOf('--session') + 1];
+if (!existsSync(session)) writeFileSync(session, JSON.stringify({type:'session', version:3, id:'test', cwd:process.cwd(), timestamp:new Date().toISOString()}) + '\\n');
+process.stdin.once('data', () => {
+ const previous = existsSync('change') ? readFileSync('change', 'utf8') : 'none';
+ writeFileSync('change', 'retained');
+ console.log(JSON.stringify({type:'agent_start'}));
+ console.log(JSON.stringify({type:'message_end', message:{content:[{type:'text', text:JSON.stringify({cwd:process.cwd(), source:readFileSync('source', 'utf8'), previous})}]}}));
+ console.log(JSON.stringify({type:'agent_settled'}));
+});
+`);
+		await chmod(executable, 0o755);
+		process.env.PI_CODING_AGENT_BIN = executable;
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		const tool = runtime.tools.get("delegate");
+		assert.deepEqual(tool.parameters.properties.workspace.anyOf.map((item: any) => item.const), ["shared", "worktree"]);
+		assert.ok(!tool.parameters.required.includes("workspace"));
+		assert.match(tool.description, /shared \(default\)/);
+		const delegate = (workspace?: string, background = false) => tool.execute("delegate", { agent: "worker", task: "inspect", workspace, background }, undefined, undefined, runtime.ctx);
+		await assert.rejects(delegate("invalid"), /workspace must be/);
+		const shared = await delegate();
+		assert.equal(shared.details.workspace, "shared");
+		assert.match(shared.content[0].text, /parent dirty/);
+		assert.ok(shared.details.workspaceCwd);
+		const foreground = await delegate("worktree");
+		assert.equal(foreground.details.workspace, "worktree");
+		assert.equal(foreground.details.workspaceBranch, null);
+		assert.equal(foreground.details.workspaceBaseCommit, base);
+		assert.match(foreground.content[0].text, /committed/);
+		assert.doesNotMatch(foreground.content[0].text, /parent dirty/);
+		retainedPath = foreground.details.worktreePath;
+		assert.ok(retainedPath);
+		const foregroundReply = await control("reply", foreground.details.runId, "continue");
+		assert.equal(foregroundReply.details.workspaceCwd, foreground.details.workspaceCwd);
+		const background = await delegate("worktree", true);
+		assert.equal(background.details.workspace, "worktree");
+		assert.equal(background.details.workspaceCwd, undefined, "creation is asynchronous, not falsely reported as shared cwd");
+		await waitFor(async () => JSON.parse((await control("status", background.details.runId)).content[0].text).status === "completed");
+		const result = await control("result", background.details.runId);
+		assert.equal(result.details.workspace, "worktree");
+		assert.notEqual(result.details.worktreePath, retainedPath);
+		const reply = await control("reply", background.details.runId, "continue");
+		assert.equal(reply.details.workspaceCwd, result.details.workspaceCwd);
+		await waitFor(async () => JSON.parse((await control("status", reply.details.runId)).content[0].text).status === "completed");
+		const replied = await control("result", reply.details.runId);
+		assert.equal(replied.details.worktreePath, result.details.worktreePath);
+		assert.match(replied.content[0].text, /retained/);
+		await waitFor(() => completions.some(message => message.details.results.some((value: any) => value.runId === reply.details.runId)));
+		const completion = completions.flatMap(message => message.details.results).find(value => value.runId === reply.details.runId);
+		assert.equal(completion.workspaceCwd, result.details.workspaceCwd);
+		assert.equal(completion.workspaceBaseCommit, base);
+		runtime.ctx.cwd = root;
+		const failed = await delegate("worktree");
+		assert.equal(failed.details.status, "failed");
+		assert.equal(failed.details.workspace, "worktree");
+		assert.equal(failed.details.workspaceCwd, undefined);
+		assert.match(failed.content[0].text, /Cannot create subagent worktree/);
+	} finally {
+		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		if (previousExecutable === undefined) delete process.env.PI_CODING_AGENT_BIN;
+		else process.env.PI_CODING_AGENT_BIN = previousExecutable;
+		try { if (retainedPath) assert.equal(await readFile(path.join(retainedPath, "change"), "utf8"), "retained"); }
+		finally { await rm(root, { recursive: true, force: true }); }
+	}
+});
 
 test("task threads: parallel isolation, replies, stale/busy guards, ownership, and cleanup", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-thread-e2e-"));
@@ -264,6 +475,16 @@ test("background control exposes live and terminal status without consuming comp
 		for (const [task, terminalStatus] of [["complete", "completed"], ["fail", "failed"], ["stop", "interrupted"]]) {
 			const result = await runtime.tools.get("delegate").execute("delegate", { agent: "worker", task, background: true }, undefined, undefined, runtime.ctx);
 			const runId = result.details.runId;
+			const original = JSON.stringify(result);
+			let redraws = 0;
+			let card = "";
+			const renderCard = () => {
+				card = runtime.tools.get("delegate").renderResult(result, { expanded: false }, runtime.ctx.ui.theme, {
+					invalidate: () => { redraws++; renderCard(); },
+				}).render(100).join("\n");
+			};
+			renderCard();
+			assert.match(card, /worker running/);
 			assert.deepEqual(runtime.lifecycleEvents.at(-1), {
 				channel: "task:subagent:lifecycle", data: { runId, agent: "worker", status: "started" },
 			});
@@ -283,6 +504,12 @@ test("background control exposes live and terminal status without consuming comp
 			else await writeFile(path.join(root, `${task}.finish`), "");
 			await waitFor(async () => (await readStatus(runId)).status === terminalStatus);
 			const terminal = await readStatus(runId);
+			assert.equal(redraws, 1, "completion invalidates the original row even while main flow is busy");
+			assert.match(card, new RegExp(`worker ${terminalStatus === "interrupted" ? "stopped" : terminalStatus}`));
+			assert.doesNotMatch(card, /worker running|Started background subagent/);
+			assert.equal(JSON.stringify(result), original, "UI updates do not mutate the model's tool acknowledgement");
+			renderCard();
+			assert.equal(redraws, 1);
 			assert.deepEqual(runtime.lifecycleEvents.filter(event => event.data.runId === runId), [
 				{ channel: "task:subagent:lifecycle", data: { runId, agent: "worker", status: "started" } },
 				{ channel: "task:subagent:lifecycle", data: { runId, agent: "worker", status: terminalStatus === "interrupted" ? "aborted" : terminalStatus } },
@@ -297,6 +524,21 @@ test("background control exposes live and terminal status without consuming comp
 		await runtime.handlers.get("agent_settled")?.({}, runtime.ctx);
 		await waitFor(async () => deliveries.length === 1);
 		assert.equal(deliveries[0].details.runs.length, 3, "status checks leave every completion in the inbox");
+		assert.match(deliveries[0].content, /worker-result/);
+		assert.match(deliveries[0].content, /Background task failed/);
+		assert.equal(deliveries[0].display, true);
+		const renderCompletion = runtime.messageRenderers.get("pi-agents-completions");
+		for (const expanded of [false, true]) {
+			const rendered = renderCompletion(deliveries[0], { expanded }, runtime.ctx.ui.theme).render(100).join("\n");
+			assert.match(rendered, /Background task results/);
+			for (const status of ["completed", "failed", "stopped"]) assert.match(rendered, new RegExp(`worker ${status}`));
+			assert.match(rendered, /worker-result/);
+			assert.doesNotMatch(rendered, /\[pi-agents-completions\]/);
+		}
+		for (const details of [{ runs: ["old"] }, { results: [{ runId: "old", workspaceCwd: "/project" }] }]) {
+			const legacy = renderCompletion({ content: "Legacy completion", details }, { expanded: false }, runtime.ctx.ui.theme);
+			assert.match(legacy.render(40).join("\n"), /Legacy completion/);
+		}
 		const pending = await runtime.tools.get("delegate").execute("delegate", { agent: "worker", task: "shutdown", background: true }, undefined, undefined, runtime.ctx);
 		await waitFor(async () => (await readStatus(pending.details.runId)).currentTool === "read");
 		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);

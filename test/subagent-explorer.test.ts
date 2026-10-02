@@ -6,8 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { SubagentObserver, isActiveRun, newRunId } from "../subagent-observer.ts";
-import { buildRunTree, showSubagentInspector } from "../subagent-explorer.ts";
+import { SubagentObserver, getSubagentWorkspace, isActiveRun, newRunId } from "../subagent-observer.ts";
+import { buildRunTree, showSubagentInspector, workspaceDetails } from "../subagent-explorer.ts";
 import { MAX_TRANSCRIPT_CHARS, SubagentTranscript } from "../subagent-transcript.ts";
 import { SubagentStoppedError, runSubagent, type RunningSubagentHandle, type SubagentSnapshot } from "../subagents.ts";
 
@@ -29,6 +29,37 @@ function handleFor(state: SubagentSnapshot, publish: (state: SubagentSnapshot) =
 		steer(message) { state.partialText = message; publish({ ...state }); return true; },
 	};
 }
+
+test("optional workspace metadata distinguishes unknown, shared and detached worktrees safely", () => {
+	const run = snapshot("workspace");
+	assert.equal(getSubagentWorkspace(run), undefined);
+	assert.deepEqual(workspaceDetails(run), ["Workspace: not reported"]);
+	for (const workspace of [null, "invalid", { mode: "worktree" }]) {
+		assert.equal(getSubagentWorkspace(Object.assign(run, { workspace })), undefined);
+	}
+	Object.assign(run, { workspace: "shared", workspaceCwd: 123, workspaceBranch: {} });
+	assert.deepEqual(workspaceDetails(run), ["Workspace: shared", "Cwd: not reported", "Branch: not reported"]);
+	Object.assign(run, { workspace: "worktree", workspaceCwd: "/tmp/中文\n\x1b[31mworker\x1b[0m", workspaceBranch: null, workspaceBaseCommit: "abc123" });
+	assert.deepEqual(workspaceDetails(run), ["Workspace: worktree", "Cwd: /tmp/中文\\nworker", "Branch: detached HEAD", "Base commit: abc123", "Review/apply manually; completion does not merge changes."]);
+});
+
+test("workspace metadata survives remote observation, completion and transcript eviction", async () => {
+	const root = new SubagentObserver();
+	const remote = new SubagentObserver(await root.start());
+	try {
+		await remote.start();
+		const workspace = { workspace: "worktree", workspaceCwd: "/tmp/task/src", worktreePath: "/tmp/task", workspaceBranch: "task/worker", workspaceBaseCommit: "abc123" };
+		remote.publish(Object.assign(snapshot("isolated"), { ...workspace, status: "finished" as const, endedAt: 1,
+			transcript: [{ id: "answer", kind: "assistant" as const, text: "done" }] }));
+		await until(() => root.handles().length === 1);
+		for (let i = 0; i < 100; i++) root.publish({ ...snapshot(`completed-${i}`), status: "finished", endedAt: i + 2,
+			transcript: [{ id: "answer", kind: "assistant", text: "done" }] });
+		const retained = root.handles().find(handle => handle.id === "isolated")!.snapshot();
+		assert.equal(retained.transcriptTruncated, true);
+		assert.deepEqual(getSubagentWorkspace(retained), { mode: "worktree", cwd: "/tmp/task/src", worktreePath: "/tmp/task", branch: "task/worker", baseCommit: "abc123" });
+		assert.ok(workspaceDetails(retained).includes("Worktree: /tmp/task"));
+	} finally { await remote.shutdown(0); await root.shutdown(0); }
+});
 
 test("transcript assembles streaming messages, correlates parallel tools and replaces cumulative output", () => {
 	const transcript = new SubagentTranscript("task");
@@ -184,6 +215,7 @@ test("explorer supports bounded wide/narrow layouts, drill-down/back, scrolling 
 	const parent = snapshot("parent");
 	const child = snapshot("child", "parent");
 	parent.task = "First prompt line\nSecond prompt line";
+	Object.assign(parent, { workspace: "worktree", workspaceCwd: "/tmp/中文/task", workspaceBranch: "task/worker", workspaceBaseCommit: "abc123" });
 	parent.transcript = [{ id: "text", kind: "assistant", text: Array.from({ length: 100 }, (_, i) => `line-${i}`).join("\n") }];
 	child.transcript = [{ id: "text", kind: "assistant", text: "nested conversation 中文 🐳" }];
 	const handles = [handleFor(parent), handleFor(child)];
@@ -200,6 +232,8 @@ test("explorer supports bounded wide/narrow layouts, drill-down/back, scrolling 
 			assert.ok(lines.every((line: string) => visibleWidth(line) <= width));
 		}
 		assert.match(component.render(120).join("\n"), /⌃U\/⌃D page · g\/G start\/follow · p prompt/);
+		assert.match(component.render(120).join("\n"), /\[worktree\]/);
+		assert.match(component.render(120).join("\n"), /\[workspace \?\]/);
 		component.handleInput("\r");
 		let text = component.render(120).join("\n");
 		assert.match(text, /line-99/);
@@ -211,6 +245,16 @@ test("explorer supports bounded wide/narrow layouts, drill-down/back, scrolling 
 		text = component.render(120).join("\n");
 		assert.match(text, /line-0\n/);
 		assert.match(text, /scroll paused/);
+		assert.match(text, /Cwd: \/tmp\/中文\/task/);
+		assert.match(text, /Branch: task\/worker/);
+		assert.match(text, /Base commit: abc123/);
+		const longPath = `/tmp/${"segment/".repeat(8)}尾`;
+		Object.assign(parent, { workspaceCwd: longPath });
+		const narrow = component.render(40);
+		assert.ok(narrow.every((line: string) => visibleWidth(line) <= 40));
+		assert.ok(narrow.join("").includes(longPath), "long paths wrap without losing their tail");
+		Object.assign(parent, { workspaceCwd: "/tmp/中文/task" });
+		component.render(120);
 		component.handleInput("\x04");
 		assert.doesNotMatch(component.render(120).join("\n"), /line-0\n/);
 		component.handleInput("g");
@@ -390,7 +434,7 @@ process.on("SIGTERM", async () => { controller.abort(); await owner.shutdown(0.2
 			executable, id: parentId, observerEndpoint: endpoint, gracefulStopSeconds: 0.5,
 			onHandle: handle => { if (handle) observer.attach(handle); }, onSnapshot: value => observer.publish(value),
 		}).catch(error => error);
-		await until(() => observer.handles().some(handle => handle.snapshot().partialText === "grandchild ready"), 15000);
+		await until(() => observer.handles().some(handle => handle.id !== parentId && handle.snapshot().partialText === "grandchild ready"), 15000);
 		const nested = observer.handles().find(handle => handle.id !== parentId)!;
 		assert.equal(nested.snapshot().parentRunId, parentId);
 		assert.equal(nested.steer("inspect deeper"), true);

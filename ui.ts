@@ -1,4 +1,4 @@
-import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, MessageRenderer, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, Input, Key, Markdown, SelectList, Spacer, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { BUILTIN_MCP_SERVER_DESCRIPTIONS, canSaveAgentSource, parseAgentColor, type AgentOverride, type DiscoveredAgent, type McpServerConfig } from "./agents.ts";
@@ -102,12 +102,14 @@ export interface DelegateViewDetails {
 	agent?: string;
 	task?: string;
 	model?: string;
-	status?: "running" | "completed" | "interrupted" | "timed_out" | "failed";
+	status?: "running" | "completed" | "interrupted" | "timed_out" | "failed" | "unavailable";
 	statsLine?: string;
 	progress?: boolean;
 	phase?: string;
 	outputTruncated?: boolean;
 	fullOutputPath?: string;
+	/** Restored interruption does not prove an orphaned process has stopped. */
+	restored?: boolean;
 }
 
 function resultText(result: { content?: Array<{ type: string; text?: string }> }): string {
@@ -160,7 +162,7 @@ export function renderDelegateResult(
 	const statusColor = status === "completed" ? "success" : status === "running" ? "warning" : "error";
 	const container = new Container();
 	container.addChild(new Text(
-		`${icon} ${theme.fg("toolTitle", theme.bold(agent))} ${theme.fg(statusColor, status.replace("_", " "))}`
+		`${icon} ${theme.fg("toolTitle", theme.bold(agent))} ${theme.fg(statusColor, status === "interrupted" ? (details.restored ? "interrupted" : "stopped") : status.replace("_", " "))}`
 		+ theme.fg("muted", ` · ${details.model ?? "default model"}`)
 		+ (details.phase && status === "running" ? theme.fg("muted", ` · ${details.phase}`) : ""),
 		0,
@@ -199,6 +201,28 @@ export function renderDelegateResult(
 	}
 	return container;
 }
+
+/** Keep the internal customType out of the transcript without hiding model content. */
+export const renderBackgroundCompletions: MessageRenderer<{
+	results?: Array<{ text: string; details: DelegateViewDetails }>;
+}> = (message, { expanded }, theme) => {
+	const container = new Container();
+	container.addChild(new Text(theme.fg("toolTitle", theme.bold("Background task results")), 0, 0));
+	const results = message.details?.results;
+	if (Array.isArray(results) && results.length && results.every(result => typeof result?.text === "string" && result.details && typeof result.details === "object")) {
+		for (const result of results) {
+			container.addChild(new Spacer(1));
+			container.addChild(renderDelegateResult({
+				content: [{ type: "text", text: result.text }], details: result.details,
+			}, { expanded }, theme));
+		}
+	} else {
+		// Older workspace-only details.results also lack text/render details.
+		const text = typeof message.content === "string" ? message.content : resultText({ content: message.content });
+		container.addChild(new Text(expanded ? text : compactLines(text, 6).text, 0, 0));
+	}
+	return container;
+};
 
 export interface AgentSelectorOptions {
 	projectName: string;

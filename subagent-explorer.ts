@@ -1,7 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Input, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { isActiveRun } from "./subagent-observer.ts";
+import { getSubagentWorkspace, isActiveRun } from "./subagent-observer.ts";
 import { displaySubagentModel, type RunningSubagentHandle, type SubagentSnapshot } from "./subagents.ts";
 
 export interface RunTreeRow { run: SubagentSnapshot; depth: number; hasChildren: boolean }
@@ -41,6 +41,24 @@ export function buildRunTree(runs: SubagentSnapshot[], collapsed = new Set<strin
 function safe(text: string): string {
 	return stripVTControlCharacters(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 }
+/** Paths are display text, never terminal commands or links. Keep controls visible. */
+function workspaceText(text: string): string {
+	return safe(text.replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t"));
+}
+
+export function workspaceDetails(run: SubagentSnapshot): string[] {
+	const workspace = getSubagentWorkspace(run);
+	if (!workspace) return ["Workspace: not reported"];
+	return [
+		`Workspace: ${workspace.mode}`,
+		`Cwd: ${workspace.cwd ? workspaceText(workspace.cwd) : "not reported"}`,
+		...(workspace.worktreePath ? [`Worktree: ${workspaceText(workspace.worktreePath)}`] : []),
+		`Branch: ${workspace.branch === null ? "detached HEAD" : workspace.branch ? workspaceText(workspace.branch) : "not reported"}`,
+		...(workspace.baseCommit ? [`Base commit: ${workspaceText(workspace.baseCommit)}`] : []),
+		...(workspace.mode === "worktree" ? ["Review/apply manually; completion does not merge changes."] : []),
+	];
+}
+
 function elapsed(ms: number): string {
 	const seconds = Math.max(0, Math.floor(ms / 1000));
 	return seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
@@ -154,7 +172,7 @@ export function showSubagentInspector(
 					const marker = run.id === selectedId ? "›" : " ";
 					const branch = hasChildren ? collapsed.has(run.id) ? "▸" : "▾" : "·";
 					const name = `${safe(run.agent)} #${run.id.slice(0, 6)}`;
-					return `${marker}${"  ".repeat(depth)}${branch} ${badge(run)} ${theme.fg(run.id === selectedId ? "accent" : "text", name)} · ${safe(phase(run, runs))}`;
+					return `${marker}${"  ".repeat(depth)}${branch} ${badge(run)} [${getSubagentWorkspace(run)?.mode ?? "workspace ?"}] ${theme.fg(run.id === selectedId ? "accent" : "text", name)} · ${safe(phase(run, runs))}`;
 				});
 				// Keep selection in view even when new descendants arrive above it.
 				const selectedIndex = Math.max(0, rows.findIndex(row => row.run.id === selectedId));
@@ -172,12 +190,15 @@ export function showSubagentInspector(
 				const detailHeader = [
 					`${badge(selected)} ${safe(phase(selected, runs))} · ${elapsedTime}${deadline}`,
 					`Model: ${safe(model(selected))}`,
+					`${workspaceDetails(selected)[0]} · g for path/branch`,
 					...taskLines,
 					selected.currentTool ? `Tool: ${safe(selected.currentTool)}` : `Status: ${selected.status}`,
 					stale ? theme.fg("warning", `No agent activity for ${elapsed(now - selected.lastActivityAt)} — possibly stalled`)
 						: usage ? `Own usage: ↑${usage.input} ↓${usage.output} R${usage.cacheRead} W${usage.cacheWrite} · $${usage.cost.toFixed(3)}` : "Usage: pending",
 				];
-				const lines: string[] = [];
+				// Scrollable metadata keeps long paths/base hashes accessible at any width.
+				const lines: string[] = workspaceDetails(selected).flatMap(line => wrapTextWithAnsi(line, rightWidth));
+				lines.push("");
 				if (selected.transcriptTruncated) lines.push(theme.fg("warning", "[Older history omitted by retention limit]"));
 				for (const entry of selected.transcript ?? []) {
 					const label = entry.kind === "tool" ? `${entry.status === "running" ? "→" : entry.status === "failed" ? "✗" : "✓"} ${safe(entry.title ?? "tool")}` : entry.kind;

@@ -10,7 +10,7 @@ import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAg
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
 import messageTiming from "./message-timing.ts";
-import { CompletionInbox, backgroundRunStatus, type BackgroundRunState } from "./background-subagents.ts";
+import { CompletionInbox, PersistentSubagentBackend, TASK_HISTORY_ENV, backgroundRunStatus, type BackgroundRunState } from "./background-subagents.ts";
 import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } from "./subagent-observer.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
@@ -23,6 +23,7 @@ import {
 	chooseAgentColor,
 	showSubagentInspector,
 	updateStatus,
+	renderBackgroundCompletions,
 	type DelegateViewDetails,
 } from "./ui.ts";
 import {
@@ -32,6 +33,9 @@ import {
 	SubagentStoppedError,
 	runSubagent,
 	type SubagentUsage,
+	type RunSubagentOptions,
+	type SubagentWorkspace,
+	type SubagentWorkspaceInfo,
 } from "./subagents.ts";
 
 const STATE_ENTRY = "pi-agents-state";
@@ -46,7 +50,7 @@ const DEFAULT_GRACEFUL_STOP_SECONDS = 5;
 const DELEGATE_TOOL = "delegate";
 const SUBAGENT_CONTROL_TOOL = "subagent_control";
 
-type DelegateStatsDetails = DelegateViewDetails & {
+type DelegateStatsDetails = DelegateViewDetails & Partial<SubagentWorkspaceInfo> & {
 	agent: string;
 	error?: boolean;
 };
@@ -300,10 +304,45 @@ export default function (pi: ExtensionAPI) {
 		rebuildEffectiveAgents();
 	}
 
-	type TaskThread = { id: string; owner: string; agent: string; cwd: string; model?: string; rootSessionId: string; latestRunId: string };
-	type BackgroundResult = { runId: string; agent: string; task: string; text: string };
+	type TaskThread = Partial<SubagentWorkspaceInfo> & { workspace: SubagentWorkspace; id: string; owner: string; agent: string; cwd: string; model?: string; rootSessionId: string; latestRunId: string };
+	type BackgroundResult = Partial<SubagentWorkspaceInfo> & { runId: string; agent: string; task: string; text: string; details: DelegateStatsDetails };
+	const workspaceMetadata = (value: Partial<SubagentWorkspaceInfo>): Partial<SubagentWorkspaceInfo> => Object.fromEntries(
+		(["workspace", "workspaceCwd", "worktreePath", "workspaceBaseCommit", "workspaceBranch"] as const)
+			.filter(key => value[key] !== undefined).map(key => [key, value[key]]),
+	);
 	// Both foreground and background runs remain replyable in this runtime.
-	const backgroundRuns = new Map<string, BackgroundRunState & { controller: AbortController; thread: TaskThread; background: boolean; result?: string }>();
+	const backgroundRuns = new Map<string, BackgroundRunState & { controller: AbortController; thread: TaskThread; background: boolean; result?: string; viewResult?: { content: { type: "text"; text: string }[]; details: DelegateStatsDetails }; invalidate?: () => void; persisted?: boolean; recoverable?: boolean; historyError?: string; savedAt?: number }>();
+	let taskBackend: PersistentSubagentBackend | undefined;
+	let taskHistoryError: string | undefined;
+	let taskRootSessionId: string | undefined;
+	let taskProjectCwd: string | undefined;
+	let historyDiagnostics: Array<{ threadId: string; error?: string }> = [];
+	async function refreshPersistedTasks() {
+		if (!taskBackend) return;
+		const backend = taskBackend;
+		const rows = await backend.list();
+		if (backend !== taskBackend) return;
+		for (const [id, run] of backgroundRuns) if (run.persisted) backgroundRuns.delete(id);
+		historyDiagnostics = [];
+		for (const row of rows) {
+			const record = row.record;
+			if (!record) { historyDiagnostics.push({ threadId: row.threadId, error: row.error }); continue; }
+			const existing = backgroundRuns.get(record.latestRunId);
+			if (existing) { Object.assign(existing, { recoverable: row.recoverable, savedAt: record.checkpoint?.at, historyError: row.error }); continue; }
+			const thread: TaskThread = { id: record.threadId, owner: record.owner, agent: record.agent, cwd: record.workspace.project.path,
+				model: record.model, rootSessionId: record.rootSessionId, latestRunId: record.latestRunId,
+				workspace: record.workspace.mode, workspaceCwd: record.workspace.cwd.path,
+				...("workspaceInfo" in row ? row.workspaceInfo : {}) };
+			backgroundRuns.set(record.latestRunId, { controller: new AbortController(), thread, background: false, persisted: true,
+				agent: record.agent, task: "[Saved conversation; recovery requires a new instruction]", model: record.model,
+				...workspaceMetadata(thread), status: record.status, startedAt: record.createdAt, endedAt: record.updatedAt,
+				recoverable: row.recoverable, savedAt: record.checkpoint?.at, historyError: row.error,
+				viewResult: {
+					content: [{ type: "text", text: `Saved task ${record.status}. Result preview was not retained separately. ${row.error ?? (record.checkpoint ? `Safe checkpoint: ${new Date(record.checkpoint.at).toISOString()}. Later work may already have changed the workspace.` : "No safe checkpoint exists.")} Use /task-history list or explicit recover with a new instruction.` }],
+					details: { agent: record.agent, model: record.model, status: record.status, restored: true, ...workspaceMetadata(thread) },
+				} });
+		}
+	}
 	let threadSessionDir = path.join(os.tmpdir(), `pi-agents-threads-${randomUUID()}`);
 	const pendingRuns = new Set<Promise<unknown>>();
 	let sessionGeneration = 0;
@@ -314,10 +353,11 @@ export default function (pi: ExtensionAPI) {
 	};
 	const completionMessage = (results: BackgroundResult[]) => ({
 		customType: "pi-agents-completions",
-		content: results.map(result => `Background task completed\nRun: ${result.runId}\nAgent: ${result.agent}\nTask: ${result.task}\n\n${result.text}`).join("\n\n---\n\n"),
+		content: results.map(result => `Background task ${result.details.status ?? "completed"}\nRun: ${result.runId}\nAgent: ${result.agent}\nTask: ${result.task}\n\n${result.text}`).join("\n\n---\n\n"),
 		display: true,
-		details: { runs: results.map(result => result.runId) },
+		details: { runs: results.map(result => result.runId), results },
 	});
+	pi.registerMessageRenderer("pi-agents-completions", renderBackgroundCompletions);
 	const createInbox = () => new CompletionInbox<BackgroundResult>(
 		() => !!observerContext?.isIdle() && !observerContext.hasPendingMessages(),
 		results => pi.sendMessage(completionMessage(results), { triggerTurn: true, deliverAs: "followUp" }),
@@ -339,7 +379,11 @@ export default function (pi: ExtensionAPI) {
 
 	const executeDelegation: ToolDefinition["execute"] = async (toolCallId, params, signal, onUpdate, ctx) => {
 			const parent = activeAgent;
-			const input = params as { agent?: unknown; task?: unknown; background?: boolean; replyRunId?: string };
+			const input = params as { agent?: unknown; task?: unknown; background?: boolean; replyRunId?: string; recoverRunId?: string; workspace?: SubagentWorkspace };
+			if (taskHistoryError) throw new Error(`Persistent task storage unavailable: ${taskHistoryError}. Fix storage or restart with ${TASK_HISTORY_ENV} unset; no temporary fallback was used.`);
+			const backend = taskBackend;
+			if (backend && fs.realpathSync(ctx.cwd) !== taskProjectCwd) throw new Error("Task project changed since session startup. Reopen the original project/session; durable tasks never silently change workspaces.");
+			if (input.workspace !== undefined && input.workspace !== "shared" && input.workspace !== "worktree") throw new Error("workspace must be 'shared' or 'worktree'");
 			const agentName = String(input.agent ?? "").trim();
 			const task = String(input.task ?? "").trim();
 			const subagent = parent?.subagents?.find((candidate) => candidate.name === agentName);
@@ -351,23 +395,29 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
 			const timeoutSeconds = subagent.timeoutSeconds;
-			const previousRun = input.replyRunId ? backgroundRuns.get(input.replyRunId) : undefined;
-			if (input.replyRunId && !previousRun) throw new Error("Unknown run ID.");
+			const previousRunId = input.recoverRunId ?? input.replyRunId;
+			const previousRun = previousRunId ? backgroundRuns.get(previousRunId) : undefined;
+			if (previousRunId && !previousRun) throw new Error("Unknown run ID.");
+			if (input.recoverRunId && !backend) throw new Error(`Recovery requires ${TASK_HISTORY_ENV}=1 and a saved conversation.`);
 			if (previousRun) {
-				if (previousRun.thread.owner !== parent!.name || previousRun.thread.agent !== agentName || previousRun.thread.cwd !== ctx.cwd) throw new Error("Reply denied: this thread belongs to another parent, agent, or workspace.");
-				if (previousRun.thread.latestRunId !== input.replyRunId) throw new Error(`Reply to the latest run instead: ${previousRun.thread.latestRunId}`);
+				if (previousRun.thread.owner !== parent!.name || previousRun.thread.agent !== agentName || fs.realpathSync(previousRun.thread.cwd) !== fs.realpathSync(ctx.cwd)) throw new Error("Reply denied: this thread belongs to another parent, agent, or workspace.");
+				if (previousRun.thread.latestRunId !== previousRunId) throw new Error(`Reply to the latest run instead: ${previousRun.thread.latestRunId}`);
 				if (previousRun.status === "running") throw new Error("Thread is busy; use steer on the active run.");
-				if (previousRun.status !== "completed") throw new Error("Only completed runs can receive replies. Start a fresh delegation after a failed or interrupted run.");
+				if (!input.recoverRunId && previousRun.status !== "completed") throw new Error("Only completed runs can receive replies. Use explicit recover with a new instruction when durable history is enabled; otherwise start a fresh delegation.");
 			}
+			if (previousRun && input.workspace !== undefined && input.workspace !== previousRun.thread.workspace) throw new Error("Cannot change workspace mode for an existing thread.");
 			const inheritedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 			const thinkingLevel = pi.getThinkingLevel?.();
 			const selectedModel = previousRun ? previousRun.thread.model : subagent.model ?? (inheritedModel && thinkingLevel ? `${inheritedModel}:${thinkingLevel}` : inheritedModel);
 			const runId = newRunId();
 			const thread: TaskThread = previousRun?.thread ?? {
 				id: `thread-${randomUUID()}`, owner: parent!.name, agent: agentName, cwd: ctx.cwd, model: selectedModel,
-				rootSessionId: process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.() ?? randomUUID(),
+				workspace: input.workspace ?? "shared",
+				workspaceCwd: (input.workspace ?? "shared") === "shared" ? ctx.cwd : undefined,
+				rootSessionId: taskRootSessionId ?? process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.() ?? randomUUID(),
 				latestRunId: runId,
 			};
+			const runWorkspace = workspaceMetadata(thread);
 			// Reserve synchronously before any await, including concurrent reply calls.
 			thread.latestRunId = runId;
 			const sessionDir = threadSessionDir;
@@ -377,7 +427,7 @@ export default function (pi: ExtensionAPI) {
 			const background = input.background === true;
 			const controller = new AbortController();
 			const runStartedAt = Date.now();
-			backgroundRuns.set(runId, { agent: agentName, task, controller, thread, background, status: "running", model: selectedModel, startedAt: runStartedAt,
+			backgroundRuns.set(runId, { ...runWorkspace, agent: agentName, task, controller, thread, background, status: "running", model: selectedModel, startedAt: runStartedAt,
 				deadlineAt: timeoutSeconds === undefined ? undefined : runStartedAt + timeoutSeconds * 1000 });
 			if (background) emitBackgroundLifecycle(runId, agentName, "started");
 			const executeRun = async (): Promise<{ content: { type: "text"; text: string }[]; details: DelegateStatsDetails }> => {
@@ -421,6 +471,7 @@ export default function (pi: ExtensionAPI) {
 					onUpdate?.({
 						content: [{ type: "text", text: progressText }],
 						details: {
+							...runWorkspace,
 							agent: agentName,
 							task,
 							model: displaySubagentModel(selectedModel, [...callSubagentStats.models][0]),
@@ -447,8 +498,10 @@ export default function (pi: ExtensionAPI) {
 					if (lines.length > MAX_PROGRESS_LINES) streamedText = lines.slice(-MAX_PROGRESS_LINES).join("\n");
 					publish();
 				};
-				const result = await runSubagent(agentName, task, ctx.cwd, background || !signal ? controller.signal : AbortSignal.any([signal, controller.signal]), {
+				const runSignal = background || !signal ? controller.signal : AbortSignal.any([signal, controller.signal]);
+				const runOptions: RunSubagentOptions = {
 					model: selectedModel,
+					workspace: thread.workspace,
 					rootSessionId: thread.rootSessionId,
 					threadId: thread.id,
 					resume: !!previousRun,
@@ -456,7 +509,13 @@ export default function (pi: ExtensionAPI) {
 					id: runId,
 					observerEndpoint,
 					parentRunId: process.env[RUN_ID_ENV],
-					onSnapshot: snapshot => runObserver.publish(snapshot),
+					onSnapshot: snapshot => {
+						const metadata = workspaceMetadata(snapshot);
+						Object.assign(runWorkspace, metadata);
+						Object.assign(thread, metadata);
+						if (generation === sessionGeneration) Object.assign(backgroundRuns.get(runId)!, metadata);
+						runObserver.publish(snapshot);
+					},
 					timeoutSeconds,
 					gracefulStopSeconds: config.subagents?.gracefulStopSeconds ?? DEFAULT_GRACEFUL_STOP_SECONDS,
 					runtimeAgentOverrides: Object.fromEntries(studioDrafts),
@@ -477,9 +536,21 @@ export default function (pi: ExtensionAPI) {
 							case "error": update(`✗ ${event.message}`, "error"); break;
 						}
 					},
-				});
+				};
+				let result: string;
+				let historyWarning: string | undefined;
+				if (backend) {
+					const request = { threadId: thread.id, runId, owner: thread.owner, agent: agentName, instruction: task };
+					const output = previousRunId
+						? await backend.recover({ ...request, latestRunId: previousRunId }, runSignal, runOptions)
+						: await backend.run({ ...request, workspace: thread.workspace }, runSignal, runOptions);
+					result = output.text;
+					historyWarning = output.historyWarning;
+					if (output.recovery) historyWarning = [historyWarning, `Continued from checkpoint ${new Date(output.recovery.savedAt).toISOString()}; later work may not be in the saved conversation.`].filter(Boolean).join("\n");
+				} else result = await runSubagent(agentName, task, ctx.cwd, runSignal, runOptions);
 				const truncation = truncateHead(result, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
 				let visibleResult = truncation.content;
+				if (historyWarning) visibleResult += `\n\n${historyWarning}`;
 				let fullOutputPath: string | undefined;
 				if (truncation.truncated) {
 					const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-agents-output-"));
@@ -521,17 +592,31 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			};
-			const execution = executeRun().then(result => {
+			const execution = executeRun().then(async result => {
+				// A denied/preflight-failed recovery must not consume the previous latest run.
+				if (backend && previousRunId && result.details.error) {
+					try {
+						const saved = (await backend.list()).find(row => row.record?.threadId === thread.id)?.record;
+						if (saved) thread.latestRunId = saved.latestRunId;
+					} catch { /* Keep the failure visible; disk remains authoritative. */ }
+				}
 				result.content[0].text += `\n\nThread ID: ${thread.id}\nRun ID: ${runId}`;
-				Object.assign(result.details, { threadId: thread.id, runId });
+				Object.assign(result.details, runWorkspace, { threadId: thread.id, runId });
+				result.content[0].text += `\nWorkspace: ${thread.workspace}${runWorkspace.workspaceCwd ? `\nCwd: ${runWorkspace.workspaceCwd}` : ""}`;
+				if (runWorkspace.worktreePath) result.content[0].text += `\nWorktree: ${runWorkspace.worktreePath}\nBase commit: ${runWorkspace.workspaceBaseCommit}\nChanges are retained; review/apply manually (not merged).`;
 				if (generation !== sessionGeneration) return result;
 				const run = backgroundRuns.get(runId)!;
 				run.status = result.details.status ?? "completed";
 				run.endedAt = Date.now();
 				run.result = result.content.map(item => item.text).join("\n");
+				// Runtime-only rendering state: never serialize callbacks into history.
+				run.viewResult = result;
+				const invalidate = run.invalidate;
+				run.invalidate = undefined;
+				try { invalidate?.(); } catch { /* Rendering must not suppress completion delivery. */ }
 				if (background) {
 					emitBackgroundLifecycle(runId, agentName, run.status === "completed" ? "completed" : run.status === "interrupted" ? "aborted" : "failed");
-					inbox.push({ runId, agent: agentName, task, text: run.result });
+					inbox.push({ ...runWorkspace, runId, agent: agentName, task, text: run.result, details: result.details });
 				}
 				return result;
 			});
@@ -539,18 +624,19 @@ export default function (pi: ExtensionAPI) {
 			void execution.finally(() => pendingRuns.delete(execution)).catch(() => {});
 			if (!background) return execution;
 			return {
-				content: [{ type: "text", text: `Started background subagent ${agentName}. Run ID: ${runId}. Thread ID: ${thread.id}. Continue working or respond to the user; completion will be delivered after your current flow finishes.` }],
-				details: { agent: agentName, task, runId, threadId: thread.id, status: "running" },
+				content: [{ type: "text", text: `Started background subagent ${agentName}. Run ID: ${runId}. Thread ID: ${thread.id}. Workspace: ${thread.workspace}. Continue working or respond to the user; completion will be delivered after your current flow finishes.` }],
+				details: { ...runWorkspace, agent: agentName, task, runId, threadId: thread.id, status: "running" },
 			};
 	};
 
 	pi.registerTool({
 		name: DELEGATE_TOOL,
 		label: "Delegate",
-		description: `Start a fresh, isolated task thread with an allowed subagent. Independent tasks, including tasks for the same agent, run in parallel. Use background: true to return runId and threadId immediately; completion arrives after the main agent settles. Use subagent_control reply on a completed run to continue its conversation, or steer while running. Results are capped at ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; oversized output is saved to a file.`,
+		description: `Start a fresh, isolated task thread with an allowed subagent. workspace: shared (default) uses parent cwd; worktree creates a retained Git worktree from parent HEAD without uncommitted changes, with no automatic merge. Replies reuse the same workspace. Independent tasks, including tasks for the same agent, run in parallel. Use background: true to return runId and threadId immediately; completion arrives after the main agent settles. Use subagent_control reply on a completed run to continue its conversation, or steer while running. Results are capped at ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; oversized output is saved to a file.`,
 		promptSnippet: "delegate: start a fresh task with an allowed specialist",
 		promptGuidelines: [
 			"Each delegate call starts a fresh conversation. Include relevant paths, constraints, and expected output.",
+			"Choose workspace per call: shared (default) uses current files; worktree starts from parent HEAD without uncommitted changes. Worktree changes are retained, not merged. Replies reuse the same directory.",
 			"Issue independent tasks together for parallel execution. Use subagent_control reply, not another delegate, to answer a worker's question or continue its task.",
 		],
 		parameters: jsonSchemaToTypeBox({
@@ -559,6 +645,7 @@ export default function (pi: ExtensionAPI) {
 				agent: { type: "string", description: "Name of an allowed subagent" },
 				task: { type: "string", description: "Self-contained task" },
 				background: { type: "boolean", description: "Run in the background (default false)" },
+				workspace: { type: "string", enum: ["shared", "worktree"], description: "Workspace for this new thread: shared (default) uses parent cwd; worktree isolates parent HEAD without uncommitted changes. Replies reuse it; changes require manual review/apply." },
 			},
 			required: ["agent", "task"], additionalProperties: false,
 		}),
@@ -572,50 +659,94 @@ export default function (pi: ExtensionAPI) {
 			const model = configured ?? (inherited ? `${inherited.provider}/${inherited.id}${level ? `:${level}` : ""}` : undefined);
 			return renderDelegateCall({ ...call, model }, theme);
 		},
-		renderResult(result, options, theme) {
-			return renderDelegateResult(result, options, theme);
+		renderResult(result, options, theme, context) {
+			const details = result.details as { runId?: string; status?: string; agent?: string } | undefined;
+			const run = details?.runId ? backgroundRuns.get(details.runId) : undefined;
+			if (run?.background && run.status === "running") run.invalidate = context?.invalidate;
+			if (!run && details?.runId && details.status === "running" && !options.isPartial) {
+				// Old acknowledgement without matching durable metadata is NOT evidence
+				// of a live child, nor proof it completed. Do not fabricate a result.
+				return renderDelegateResult({ content: [{ type: "text", text: "No live owner or retained terminal metadata for this run. It may have completed or been interrupted. Use /task-history list; nothing was restarted." }], details: { ...details, status: "unavailable" } }, options, theme);
+			}
+			return renderDelegateResult(run?.viewResult ?? result, options, theme);
 		},
 	});
 
+	const controlSubagent: ToolDefinition["execute"] = async (_id, params, signal, onUpdate, ctx) => {
+		const { action, runId, message } = params as { action: string; runId?: string; message?: string };
+		const reply = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
+		if (["list", "status", "recover", "delete"].includes(action)) await refreshPersistedTasks();
+		const snapshots = new Map(observer.handles().map(handle => [handle.id, handle.snapshot()]));
+		const status = (id: string, run: NonNullable<ReturnType<typeof backgroundRuns.get>>) => ({ ...backgroundRunStatus(id, run, snapshots.get(id)),
+			threadId: run.thread.id, latestRunId: run.thread.latestRunId, persisted: run.persisted, recoverable: run.recoverable,
+			savedAt: run.savedAt, historyError: run.historyError });
+		if (action === "list") return reply(taskHistoryError ? `Task history unavailable: ${taskHistoryError}` : JSON.stringify([...Array.from(backgroundRuns, ([id, run]) => status(id, run)), ...historyDiagnostics]));
+		const run = runId ? backgroundRuns.get(runId) : undefined;
+		if (!run || !runId) return reply(taskHistoryError ? `Task history unavailable: ${taskHistoryError}` : "Unknown run ID. Use list in the original project and root session.");
+		if (action === "status") return reply(JSON.stringify(status(runId, run)));
+		if (action === "reply" || action === "recover") {
+			if (!message?.trim()) throw new Error(`${action} requires a fresh, non-empty instruction; tasks never restart automatically.`);
+			if (action === "recover" && !taskBackend) throw new Error(`Recovery requires ${TASK_HISTORY_ENV}=1 and saved history.`);
+			return executeDelegation(_id, { agent: run.agent, task: message.trim(), background: true, [action === "recover" ? "recoverRunId" : "replyRunId"]: runId }, signal, onUpdate, ctx);
+		}
+		if (action === "delete") {
+			if (!taskBackend) throw new Error("Persistent task history is not enabled.");
+			if (activeAgent?.name !== run.thread.owner) throw new Error(`Select the owning parent agent (${run.thread.owner}) before deleting its history.`);
+			if (run.status === "running") throw new Error("Stop the active task and wait for child exit before deleting history.");
+			await taskBackend.delete(run.thread.id);
+			for (const [id, related] of backgroundRuns) if (related.thread.id === run.thread.id) backgroundRuns.delete(id);
+			return reply("Task conversation deleted. Workspace/worktree files were not removed. Parent-session messages and external backups are unaffected.");
+		}
+		if (action === "result") return { ...reply(run.result ?? `Run ${runId} is ${run.status}. ${run.persisted ? "The result preview was not retained separately. Use explicit recover with a new instruction to continue its saved conversation." : ""}`), details: { ...workspaceMetadata(run), runId, threadId: run.thread.id, status: run.status } };
+		if (run.status !== "running") return reply(`Run ${runId} is ${run.status}.`);
+		const handle = observer.handles().find(handle => handle.id === runId);
+		if (action === "stop") {
+			observer.stopTree(runId, "user");
+			run.controller.abort();
+			return reply(`Stop requested for ${runId}.`);
+		}
+		if (action === "steer") {
+			if (!message?.trim()) return reply("Steer requires a non-empty message.");
+			return reply(handle?.steer(message) ? `Instructions sent to ${runId}.` : "Run is not ready for steering; try again later.");
+		}
+		return reply("Unknown action.");
+	};
 	pi.registerTool({
 		name: SUBAGENT_CONTROL_TOOL,
 		label: "Subagent control",
-		description: "List session-owned runs, inspect status/results, steer or stop an active run, or reply to the latest completed run. Reply starts a new background run in the same thread with saved conversation context. Busy threads require steer; stale run IDs and failed runs cannot receive replies. Recheck workspace files on follow-up work. List/status do not wait or consume results.",
+		description: "List session-owned live and saved tasks, inspect status/results, steer/stop active runs, or reply to completed runs. With opt-in task history, recover explicitly continues a saved completed/interrupted/failed task using a fresh message and the last safe checkpoint; later workspace effects may already exist. Nothing restarts automatically. Delete removes saved conversation, never workspace/worktrees. Busy threads require steer; stale run IDs are rejected.",
 		parameters: jsonSchemaToTypeBox({
 			type: "object",
 			properties: {
-				action: { type: "string", enum: ["list", "status", "result", "reply", "steer", "stop"] },
-				runId: { type: "string", description: "Run ID returned by delegate/reply; required except for list" },
-				message: { type: "string", description: "Answer or instructions for reply/steer" },
+				action: { type: "string", enum: ["list", "status", "result", "reply", "recover", "delete", "steer", "stop"] },
+				runId: { type: "string", description: "Run ID returned by delegate/list; required except for list" },
+				message: { type: "string", description: "Fresh instruction for reply/recover/steer; never reuse the original task automatically" },
 			},
 			required: ["action"], additionalProperties: false,
 		}),
-		execute: async (_id, params, signal, onUpdate, ctx) => {
-			const { action, runId, message } = params as { action: string; runId?: string; message?: string };
-			const reply = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
-			const snapshots = new Map(observer.handles().map(handle => [handle.id, handle.snapshot()]));
-			const status = (id: string, run: NonNullable<ReturnType<typeof backgroundRuns.get>>) => ({ ...backgroundRunStatus(id, run, snapshots.get(id)), threadId: run.thread.id, latestRunId: run.thread.latestRunId });
-			if (action === "list") return reply(JSON.stringify([...backgroundRuns].map(([id, run]) => status(id, run))));
-			const run = runId ? backgroundRuns.get(runId) : undefined;
-			if (!run || !runId) return reply("Unknown run ID.");
-			if (action === "status") return reply(JSON.stringify(status(runId, run)));
-			if (action === "reply") {
-				if (!message?.trim()) throw new Error("Reply requires a non-empty message.");
-				return executeDelegation(_id, { agent: run.agent, task: message.trim(), background: true, replyRunId: runId }, signal, onUpdate, ctx);
-			}
-			if (action === "result") return reply(run.result ?? `Run ${runId} is ${run.status}.`);
-			if (run.status !== "running") return reply(`Run ${runId} is ${run.status}.`);
-			const handle = observer.handles().find(handle => handle.id === runId);
-			if (action === "stop") {
-				observer.stopTree(runId, "user");
-				run.controller.abort();
-				return reply(`Stop requested for ${runId}.`);
-			}
-			if (action === "steer") {
-				if (!message?.trim()) return reply("Steer requires a non-empty message.");
-				return reply(handle?.steer(message) ? `Instructions sent to ${runId}.` : "Run is not ready for steering; try again later.");
-			}
-			return reply("Unknown action.");
+		execute: controlSubagent,
+	});
+
+	pi.registerCommand("task-history", {
+		description: "Saved tasks: list | status <runId> | recover <runId> <new instruction> | delete <runId> | prune <days>",
+		handler: async (args, ctx) => {
+			try {
+				if (!taskBackend) throw new Error(taskHistoryError ?? `Task history is off. Start Pi with ${TASK_HISTORY_ENV}=1 to opt in; this retains potentially sensitive conversations.`);
+				const [action = "list", runId, ...words] = args.trim().split(/\s+/).filter(Boolean);
+				if (action === "prune") {
+					const days = Number(runId);
+					if (!Number.isFinite(days) || days < 0 || !runId || words.length) throw new Error("Usage: /task-history prune <non-negative days>");
+					if (!await ctx.ui.confirm("Delete saved task conversations?", `Remove terminal histories older than ${days} days in this root session/project. Worktrees remain.`)) return;
+					const deleted = await taskBackend.prune(Math.max(0, Math.floor(Date.now() - days * 86400000)));
+					for (const [id, run] of backgroundRuns) if (deleted.includes(run.thread.id)) backgroundRuns.delete(id);
+					ctx.ui.notify(`Deleted ${deleted.length} task histories; workspaces retained.`, "info");
+					return;
+				}
+				if (!["list", "status", "recover", "delete"].includes(action)) throw new Error("Usage: /task-history list | status <runId> | recover <runId> <new instruction> | delete <runId> | prune <days>");
+				if (action === "delete" && !await ctx.ui.confirm("Delete task conversation?", `Delete history for ${runId}? Workspace/worktree and parent-session messages remain.`)) return;
+				const result = await controlSubagent(`history-${randomUUID()}`, { action, runId, message: words.join(" ") }, undefined, undefined, ctx);
+				ctx.ui.notify(result.content.filter(item => item.type === "text").map(item => item.text).join("\n"), "info");
+			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
 		},
 	});
 
@@ -1213,6 +1344,22 @@ export default function (pi: ExtensionAPI) {
 		if (selected) await applyAgent(selected, ctx, { silent: true });
 		else refreshStatus(ctx);
 		persistedName = activeName;
+		taskRootSessionId = process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.();
+		taskHistoryError = undefined;
+		try {
+			taskProjectCwd = process.env[TASK_HISTORY_ENV] === "1" ? fs.realpathSync(ctx.cwd) : undefined;
+			taskBackend = await PersistentSubagentBackend.open({
+				scope: { rootSessionId: taskRootSessionId ?? "", projectCwd: ctx.cwd },
+				authorize: request => activeAgent?.name === request.owner
+					&& !!activeAgent.subagents?.some(candidate => candidate.name === request.agent)
+					&& agents.some(agent => agent.name === request.agent),
+			});
+			await refreshPersistedTasks();
+			if (taskBackend && (backgroundRuns.size || historyDiagnostics.length)) ctx.ui.notify(`Saved task history available: ${backgroundRuns.size} tasks, ${historyDiagnostics.length} invalid records. Use /task-history list; nothing was restarted.`, "info");
+		} catch (error) {
+			taskHistoryError = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Persistent task history unavailable: ${taskHistoryError}. Delegation is blocked rather than silently using temporary history.`, "warning");
+		}
 
 		if (event.reason === "startup" && ctx.mode === "tui") {
 			const projectAgents = agents.filter((agent) => agent.source === "project").length;
@@ -1258,6 +1405,12 @@ export default function (pi: ExtensionAPI) {
 		observer = createObserver();
 		// Wait for child exits/lock release before deleting their private histories.
 		await Promise.allSettled([...pendingRuns]);
+		await taskBackend?.shutdown();
+		taskBackend = undefined;
+		taskHistoryError = undefined;
+		taskRootSessionId = undefined;
+		taskProjectCwd = undefined;
+		historyDiagnostics = [];
 		await fs.promises.rm(threadSessionDir, { recursive: true, force: true });
 		threadSessionDir = path.join(os.tmpdir(), `pi-agents-threads-${randomUUID()}`);
 		await mcpManager.disconnectAll();

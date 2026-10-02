@@ -81,7 +81,7 @@ export default cfg;
 
 ## Subagents and hierarchy
 
-An agent can delegate isolated work to another agent with the built-in `delegate` tool. Add `background: true` to return a run ID immediately and keep the main agent responsive. Completion results are batched after the main flow fully settles, or wake it when idle; they never steer an active flow. Escape pauses automatic wake-ups without stopping children, and the next user message receives waiting results. Use `subagent_control` with `action: "list" | "status" | "result" | "reply" | "steer" | "stop"`, `runId` for a specific run, and `message` for replies or steering. `status` reads a run's live phase (including thread preparation), current tool, model, elapsed/idle milliseconds, and any deadline/remaining time; `list` returns that metadata for all delegation runs. Neither waits nor consumes pending results. Terminal statuses remain queryable. Check when needed rather than repeatedly polling; completion delivery is automatic. Background runs and pending results are runtime-only and stop/clear on reload, session replacement, or exit. Parallel workers share the working directory, so assign separate files or worktrees. Without `background`, delegation still waits for the final result:
+An agent can delegate isolated work to another agent with the built-in `delegate` tool. Add `background: true` to return a run ID immediately and keep the main agent responsive. Completion results are batched after the main flow fully settles, or wake it when idle; they never steer an active flow. Escape pauses automatic wake-ups without stopping children, and the next user message receives waiting results. Use `subagent_control` with `action: "list" | "status" | "result" | "reply" | "steer" | "stop"`, `runId` for a specific run, and `message` for replies or steering. `status` reads a run's live phase (including thread preparation), current tool, model, elapsed/idle milliseconds, and any deadline/remaining time; `list` returns that metadata for all delegation runs. Neither waits nor consumes pending results. Terminal statuses remain queryable. Check when needed rather than repeatedly polling; completion delivery is automatic. Background runs and pending results are runtime-only and stop/clear on reload, session replacement, or exit. Parallel workers share the working directory by default, so assign separate files or choose `workspace: "worktree"` on individual delegations. Without `background`, delegation still waits for the final result:
 
 
 ```ts
@@ -100,7 +100,38 @@ export default {
 
 Every `delegate` starts a fresh thread and returns `threadId` and `runId`. Same-agent tasks can run in parallel. `subagent_control({ action: "reply", runId, message: "Use option A." })` continues the latest completed run's conversation with a new background execution and run ID. Saved messages, tool results, and compaction context survive; the old process does not. Replies preserve the thread's selected model while using current agent definitions and deadlines. Busy threads require `steer`; stale IDs, failed/interrupted runs, and threads owned by another parent cannot receive replies. Missing or invalid saved history fails rather than silently discarding context. Recheck workspace files on follow-up work. Provider prompt-cache reuse is possible but not guaranteed.
 
-Threads remain replyable only within the current runtime. Histories live in an owner-only (`0700`) `pi-agents-threads-*` system temporary directory and are removed after children exit on reload, session replacement, or normal shutdown. Crashes/forced kills may leave sensitive temporary files; remove orphaned directories only after checking no children remain. Run/thread handles, including a nested worker's own child handles, are not restored across process restarts. There is no implicit context reuse between ordinary delegations.
+By default, threads remain replyable only within the current runtime. Histories live in an owner-only (`0700`) `pi-agents-threads-*` system temporary directory and are removed after children exit on reload, session replacement, or normal shutdown. Crashes/forced kills may leave sensitive temporary files; remove orphaned directories only after checking no children remain. Run/thread handles, including a nested worker's own child handles, are not restored across process restarts. There is no implicit context reuse between ordinary delegations.
+
+### Opt-in persistent task history
+
+Start Pi with `PI_AGENTS_TASK_HISTORY=1` (off by default). Task JSONL and minimal metadata are retained under `~/.pi/agent/pi-agents-task-history/` (or Pi's configured agent directory), with POSIX owner-only permissions. Conversations may contain sensitive prompts/tool output/secrets. No secret configuration or callbacks are copied into metadata; normal Pi transcripts can still contain secrets.
+
+Resume the same root Pi session in its original canonical working directory. `/task-history list` and `subagent_control` list/status discover saved latest-task records; nothing restarts automatically. Unowned previously running tasks are interrupted, not live handles. Explorer transcripts remain runtime-only; restored task cards use durable status and clearly state that a separate result preview was not retained. Older unknown runs show unavailable.
+
+Use `/task-history recover <runId> <fresh instruction>` or `subagent_control({ action: "recover", runId, message: "Inspect existing work before continuing." })`. Recovery checks current parent/child permission, session/project ownership, latest run, JSONL integrity and original workspace/worktree identity. It restores only the last validated checkpoint, excluding incomplete writes/unresolved tool calls. Later work may already have changed files or external services. Never blindly repeat the original task. Missing/tampered/unavailable state rejects recovery rather than starting fresh.
+
+`/task-history delete <runId>` (select the owning parent first) and `/task-history prune <days>` confirm explicit deletion; `subagent_control` also offers `delete`. No automatic retention timer. Worktrees, workspace files, parent-session messages and backups are never removed. Normal shutdown stops/reaps children and preserves finalized histories. Hard-crash locks deliberately block recovery/deletion: an operator must verify old children/writers have exited before inspecting/removing reported stale locks. There is no automatic lock stealing or guaranteed automatic crash recovery. Checksums are corruption checks, not protection against a malicious same-user writer. Nested tasks retain their own originating working-directory scope; only latest-thread metadata is indexed.
+
+### Per-call workspace choice and manual review
+
+The main agent chooses `delegate({ agent: "developer", task: "…", workspace: "shared" | "worktree" })`, with optional `background: true`. This is not a Studio setting. Omitted `workspace` means `shared`: the parent's cwd and local edits remain visible, so parallel writers can conflict. A fresh conversation alone does not isolate files.
+
+`worktree` gives the task thread a separate Git checkout from the parent's HEAD, **without staged, unstaged, or untracked parent edits**. Commit required inputs first or describe them explicitly in the task. A repository with a HEAD commit is required; creation/reuse errors must not silently fall back to shared execution. Replies keep the thread's workspace/cwd. Worktrees are not security sandboxes: absolute paths, tools, credentials, and external services remain accessible. Unreviewed worktrees are preserved after completion, failure, stop, or runtime cleanup; reply handles remain runtime-only; conversation histories survive cleanup only with the explicit persistence opt-in above.
+
+Explorer displays `[shared]` or `[worktree]` only when metadata is reported; `[workspace ?]` means unknown. Open the conversation and press `g` for the reported cwd, branch (or detached HEAD), and optional original base commit. Long values wrap and scroll. This is recorded metadata, not live Git status or an assertion that changes were reviewed. Save the path and base before reload/exit clears observation history.
+
+There are no automatic apply/discard actions. Wait until the thread and any other writers stop, then review manually:
+
+```sh
+WORKTREE='/absolute/path/to/delegate-worktree'
+BASE='<original-base-commit>'
+git -C "$WORKTREE" status --short
+git -C "$WORKTREE" log --oneline "$BASE"..HEAD
+git -C "$WORKTREE" diff --stat "$BASE"
+git -C "$WORKTREE" diff "$BASE" --
+```
+
+Use the original base, not a parent HEAD that has since moved. The diff includes committed and uncommitted tracked changes; untracked files require separate inspection. Review secrets, generated files, and tests. Preserve parent edits and preferably use a clean review checkout. Manually cherry-pick specific reviewed commits, **or** export an aggregate tracked-change patch (`git -C "$WORKTREE" diff --binary "$BASE" -- > /safe/new/review.patch`, a new file outside both checkouts), inspect it, and run `git -C "$PARENT" apply --check /safe/new/review.patch` before `git -C "$PARENT" apply /safe/new/review.patch`, where `PARENT` is the target checkout's absolute path. Do not apply both commits and their aggregate patch. Transfer only approved untracked files separately, resolve conflicts deliberately, and rerun tests. Keep the worktree until application is verified; stopping a run is not discarding or merging its changes.
 
 Nested delegation remains limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
 

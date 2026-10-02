@@ -54,6 +54,15 @@ test("terminal background statuses override observations and freeze timing", () 
 	}
 });
 
+test("background status exposes workspace metadata from observation or retained run state", () => {
+	const workspace = { workspace: "worktree" as const, workspaceCwd: "/repo/worktree/src", worktreePath: "/repo/worktree", workspaceBaseCommit: "abc123", workspaceBranch: null };
+	for (const status of [backgroundRunStatus("run-1", run, { ...snapshot, ...workspace }), backgroundRunStatus("run-1", { ...run, ...workspace, status: "completed" })]) {
+		for (const [key, value] of Object.entries(workspace)) assert.equal(status[key as keyof typeof status], value);
+	}
+	assert.equal(backgroundRunStatus("run-1", run).workspace, "shared");
+	assert.equal(backgroundRunStatus("run-1", { ...run, workspaceBranch: "main" }, { ...snapshot, workspaceBranch: null }).workspaceBranch, null);
+});
+
 const tick = () => new Promise(resolve => setTimeout(resolve, 60));
 
 test("busy runs accumulate completions and deliver one batch after settling", async () => {
