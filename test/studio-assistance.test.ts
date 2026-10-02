@@ -45,8 +45,11 @@ test("assisted drafts validate names, colors and tool/MCP allowlists; strip exec
 	assert.equal(result.color, "#aabbcc");
 	assert.ok(!JSON.stringify(result).includes("SECRET"));
 	assert.equal(parseAssistedDraft('```json\n' + JSON.stringify(draft) + '\n```', available).name, "dev");
-	for (const patch of [{ name: ".." }, { name: "../bad" }, { color: "invalid" }, { tools: ["write"] }, { mcp: ["unknown"] }, { description: "" }, { systemPrompt: "" }]) {
+	for (const patch of [{ name: ".." }, { name: ".hidden" }, { name: "node_modules" }, { name: "../bad" }, { name: null }, { color: "invalid" }, { tools: ["write"] }, { mcp: ["unknown"] }, { description: "" }, { systemPrompt: "" }]) {
 		assert.throws(() => parseAssistedDraft(JSON.stringify({ ...draft, ...patch }), available));
+	}
+	for (const name of ["developer", "browser-verifier", "agent.v2", "_helper", "123", "node_modules-helper"]) {
+		assert.equal(parseAssistedDraft(JSON.stringify({ ...draft, name: ` ${name} ` }), available).name, name);
 	}
 	assert.deepEqual(draftForAssistance({ ...draft, env: { secret: "hidden" }, mcpServers: { private: {} } } as any), draft);
 });

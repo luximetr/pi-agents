@@ -1270,6 +1270,68 @@ test("Agent Studio creates an agent from the empty dashboard", async () => {
 	}
 });
 
+test("creation rejects undiscoverable names before writes in both scopes and discovers permitted names", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-create-names-"));
+	const previousHome = process.env.PI_CODING_AGENT_DIR;
+	try {
+		process.env.PI_CODING_AGENT_DIR = path.join(root, "home");
+		const project = path.join(root, "project");
+		await mkdir(project);
+		for (const scope of ["global", "project"] as const) {
+			for (const name of [".hidden", "node_modules", ".", "..", "../bad", "bad/name", "", "  "]) {
+				assert.throws(() => saveDeclarativeAgent(project, scope, { name, description: "Invalid" }), /agent name/);
+				assert.equal(existsSync(path.join(project, ".pi-agents")), false);
+				assert.equal(existsSync(process.env.PI_CODING_AGENT_DIR), false);
+			}
+		}
+		const names = ["developer", "browser-verifier", "agent.v2", "_helper", "123", "node_modules-helper"];
+		for (const scope of ["global", "project"] as const) {
+			for (const name of names) saveDeclarativeAgent(project, scope, { name: ` ${name} `, description: scope });
+			const found = (await discoverAgents(project)).agents;
+			assert.deepEqual(found.map(agent => agent.name).sort(), [...names].sort());
+			assert.ok(found.every(agent => agent.source === scope && agent.description === scope));
+		}
+		assert.ok((await discoverAgents(project, { includeProject: false })).agents.every(agent => agent.source === "global"));
+	} finally {
+		if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousHome;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("manual and reviewed AI creation reject hidden/reserved names early without stray directories", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-create-invalid-ui-"));
+	const previousHome = process.env.PI_CODING_AGENT_DIR;
+	try {
+		process.env.PI_CODING_AGENT_DIR = path.join(root, "home");
+		for (const scope of ["Project (commit with this repository)", "Global (all projects)"]) {
+			for (const method of ["Create manually", "Describe with AI"]) {
+				for (const name of [".hidden", "node_modules"]) {
+					const generated = JSON.stringify({ name, description: "Invalid", systemPrompt: "Do not save" });
+					const runtime = boot(root, {
+						mode: "tui", selectAnswers: [scope, method],
+						inputAnswers: [method === "Create manually" ? name : "Create an agent"],
+						editorAnswers: [generated, undefined],
+						customActions: [component => component.handleInput("\x1b[15~")],
+					});
+					if (method === "Create manually") runtime.ctx.ui.editor = async () => { assert.fail("invalid name must be rejected before description/prompt editing"); };
+					else enableStudioAI(runtime, generated);
+					await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+					await runtime.commands.get("agent").handler("", runtime.ctx);
+					assert.ok(runtime.notifications.some(entry => entry.level === "warning" && /excluded from discovery/.test(entry.message)));
+					assert.ok(!runtime.notifications.some(entry => /Created agent/.test(entry.message)));
+					assert.equal(existsSync(path.join(root, ".pi-agents")), false);
+					assert.equal(existsSync(path.join(root, "home")), false);
+				}
+			}
+		}
+	} finally {
+		if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousHome;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("Agent Studio creates and discovers warning-free agent.ts and prompt.md files", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-create-"));
 	try {

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, validateAgentName, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
 import messageTiming from "./message-timing.ts";
@@ -1042,8 +1042,14 @@ export default function (pi: ExtensionAPI) {
 			if (!generated) return;
 			draft = generated;
 		} else {
-			const name = (await ctx.ui.input("Agent name", "e.g. developer, browser-verifier"))?.trim();
-			if (!name) return;
+			const input = await ctx.ui.input("Agent name", "e.g. developer, browser-verifier");
+			if (!input?.trim()) return;
+			let name: string;
+			try { name = validateAgentName(input); }
+			catch (error) {
+				ctx.ui.notify((error as Error).message, "warning");
+				return;
+			}
 			const tools = pi.getActiveTools().filter(tool => available.tools.includes(tool));
 			draft = { name, description: "", tools, mcp: [], systemPrompt: "" };
 			const description = (await editAgentField(ctx, AgentField.Description, draft, available))?.trim();

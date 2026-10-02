@@ -1,5 +1,5 @@
 import { BorderedLoader, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { parseAgentColor, type DeclarativeAgentInput } from "./agents.ts";
+import { parseAgentColor, validateAgentName, type DeclarativeAgentInput } from "./agents.ts";
 import { AgentField } from "./studio-menu.ts";
 
 export interface AssistanceContext {
@@ -29,7 +29,7 @@ export function draftForAssistance(input: DeclarativeAgentInput): DeclarativeAge
 export function parseAssistedDraft(text: string, available: AssistanceContext): DeclarativeAgentInput {
 	const raw = JSON.parse(text.trim().replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```$/, ""));
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Expected a JSON object.");
-	if (typeof raw.name !== "string" || !/^[A-Za-z0-9._-]+$/.test(raw.name) || [".", ".."].includes(raw.name)) throw new Error("Use a valid agent name (letters, numbers, dot, underscore, hyphen).");
+	const name = validateAgentName(raw.name);
 	if (typeof raw.description !== "string" || !raw.description.trim()) throw new Error("A description is required.");
 	if (typeof raw.systemPrompt !== "string" || !raw.systemPrompt.trim()) throw new Error("A system prompt is required.");
 	if (raw.color !== undefined && raw.color !== null && !parseAgentColor(raw.color)) throw new Error("Color must be a theme role or #rrggbb (or null for automatic).");
@@ -39,7 +39,7 @@ export function parseAssistedDraft(text: string, available: AssistanceContext): 
 		}
 	}
 	return draftForAssistance({
-		name: raw.name, description: raw.description.trim(), color: parseAgentColor(raw.color),
+		name, description: raw.description.trim(), color: parseAgentColor(raw.color),
 		tools: raw.tools === undefined ? undefined : [...new Set<string>(raw.tools)],
 		mcp: [...new Set<string>(raw.mcp ?? [])], systemPrompt: raw.systemPrompt,
 	});

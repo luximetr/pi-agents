@@ -442,10 +442,22 @@ function listAgentFiles(dir: string): string[] {
 		.map((e) => path.join(dir, e.name));
 }
 
+function isDiscoverableAgentDirectory(name: string): boolean {
+	return !name.startsWith(".") && name !== "node_modules";
+}
+
+/** Validate and normalize names before any authoring work or filesystem writes. */
+export function validateAgentName(value: unknown): string {
+	const name = typeof value === "string" ? value.trim() : "";
+	if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("agent name may contain only letters, numbers, dot, underscore, and hyphen");
+	if (!isDiscoverableAgentDirectory(name)) throw new Error("agent name must not start with a dot or be node_modules (excluded from discovery)");
+	return name;
+}
+
 function listAgentDirs(dir: string): string[] {
 	if (!fs.existsSync(dir)) return [];
 	return fs.readdirSync(dir, { withFileTypes: true })
-		.filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules")
+		.filter((e) => e.isDirectory() && isDiscoverableAgentDirectory(e.name))
 		.map((e) => path.join(dir, e.name));
 }
 
@@ -1095,8 +1107,7 @@ function withSavedPrompt(promptPath: string, prompt: string, save: () => void): 
 
 /** Create a canonical agent.ts + prompt.md definition for Agent Studio. */
 export function saveDeclarativeAgent(cwd: string, scope: "project" | "global", input: DeclarativeAgentInput): string {
-	const name = input.name.trim();
-	if (!/^[A-Za-z0-9._-]+$/.test(name) || name === "." || name === "..") throw new Error("agent name may contain only letters, numbers, dot, underscore, and hyphen");
+	const name = validateAgentName(input.name);
 	if (!input.description.trim()) throw new Error("agent description is required");
 	if (input.color !== undefined && !parseAgentColor(input.color)) throw new Error("color must be a theme role or #rrggbb");
 	const root = scope === "global" ? getGlobalAgentsDir() : (findProjectAgentsDir(cwd) ?? path.join(findProjectRoot(cwd), ".pi-agents"));
