@@ -1,11 +1,12 @@
 import * as fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, resolveSubagentLifecycle, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, subagentAssignmentIdentity, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
 import messageTiming from "./message-timing.ts";
@@ -299,8 +300,12 @@ export default function (pi: ExtensionAPI) {
 		rebuildEffectiveAgents();
 	}
 
+	type TaskThread = { id: string; owner: string; agent: string; cwd: string; model?: string; rootSessionId: string; latestRunId: string };
 	type BackgroundResult = { runId: string; agent: string; task: string; text: string };
-	const backgroundRuns = new Map<string, BackgroundRunState & { controller: AbortController; result?: string }>();
+	// Both foreground and background runs remain replyable in this runtime.
+	const backgroundRuns = new Map<string, BackgroundRunState & { controller: AbortController; thread: TaskThread; background: boolean; result?: string }>();
+	let threadSessionDir = path.join(os.tmpdir(), `pi-agents-threads-${randomUUID()}`);
+	const pendingRuns = new Set<Promise<unknown>>();
 	let sessionGeneration = 0;
 	// Orca observes this shared lifecycle channel to keep the pane working
 	// after the main agent settles. Use run IDs, not child process IDs.
@@ -332,30 +337,9 @@ export default function (pi: ExtensionAPI) {
 	/** Custom tool name -> agent name that registered it (for collision warnings). */
 	const customToolOwners = new Map<string, string>();
 
-	// This is registered once, but is added to the active toolset only for
-	// agents that explicitly declare the target agent(s) in `subagents`.
-	pi.registerTool({
-		name: DELEGATE_TOOL,
-		label: "Delegate",
-		description: `Delegate a focused task to one of the current agent's allowed subagents. Independent delegate calls can run in parallel. Use background: true to return a run ID immediately and receive results after the main agent settles; use subagent_control to list runs, check live status, steer, stop, or retrieve results. Results are capped at ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; full oversized output is saved to a temporary file.`,
-		promptSnippet: "delegate: ask an allowed specialist to complete a focused task",
-		promptGuidelines: [
-			"Use delegate only for focused tasks that benefit from a fresh specialist context; include relevant paths, constraints, and expected output in the task.",
-			"When several delegate tasks are independent, issue their delegate calls together so they can run in parallel.",
-		],
-		parameters: jsonSchemaToTypeBox({
-			type: "object",
-			properties: {
-				agent: { type: "string", description: "Name of an allowed subagent" },
-				task: { type: "string", description: "Self-contained task; include relevant paths and expected output" },
-				background: { type: "boolean", description: "Run in the background without blocking the main agent (default false)" },
-			},
-			required: ["agent", "task"],
-			additionalProperties: false,
-		}),
-		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+	const executeDelegation: ToolDefinition["execute"] = async (toolCallId, params, signal, onUpdate, ctx) => {
 			const parent = activeAgent;
-			const input = params as { agent?: unknown; task?: unknown; background?: boolean };
+			const input = params as { agent?: unknown; task?: unknown; background?: boolean; replyRunId?: string };
 			const agentName = String(input.agent ?? "").trim();
 			const task = String(input.task ?? "").trim();
 			const subagent = parent?.subagents?.find((candidate) => candidate.name === agentName);
@@ -367,23 +351,35 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!task) return { content: [{ type: "text", text: "Delegation requires a non-empty task." }], details: {} };
 			const timeoutSeconds = subagent.timeoutSeconds;
-			const childAgent = agents.find((agent) => agent.name === agentName)!;
-			const lifecycle = resolveSubagentLifecycle(subagent);
+			const previousRun = input.replyRunId ? backgroundRuns.get(input.replyRunId) : undefined;
+			if (input.replyRunId && !previousRun) throw new Error("Unknown run ID.");
+			if (previousRun) {
+				if (previousRun.thread.owner !== parent!.name || previousRun.thread.agent !== agentName || previousRun.thread.cwd !== ctx.cwd) throw new Error("Reply denied: this thread belongs to another parent, agent, or workspace.");
+				if (previousRun.thread.latestRunId !== input.replyRunId) throw new Error(`Reply to the latest run instead: ${previousRun.thread.latestRunId}`);
+				if (previousRun.status === "running") throw new Error("Thread is busy; use steer on the active run.");
+				if (previousRun.status !== "completed") throw new Error("Only completed runs can receive replies. Start a fresh delegation after a failed or interrupted run.");
+			}
 			const inheritedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 			const thinkingLevel = pi.getThinkingLevel?.();
-			const selectedModel = subagent.model ?? (inheritedModel && thinkingLevel ? `${inheritedModel}:${thinkingLevel}` : inheritedModel);
+			const selectedModel = previousRun ? previousRun.thread.model : subagent.model ?? (inheritedModel && thinkingLevel ? `${inheritedModel}:${thinkingLevel}` : inheritedModel);
 			const runId = newRunId();
+			const thread: TaskThread = previousRun?.thread ?? {
+				id: `thread-${randomUUID()}`, owner: parent!.name, agent: agentName, cwd: ctx.cwd, model: selectedModel,
+				rootSessionId: process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.() ?? randomUUID(),
+				latestRunId: runId,
+			};
+			// Reserve synchronously before any await, including concurrent reply calls.
+			thread.latestRunId = runId;
+			const sessionDir = threadSessionDir;
 			const generation = sessionGeneration;
 			const runObserver = observer;
 			const runTurnStats = turnSubagentStats;
 			const background = input.background === true;
 			const controller = new AbortController();
-			if (background) {
-				const startedAt = Date.now();
-				backgroundRuns.set(runId, { agent: agentName, task, controller, status: "running", model: selectedModel, startedAt,
-					deadlineAt: timeoutSeconds === undefined ? undefined : startedAt + timeoutSeconds * 1000 });
-				emitBackgroundLifecycle(runId, agentName, "started");
-			}
+			const runStartedAt = Date.now();
+			backgroundRuns.set(runId, { agent: agentName, task, controller, thread, background, status: "running", model: selectedModel, startedAt: runStartedAt,
+				deadlineAt: timeoutSeconds === undefined ? undefined : runStartedAt + timeoutSeconds * 1000 });
+			if (background) emitBackgroundLifecycle(runId, agentName, "started");
 			const executeRun = async (): Promise<{ content: { type: "text"; text: string }[]; details: DelegateStatsDetails }> => {
 			try {
 				observerContext = ctx;
@@ -451,11 +447,12 @@ export default function (pi: ExtensionAPI) {
 					if (lines.length > MAX_PROGRESS_LINES) streamedText = lines.slice(-MAX_PROGRESS_LINES).join("\n");
 					publish();
 				};
-				const result = await runSubagent(agentName, task, ctx.cwd, background ? controller.signal : signal ?? controller.signal, {
+				const result = await runSubagent(agentName, task, ctx.cwd, background || !signal ? controller.signal : AbortSignal.any([signal, controller.signal]), {
 					model: selectedModel,
-					lifecycle,
-					rootSessionId: process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.(),
-					participantIdentity: subagentAssignmentIdentity(parent!, childAgent),
+					rootSessionId: thread.rootSessionId,
+					threadId: thread.id,
+					resume: !!previousRun,
+					participantSessionDir: sessionDir,
 					id: runId,
 					observerEndpoint,
 					parentRunId: process.env[RUN_ID_ENV],
@@ -524,29 +521,48 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			};
-			if (!background) return executeRun();
-			void executeRun().then(result => {
-				if (generation !== sessionGeneration) return;
+			const execution = executeRun().then(result => {
+				result.content[0].text += `\n\nThread ID: ${thread.id}\nRun ID: ${runId}`;
+				Object.assign(result.details, { threadId: thread.id, runId });
+				if (generation !== sessionGeneration) return result;
 				const run = backgroundRuns.get(runId)!;
 				run.status = result.details.status ?? "completed";
 				run.endedAt = Date.now();
 				run.result = result.content.map(item => item.text).join("\n");
-				emitBackgroundLifecycle(runId, agentName, run.status === "completed" ? "completed" : run.status === "interrupted" ? "aborted" : "failed");
-				inbox.push({ runId, agent: agentName, task, text: run.result });
-			}).catch(error => {
-				if (generation !== sessionGeneration) return;
-				const run = backgroundRuns.get(runId)!;
-				run.status = "failed";
-				run.endedAt = Date.now();
-				run.result = String(error);
-				emitBackgroundLifecycle(runId, agentName, "failed");
-				inbox.push({ runId, agent: agentName, task, text: run.result });
+				if (background) {
+					emitBackgroundLifecycle(runId, agentName, run.status === "completed" ? "completed" : run.status === "interrupted" ? "aborted" : "failed");
+					inbox.push({ runId, agent: agentName, task, text: run.result });
+				}
+				return result;
 			});
+			pendingRuns.add(execution);
+			void execution.finally(() => pendingRuns.delete(execution)).catch(() => {});
+			if (!background) return execution;
 			return {
-				content: [{ type: "text", text: `Started background subagent ${agentName}. Run ID: ${runId}. Continue working or respond to the user; completion will be delivered after your current flow finishes.` }],
-				details: { agent: agentName, task, runId, status: "running" },
+				content: [{ type: "text", text: `Started background subagent ${agentName}. Run ID: ${runId}. Thread ID: ${thread.id}. Continue working or respond to the user; completion will be delivered after your current flow finishes.` }],
+				details: { agent: agentName, task, runId, threadId: thread.id, status: "running" },
 			};
-		},
+	};
+
+	pi.registerTool({
+		name: DELEGATE_TOOL,
+		label: "Delegate",
+		description: `Start a fresh, isolated task thread with an allowed subagent. Independent tasks, including tasks for the same agent, run in parallel. Use background: true to return runId and threadId immediately; completion arrives after the main agent settles. Use subagent_control reply on a completed run to continue its conversation, or steer while running. Results are capped at ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; oversized output is saved to a file.`,
+		promptSnippet: "delegate: start a fresh task with an allowed specialist",
+		promptGuidelines: [
+			"Each delegate call starts a fresh conversation. Include relevant paths, constraints, and expected output.",
+			"Issue independent tasks together for parallel execution. Use subagent_control reply, not another delegate, to answer a worker's question or continue its task.",
+		],
+		parameters: jsonSchemaToTypeBox({
+			type: "object",
+			properties: {
+				agent: { type: "string", description: "Name of an allowed subagent" },
+				task: { type: "string", description: "Self-contained task" },
+				background: { type: "boolean", description: "Run in the background (default false)" },
+			},
+			required: ["agent", "task"], additionalProperties: false,
+		}),
+		execute: executeDelegation,
 		renderCall(args, theme) {
 			const call = args as { agent?: unknown; task?: unknown };
 			const name = typeof call.agent === "string" ? call.agent.trim() : "";
@@ -564,24 +580,29 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: SUBAGENT_CONTROL_TOOL,
 		label: "Subagent control",
-		description: "List session-owned background runs, check live status (phase, current tool, model, elapsed/idle time, deadline), retrieve a result, steer a running subagent, or stop it. List and status are read-only and do not wait for completion or consume pending results.",
+		description: "List session-owned runs, inspect status/results, steer or stop an active run, or reply to the latest completed run. Reply starts a new background run in the same thread with saved conversation context. Busy threads require steer; stale run IDs and failed runs cannot receive replies. Recheck workspace files on follow-up work. List/status do not wait or consume results.",
 		parameters: jsonSchemaToTypeBox({
 			type: "object",
 			properties: {
-				action: { type: "string", enum: ["list", "status", "result", "steer", "stop"] },
-				runId: { type: "string", description: "Run ID returned by background delegate; required for status, result, steer, and stop" },
-				message: { type: "string", description: "Instructions for steer" },
+				action: { type: "string", enum: ["list", "status", "result", "reply", "steer", "stop"] },
+				runId: { type: "string", description: "Run ID returned by delegate/reply; required except for list" },
+				message: { type: "string", description: "Answer or instructions for reply/steer" },
 			},
 			required: ["action"], additionalProperties: false,
 		}),
-		execute: async (_id, params) => {
+		execute: async (_id, params, signal, onUpdate, ctx) => {
 			const { action, runId, message } = params as { action: string; runId?: string; message?: string };
 			const reply = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
 			const snapshots = new Map(observer.handles().map(handle => [handle.id, handle.snapshot()]));
-			if (action === "list") return reply(JSON.stringify([...backgroundRuns].map(([id, run]) => backgroundRunStatus(id, run, snapshots.get(id)))));
+			const status = (id: string, run: NonNullable<ReturnType<typeof backgroundRuns.get>>) => ({ ...backgroundRunStatus(id, run, snapshots.get(id)), threadId: run.thread.id, latestRunId: run.thread.latestRunId });
+			if (action === "list") return reply(JSON.stringify([...backgroundRuns].map(([id, run]) => status(id, run))));
 			const run = runId ? backgroundRuns.get(runId) : undefined;
-			if (!run || !runId) return reply("Unknown background run ID.");
-			if (action === "status") return reply(JSON.stringify(backgroundRunStatus(runId, run, snapshots.get(runId))));
+			if (!run || !runId) return reply("Unknown run ID.");
+			if (action === "status") return reply(JSON.stringify(status(runId, run)));
+			if (action === "reply") {
+				if (!message?.trim()) throw new Error("Reply requires a non-empty message.");
+				return executeDelegation(_id, { agent: run.agent, task: message.trim(), background: true, replyRunId: runId }, signal, onUpdate, ctx);
+			}
 			if (action === "result") return reply(run.result ?? `Run ${runId} is ${run.status}.`);
 			if (run.status !== "running") return reply(`Run ${runId} is ${run.status}.`);
 			const handle = observer.handles().find(handle => handle.id === runId);
@@ -1092,7 +1113,7 @@ export default function (pi: ExtensionAPI) {
 			const runtime = [
 				childConfig.model ? `model ${childConfig.model}` : "default model",
 				childConfig.timeoutSeconds ? `${childConfig.timeoutSeconds}s deadline` : "no deadline",
-				`${resolveSubagentLifecycle(childConfig)} lifecycle`,
+				"fresh replyable task threads",
 			].join(", ");
 			return `- ${childConfig.name}: ${child?.description ?? "specialist agent"} (${runtime})`;
 		});
@@ -1100,7 +1121,7 @@ export default function (pi: ExtensionAPI) {
 			"You may delegate focused work to these allowed subagents:",
 			...lines,
 			"Use a self-contained task with relevant paths and expected output. Issue independent delegate calls together to run them in parallel.",
-			"Use background: true to keep working or respond to the user while subagents run. Results arrive after your current flow finishes; do not repeatedly poll. Use subagent_control to list runs, check live status, steer, stop, or retrieve background results. Parallel workers share the working directory: assign separate files or worktrees to avoid conflicting edits.",
+			"Each delegate call starts a fresh replyable task thread; same-agent tasks can run in parallel. Use background: true to keep working while subagents run. Results arrive after your current flow finishes; do not repeatedly poll. Use subagent_control reply with the latest completed runId to answer a question or continue that conversation; replies start a new background run. Use steer while running, or list, status, stop, and result to manage runs. Recheck relevant files when continuing work because the workspace may have changed. Parallel workers share the working directory: assign separate files or worktrees to avoid conflicting edits.",
 		].join("\n");
 	}
 
@@ -1228,13 +1249,17 @@ export default function (pi: ExtensionAPI) {
 		inbox.close();
 		for (const [runId, run] of backgroundRuns) {
 			run.controller.abort();
-			if (run.status === "running") emitBackgroundLifecycle(runId, run.agent, "aborted");
+			if (run.background && run.status === "running") emitBackgroundLifecycle(runId, run.agent, "aborted");
 		}
 		backgroundRuns.clear();
 		inbox = createInbox();
 		observerContext = undefined;
 		await observer.shutdown(config.subagents?.gracefulStopSeconds ?? DEFAULT_GRACEFUL_STOP_SECONDS);
 		observer = createObserver();
+		// Wait for child exits/lock release before deleting their private histories.
+		await Promise.allSettled([...pendingRuns]);
+		await fs.promises.rm(threadSessionDir, { recursive: true, force: true });
+		threadSessionDir = path.join(os.tmpdir(), `pi-agents-threads-${randomUUID()}`);
 		await mcpManager.disconnectAll();
 	});
 

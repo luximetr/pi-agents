@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { discoverAgents, findMainCheckoutRoot, resolveSubagentLifecycle, subagentAssignmentIdentity } from "../agents.ts";
+import { discoverAgents, findMainCheckoutRoot } from "../agents.ts";
 import extension, { matchesDeniedPath } from "../index.ts";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { MAX_SUBAGENT_DEPTH, SubagentStoppedError, displaySubagentModel, runSubagent, type RunningSubagentHandle } from "../subagents.ts";
@@ -63,7 +63,7 @@ test("smoke: discovers an agent hierarchy", async () => {
 	try {
 		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
-			export default { name: "lead", description: "Coordinator", subagents: ["worker", { name: "researcher", model: "test/research-model", timeoutSeconds: 45, lifecycle: "resumable" }] };
+			export default { name: "lead", description: "Coordinator", subagents: ["worker", { name: "researcher", model: "test/research-model", timeoutSeconds: 45 }] };
 		`);
 		await mkdir(path.join(root, ".pi-agents", "worker"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
@@ -73,7 +73,7 @@ test("smoke: discovers an agent hierarchy", async () => {
 		const lead = result.agents.find((agent) => agent.name === "lead");
 		assert.deepEqual(lead?.subagents, [
 			{ name: "worker" },
-			{ name: "researcher", model: "test/research-model", timeoutSeconds: 45, lifecycle: "resumable" },
+			{ name: "researcher", model: "test/research-model", timeoutSeconds: 45 },
 		]);
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -86,7 +86,7 @@ test("end to end: delegate launches an isolated child with the target agent", as
 	try {
 		await writeFile(fakePi, `#!/usr/bin/env node
 			const args = process.argv.slice(2);
-			if (args[0] !== "--mode" || args[1] !== "rpc" || args[2] !== "--no-session" || args[3] !== "--agent" || args[4] !== "worker") process.exit(2);
+			if (args[0] !== "--mode" || args[1] !== "rpc" || args[2] !== "--session" || args[4] !== "--agent" || args[5] !== "worker") process.exit(2);
 			let input = "";
 			process.stdin.on("data", chunk => {
 				input += chunk;
@@ -122,7 +122,7 @@ test("end to end: delegate launches an isolated child with the target agent", as
 	}
 });
 
-test("resumable assignments use one serialized disk session per root and assignment identity", async () => {
+test("task threads run in parallel and explicit continuations reuse only their thread history", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-resumable-"));
 	const fakePi = path.join(root, "fake-pi.mjs");
 	const log = path.join(root, "runs.log");
@@ -148,30 +148,30 @@ test("resumable assignments use one serialized disk session per root and assignm
 		`);
 		await chmod(fakePi, 0o755);
 		await mkdir(sessionDir, { mode: 0o755 });
-		const shared = { executable: fakePi, lifecycle: "resumable" as const, rootSessionId: "root-one", participantIdentity: "project:/agent/worker", participantSessionDir: sessionDir };
+		const shared = { executable: fakePi, rootSessionId: "root-one", threadId: "task-one", participantSessionDir: sessionDir };
 		const replies = await Promise.all([
 			runSubagent("worker", "one", root, noAbort, shared),
-			runSubagent("worker", "two", root, noAbort, shared),
+			runSubagent("worker", "two", root, noAbort, { ...shared, threadId: "task-two" }),
 		]);
 		assert.deepEqual(replies.sort(), ["reply:one", "reply:two"]);
-		await runSubagent("worker", "other-root", root, noAbort, { ...shared, rootSessionId: "root-two" });
+		await runSubagent("worker", "followup", root, noAbort, shared);
 		const lines = readFileSync(log, "utf8").trim().split("\n");
 		assert.match(lines[0], /^start (one|two) /);
-		assert.match(lines[1], /^end (one|two)$/);
-		assert.match(lines[2], /^start (one|two) /);
+		assert.match(lines[1], /^start (one|two) /);
+		assert.match(lines[2], /^end (one|two)$/);
 		assert.match(lines[3], /^end (one|two)$/);
-		const firstSession = lines[0].split(" ").at(-1);
-		const secondSession = lines[2].split(" ").at(-1);
-		const otherSession = lines[4].split(" ").at(-1);
-		assert.equal(firstSession, secondSession);
-		assert.notEqual(firstSession, otherSession);
+		const firstSession = lines.find(line => line.startsWith("start one "))!.split(" ").at(-1);
+		const secondSession = lines.find(line => line.startsWith("start two "))!.split(" ").at(-1);
+		const replySession = lines[4].split(" ").at(-1);
+		assert.notEqual(firstSession, secondSession);
+		assert.equal(firstSession, replySession);
 		assert.equal(statSync(sessionDir).mode & 0o777, 0o700, "existing participant storage is made private");
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
-test("nested delegation fails visibly when a resumable participant is already busy", async () => {
+test("nested delegation fails visibly when a task thread is already busy", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-busy-"));
 	const fakePi = path.join(root, "fake-pi.mjs");
 	const started = path.join(root, "started");
@@ -190,7 +190,7 @@ test("nested delegation fails visibly when a resumable participant is already bu
 		`);
 		await chmod(fakePi, 0o755);
 		delete process.env.PI_AGENTS_SUBAGENT_DEPTH;
-		const options = { executable: fakePi, lifecycle: "resumable" as const, rootSessionId: "root", participantIdentity: "busy-B", participantSessionDir: path.join(root, "sessions") };
+		const options = { executable: fakePi, rootSessionId: "root", threadId: "busy-B", participantSessionDir: path.join(root, "sessions") };
 		topLevel = runSubagent("B", "top-level B", root, noAbort, options);
 		for (let i = 0; i < 200 && !existsSync(started); i++) await new Promise(resolve => setTimeout(resolve, 10));
 		assert.ok(existsSync(started));
@@ -199,7 +199,7 @@ test("nested delegation fails visibly when a resumable participant is already bu
 		// runSubagent captures inherited depth synchronously; restore the process
 		// environment before awaiting so concurrent node:test cases cannot inherit it.
 		delete process.env.PI_AGENTS_SUBAGENT_DEPTH;
-		await assert.rejects(nested, /already busy; nested delegation refuses to queue/);
+		await assert.rejects(nested, /already busy; use steer/);
 		assert.equal(await topLevel, "done");
 	} finally {
 		if (previousDepth === undefined) delete process.env.PI_AGENTS_SUBAGENT_DEPTH;
@@ -209,7 +209,7 @@ test("nested delegation fails visibly when a resumable participant is already bu
 	}
 });
 
-test("resumable queue timeout and cancellation use the real queue start", async () => {
+test("concurrent turns in one thread reject immediately rather than queue", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-queued-stop-"));
 	const fakePi = path.join(root, "fake-pi.mjs");
 	const log = path.join(root, "starts.log");
@@ -225,35 +225,12 @@ test("resumable queue timeout and cancellation use the real queue start", async 
 			});
 		`);
 		await chmod(fakePi, 0o755);
-		const options = { executable: fakePi, lifecycle: "resumable" as const, rootSessionId: "root", participantIdentity: "worker", participantSessionDir: path.join(root, "sessions") };
+		const options = { executable: fakePi, rootSessionId: "root", threadId: "worker", participantSessionDir: path.join(root, "sessions") };
 		const holder = runSubagent("worker", "holder", root, noAbort, options);
 		for (let i = 0; i < 50 && !existsSync(log); i++) await new Promise(resolve => setTimeout(resolve, 10));
-		const timeoutStartedAt = Date.now();
-		await assert.rejects(runSubagent("worker", "queued timeout", root, noAbort, { ...options, timeoutSeconds: 0.06 }), (error: unknown) => {
-			assert.ok(error instanceof SubagentStoppedError);
-			assert.equal(error.reason, "timeout");
-			assert.ok(error.snapshot.startedAt >= timeoutStartedAt && error.snapshot.startedAt < timeoutStartedAt + 30);
-			assert.match(error.snapshot.phase, /while queued/);
-			return true;
-		});
-		assert.ok(Date.now() - timeoutStartedAt < 180, "queue wait consumed the deadline without launching");
-		await holder;
-
-		const holder2 = runSubagent("worker", "holder 2", root, noAbort, options);
-		while (readFileSync(log, "utf8").trim().split("\n").length < 2) await new Promise(resolve => setTimeout(resolve, 10));
-		const controller = new AbortController();
-		const cancelStartedAt = Date.now();
-		const queued = runSubagent("worker", "queued cancel", root, controller.signal, options);
-		setTimeout(() => controller.abort(), 40);
-		await assert.rejects(queued, (error: unknown) => {
-			assert.ok(error instanceof SubagentStoppedError);
-			assert.equal(error.reason, "parent");
-			assert.ok(error.snapshot.startedAt >= cancelStartedAt && error.snapshot.startedAt < cancelStartedAt + 30);
-			assert.match(error.snapshot.phase, /cancelled while queued/);
-			return true;
-		});
-		await holder2;
-		assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 2);
+		await assert.rejects(runSubagent("worker", "concurrent reply", root, noAbort, options), /already busy; use steer/);
+		assert.equal(await holder, "done");
+		assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 1);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
@@ -270,8 +247,8 @@ test("stale resumable locks fail without unsafe automatic recovery", async () =>
 		await mkdir(lockPath, { recursive: true });
 		await writeFile(path.join(lockPath, "owner.json"), JSON.stringify({ pid: 2147483647, token: "stale" }));
 		await assert.rejects(runSubagent("worker", "task", root, noAbort, {
-			lifecycle: "resumable", rootSessionId, participantIdentity, participantSessionDir: sessionDir,
-		}), /stale resumable participant lock.*verify no child is running/);
+			rootSessionId, threadId: participantIdentity, participantSessionDir: sessionDir,
+		}), /already busy; use steer/);
 		assert.ok(existsSync(path.join(lockPath, "owner.json")), "stale ownership is preserved for manual recovery");
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -298,7 +275,7 @@ test("resumable sessions reject malformed, truncated, and broken JSONL before la
 		`);
 		await chmod(fakePi, 0o755);
 		await mkdir(sessionDir, { recursive: true });
-		const options = { executable: fakePi, lifecycle: "resumable" as const, rootSessionId, participantIdentity, participantSessionDir: sessionDir };
+		const options = { executable: fakePi, rootSessionId, threadId: participantIdentity, participantSessionDir: sessionDir };
 		const header = JSON.stringify({ type: "session", version: 3, id: "session-id", timestamp: new Date().toISOString(), cwd: root });
 		const first = JSON.stringify({ type: "message", id: "a1b2c3d4", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: "hello", timestamp: Date.now() } });
 		const sdkDir = path.join(root, "sdk-session");
@@ -328,18 +305,7 @@ test("resumable sessions reject malformed, truncated, and broken JSONL before la
 	}
 });
 
-test("assignment lifecycle defaults to disposable and contexts are parent-child scoped", () => {
-	assert.equal(resolveSubagentLifecycle({ name: "worker", lifecycle: "resumable" }), "resumable");
-	assert.equal(resolveSubagentLifecycle({ name: "worker" }), "disposable");
-
-	const worker = { name: "worker", source: "project" as const, filePath: "/agents/worker.ts" };
-	const lead = { name: "lead", source: "project" as const, filePath: "/agents/lead.ts" };
-	const reviewer = { name: "reviewer", source: "project" as const, filePath: "/agents/reviewer.ts" };
-	assert.equal(subagentAssignmentIdentity(lead, worker), subagentAssignmentIdentity(lead, worker));
-	assert.notEqual(subagentAssignmentIdentity(lead, worker), subagentAssignmentIdentity(reviewer, worker));
-});
-
-test("agent lifecycle metadata is ignored and assignment lifecycle is validated", async () => {
+test("removed lifecycle metadata is not part of normalized agent assignments", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-lifecycle-"));
 	try {
 		await mkdir(path.join(root, ".pi-agents", "keep"), { recursive: true });
@@ -348,7 +314,7 @@ test("agent lifecycle metadata is ignored and assignment lifecycle is validated"
 		await writeFile(path.join(root, ".pi-agents", "parent", "agent.json"), JSON.stringify({ name: "parent", description: "Parent", subagents: [{ name: "keep", lifecycle: "session" }] }));
 		const agents = (await discoverAgents(root)).agents;
 		assert.equal("lifecycle" in agents.find(agent => agent.name === "keep")!, false);
-		assert.equal(agents.find(agent => agent.name === "parent")?.subagents, undefined);
+		assert.deepEqual(agents.find(agent => agent.name === "parent")?.subagents, [{ name: "keep" }]);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
@@ -656,15 +622,19 @@ test("delegation inherits the currently selected parent model unless configured 
 				assert.ok(updates.some(update => update.details.model === expectedModel && update.details.status === "running"));
 				assert.match(delegate.renderCall({ agent, task: "report args" }, ctx.ui.theme).render(120).join("\n"), new RegExp(expectedModel));
 			}
-			return JSON.parse(String(result.content[0].text).split("\n\n")[1]);
+			const args = JSON.parse(String(result.content[0].text).split("\n\n")[1]);
+			assert.equal(args[2], "--session");
+			assert.match(args[3], /\.jsonl$/);
+			args.splice(2, 2, "<thread-session>");
+			return args;
 		}
 		ctx.model = { provider: "test", id: "selected-one" };
-		assert.deepEqual(await argsFor("worker", "test/selected-one:max"), ["--mode", "rpc", "--no-session", "--agent", "worker", "--model", "test/selected-one:max"]);
+		assert.deepEqual(await argsFor("worker", "test/selected-one:max"), ["--mode", "rpc", "<thread-session>", "--agent", "worker", "--model", "test/selected-one:max"]);
 		ctx.model = { provider: "other", id: "selected-two" };
-		assert.deepEqual(await argsFor("worker", "other/selected-two:max"), ["--mode", "rpc", "--no-session", "--agent", "worker", "--model", "other/selected-two:max"]);
-		assert.deepEqual(await argsFor("fixed", "test/fixed-model:high"), ["--mode", "rpc", "--no-session", "--agent", "fixed", "--model", "test/fixed-model:high"]);
+		assert.deepEqual(await argsFor("worker", "other/selected-two:max"), ["--mode", "rpc", "<thread-session>", "--agent", "worker", "--model", "other/selected-two:max"]);
+		assert.deepEqual(await argsFor("fixed", "test/fixed-model:high"), ["--mode", "rpc", "<thread-session>", "--agent", "fixed", "--model", "test/fixed-model:high"]);
 		ctx.model = undefined;
-		assert.deepEqual(await argsFor("worker"), ["--mode", "rpc", "--no-session", "--agent", "worker"]);
+		assert.deepEqual(await argsFor("worker"), ["--mode", "rpc", "<thread-session>", "--agent", "worker"]);
 	} finally {
 		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
 		else process.env.PI_CODING_AGENT_BIN = previousBin;
@@ -682,15 +652,15 @@ test("end to end: configured subagent timeout returns control to the parent dele
 			subagents: { gracefulStopSeconds: 0.01 },
 		}));
 		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
-			export default { name: "lead", description: "Lead", default: true, subagents: [{ name: "worker", model: "test/worker-model", timeoutSeconds: 1.5, lifecycle: "disposable" }] };
+			export default { name: "lead", description: "Lead", default: true, subagents: [{ name: "worker", model: "test/worker-model", timeoutSeconds: 1.5 }] };
 		`);
 		await mkdir(path.join(root, ".pi-agents", "worker"), { recursive: true });
 		await writeFile(path.join(root, ".pi-agents", "worker", "agent.ts"), `
-			export default { name: "worker", description: "Worker", lifecycle: "resumable" };
+			export default { name: "worker", description: "Worker" };
 		`);
 		await writeFile(fakePi, `#!/usr/bin/env node
 			const args = process.argv.slice(2);
-			const expected = ["--mode", "rpc", "--no-session", "--agent", "worker", "--model", "test/worker-model"];
+			const expected = ["--mode", "rpc", "--session", args[3], "--agent", "worker", "--model", "test/worker-model"];
 			if (JSON.stringify(args) !== JSON.stringify(expected)) process.exit(2);
 			process.stdin.on("data", chunk => {
 				const command = JSON.parse(String(chunk).trim());

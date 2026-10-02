@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -99,6 +100,112 @@ function boot(root: string, options?: {
 	return { pi, handlers, commands, activeToolsets, notifications, entries, tools, statuses, lifecycleEvents, getCustomComponent: () => customComponent, ctx };
 }
 
+test("task threads: parallel isolation, replies, stale/busy guards, ownership, and cleanup", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-thread-e2e-"));
+	const executable = path.join(root, "fake-pi.mjs");
+	const previousExecutable = process.env.PI_CODING_AGENT_BIN;
+	const runtime = boot(root);
+	runtime.pi.sendMessage = () => {};
+	runtime.ctx.isIdle = () => true;
+	runtime.ctx.hasPendingMessages = () => false;
+	const control = (action: string, runId?: string, message?: string) => runtime.tools.get("subagent_control").execute("control", { action, runId, message }, undefined, undefined, runtime.ctx);
+	const status = async (id: string) => JSON.parse((await control("status", id)).content[0].text);
+	const wait = async (check: () => Promise<boolean>) => {
+		const deadline = Date.now() + 5000;
+		while (!await check()) {
+			assert.ok(Date.now() < deadline, "thread did not reach expected state");
+			await new Promise(resolve => setTimeout(resolve, 10));
+		}
+	};
+	try {
+		await makeAgent(root, "lead", 'default: true, subagents: ["worker"]');
+		await makeAgent(root, "other", 'subagents: ["worker"]');
+		await makeAgent(root, "worker");
+		await writeFile(executable, `#!/usr/bin/env node
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+const args = process.argv.slice(2);
+const file = args[args.indexOf("--session") + 1];
+const send = event => process.stdout.write(JSON.stringify(event) + "\\n");
+process.stdin.once("data", chunk => {
+ const task = JSON.parse(String(chunk).split("\\n")[0]).message;
+ const entries = existsSync(file) ? readFileSync(file, "utf8").trim().split("\\n").map(JSON.parse) : [];
+ if (!entries.length) {
+  const header = {type:"session", version:3, id:randomUUID(), timestamp:new Date().toISOString(), cwd:process.cwd()};
+  writeFileSync(file, JSON.stringify(header) + "\\n");
+  entries.push(header);
+ }
+ const prior = entries.filter(e => e.type === "message").map(e => e.message.content);
+ const entry = {type:"message", id:randomUUID(), parentId:entries.length > 1 ? entries.at(-1).id : null, timestamp:new Date().toISOString(), message:{role:"user", content:task, timestamp:Date.now()}};
+ appendFileSync(file, JSON.stringify(entry) + "\\n");
+ appendFileSync(${JSON.stringify(path.join(root, "starts.jsonl"))}, JSON.stringify({task, file, at:Date.now()}) + "\\n");
+ send({type:"agent_start"});
+ setTimeout(() => {
+  send({type:"message_end", message:{role:"assistant", content:[{type:"text", text:JSON.stringify({prior, task, file, model:args[args.indexOf("--model") + 1]})}]}});
+  send({type:"agent_settled"});
+ }, task === "question" ? 150 : 300);
+});`);
+		await chmod(executable, 0o755);
+		process.env.PI_CODING_AGENT_BIN = executable;
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		runtime.ctx.model = { provider: "test", id: "original" };
+		const delegate = (task: string, background = true) => runtime.tools.get("delegate").execute("delegate", { agent: "worker", task, background }, undefined, undefined, runtime.ctx);
+		const a = await delegate("question");
+		const b = await delegate("independent");
+		assert.notEqual(a.details.threadId, b.details.threadId);
+		await assert.rejects(control("reply", a.details.runId, "too soon"), /busy.*steer/);
+		await wait(async () => (await status(a.details.runId)).status === "completed" && (await status(b.details.runId)).status === "completed");
+		const starts = readFileSync(path.join(root, "starts.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+		assert.equal(starts.length, 2);
+		assert.notEqual(starts[0].file, starts[1].file);
+		assert.ok(Math.max(...starts.map(row => row.at)) < Math.min((await status(a.details.runId)).endedAt, (await status(b.details.runId)).endedAt), "same-agent threads overlap");
+		await assert.rejects(control("reply", a.details.runId, " "), /non-empty/);
+		await runtime.commands.get("agent").handler("other", runtime.ctx);
+		await assert.rejects(control("reply", a.details.runId, "wrong owner"), /Reply denied/);
+		await runtime.commands.get("agent").handler("lead", runtime.ctx);
+		runtime.ctx.model = { provider: "test", id: "changed" };
+		const attempts = await Promise.allSettled([
+			control("reply", a.details.runId, "answer"),
+			control("reply", a.details.runId, "duplicate"),
+		]);
+		assert.equal(attempts.filter(item => item.status === "fulfilled").length, 1);
+		const continued = (attempts.find(item => item.status === "fulfilled") as PromiseFulfilledResult<any>).value;
+		assert.equal(continued.details.threadId, a.details.threadId);
+		assert.notEqual(continued.details.runId, a.details.runId);
+		await assert.rejects(control("reply", a.details.runId, "stale"), /latest run/);
+		await wait(async () => (await status(continued.details.runId)).status === "completed");
+		const result = (await control("result", continued.details.runId)).content[0].text;
+		assert.match(result, /"prior":\["question"\]/);
+		assert.match(result, /"task":"answer"/);
+		assert.match(result, /test\/original/);
+		assert.doesNotMatch(result, /independent/);
+		const foreground = await delegate("foreground", false);
+		assert.ok(foreground.details.runId && foreground.details.threadId);
+		const foregroundReply = await control("reply", foreground.details.runId, "followup");
+		await wait(async () => (await status(foregroundReply.details.runId)).status === "completed");
+		const foregroundResult = (await control("result", foregroundReply.details.runId)).content[0].text;
+		assert.match(foregroundResult, /"prior":\["foreground"\]/);
+		const savedFile = JSON.parse(foregroundResult.split("\n\n")[1]).file;
+		await rm(savedFile);
+		const missingHistory = await control("reply", foregroundReply.details.runId, "must not start fresh");
+		await wait(async () => (await status(missingHistory.details.runId)).status === "failed");
+		assert.match((await control("result", missingHistory.details.runId)).content[0].text, /history is missing/);
+		const stopped = await delegate("stop me");
+		await control("stop", stopped.details.runId);
+		await wait(async () => ["failed", "interrupted", "timed_out"].includes((await status(stopped.details.runId)).status));
+		await assert.rejects(control("reply", stopped.details.runId, "retry"), /Only completed/);
+		const storage = path.dirname(starts[0].file);
+		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		assert.equal(existsSync(storage), false, "shutdown removes saved task histories");
+		assert.deepEqual(JSON.parse((await control("list")).content[0].text), []);
+	} finally {
+		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		if (previousExecutable === undefined) delete process.env.PI_CODING_AGENT_BIN;
+		else process.env.PI_CODING_AGENT_BIN = previousExecutable;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("background control exposes live and terminal status without consuming completion delivery", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-background-status-"));
 	const executable = path.join(root, "fake-pi.mjs");
@@ -151,8 +258,8 @@ test("background control exposes live and terminal status without consuming comp
 		assert.ok(runtime.activeToolsets.at(-1)?.includes("subagent_control"));
 		await runtime.handlers.get("agent_start")?.({}, runtime.ctx);
 		assert.deepEqual(JSON.parse((await control("list")).content[0].text), []);
-		assert.match((await control("status")).content[0].text, /Unknown background run ID/);
-		assert.match((await control("status", "unknown")).content[0].text, /Unknown background run ID/);
+		assert.match((await control("status")).content[0].text, /Unknown run ID/);
+		assert.match((await control("status", "unknown")).content[0].text, /Unknown run ID/);
 
 		for (const [task, terminalStatus] of [["complete", "completed"], ["fail", "failed"], ["stop", "interrupted"]]) {
 			const result = await runtime.tools.get("delegate").execute("delegate", { agent: "worker", task, background: true }, undefined, undefined, runtime.ctx);
@@ -458,7 +565,7 @@ test("/new inherits agent, model, reasoning and drafts across extension replacem
 test("subagent editor validates timeouts and cancels without mutating existing settings", async () => {
 	const current = [{ name: "missing", model: "old/model", timeoutSeconds: 20 }];
 	const runtime = boot("/tmp", {
-		selectAnswers: ["1 · missing · old/model · 20s · disposable (missing agent)", "Set timeout (20s)", "Done"],
+		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Set timeout (20s)", "Done"],
 		editorAnswers: ["-1"],
 	});
 	runtime.ctx.ui.editor = async (_title: string, prefill: string) => {
@@ -468,13 +575,13 @@ test("subagent editor validates timeouts and cancels without mutating existing s
 	assert.deepEqual(await editSubagents(runtime.ctx, "parent", [], current), current);
 	assert.ok(runtime.notifications.some(item => item.message.includes("positive number")));
 	const cancelled = boot("/tmp", {
-		selectAnswers: ["1 · missing · old/model · 20s · disposable (missing agent)", "Remove subagent", undefined],
+		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Remove subagent", undefined],
 	});
 	assert.equal(await editSubagents(cancelled.ctx, "parent", [], current), undefined);
 	assert.equal(current.length, 1);
 
 	const populated = boot("/tmp", {
-		selectAnswers: ["1 · missing · old/model · 20s · disposable (missing agent)", "Set model (old/model)", "1 · missing · updated/model:max · 20s · disposable (missing agent)", "Set timeout (20s)", "Done"],
+		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Set model (old/model)", "1 · missing · updated/model:max · 20s (missing agent)", "Set timeout (20s)", "Done"],
 	});
 	const seen: string[] = [];
 	populated.ctx.ui.editor = async (_title: string, prefill: string) => {
@@ -486,15 +593,11 @@ test("subagent editor validates timeouts and cancels without mutating existing s
 	assert.deepEqual(current, [{ name: "missing", model: "old/model", timeoutSeconds: 20 }]);
 
 	const dismissed = boot("/tmp", {
-		selectAnswers: ["1 · missing · old/model · 20s · disposable (missing agent)", "Set model (old/model)", "Done"],
+		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Set model (old/model)", "Done"],
 		editorAnswers: [undefined],
 	});
 	assert.deepEqual(await editSubagents(dismissed.ctx, "parent", [], current), current);
 
-	const lifecycle = boot("/tmp", {
-		selectAnswers: ["1 · child · default model · no timeout · disposable (missing agent)", "Set lifecycle (disposable)", "Resumable (retain context for this assignment)", "Done"],
-	});
-	assert.deepEqual(await editSubagents(lifecycle.ctx, "parent", [], [{ name: "child" }]), [{ name: "child", lifecycle: "resumable" }]);
 });
 
 test("Studio adds configured subagents, restores drafts, and saves an empty delegation list", async () => {
@@ -503,7 +606,7 @@ test("Studio adds configured subagents, restores drafts, and saves an empty dele
 		await makeAgent(root, "alpha", "default: true, tools: undefined");
 		await makeAgent(root, "beta");
 		const runtime = boot(root, {
-			selectAnswers: ["Manage subagents (0)", "Add subagent", "beta · beta", "1 · beta · default model · no timeout · disposable", "Set model (default)", "1 · beta · test/model · no timeout · disposable", "Set timeout (none)", "1 · beta · test/model · 30s · disposable", "Set lifecycle (disposable)", "Resumable (retain context for this assignment)", "Done", "Apply as session draft"],
+			selectAnswers: ["Manage subagents (0)", "Add subagent", "beta · beta", "1 · beta · default model · no timeout", "Set model (default)", "1 · beta · test/model · no timeout", "Set timeout (none)", "Done", "Apply as session draft"],
 			inputAnswers: ["test/model", "30"],
 			customActions: [component => component.handleInput("e")],
 		});
@@ -511,12 +614,12 @@ test("Studio adds configured subagents, restores drafts, and saves an empty dele
 		await runtime.commands.get("agent").handler("", runtime.ctx);
 		assert.ok(runtime.activeToolsets.at(-1)?.includes("delegate"));
 		const draft = runtime.entries.find(entry => entry.customType === "pi-agents-studio-state")!;
-		assert.deepEqual((draft.data as any).override.subagents, [{ name: "beta", model: "test/model", timeoutSeconds: 30, lifecycle: "resumable" }]);
+		assert.deepEqual((draft.data as any).override.subagents, [{ name: "beta", model: "test/model", timeoutSeconds: 30 }]);
 		saveAgentOverride(root, "project", "alpha", (draft.data as any).override);
 		assert.deepEqual((await discoverAgents(root)).agents.find(agent => agent.name === "alpha")?.subagents, (draft.data as any).override.subagents);
 		const restored = boot(root, {
 			branchEntries: [{ type: "custom", ...draft }],
-			selectAnswers: ["Manage subagents (1)", "1 · beta · test/model · 30s · resumable", "Remove subagent", "Done", "Save agent.ts (project)"],
+			selectAnswers: ["Manage subagents (1)", "1 · beta · test/model · 30s", "Remove subagent", "Done", "Save agent.ts (project)"],
 			customActions: [component => component.handleInput("e")],
 		});
 		await restored.handlers.get("session_start")?.({ reason: "startup" }, restored.ctx);
@@ -777,13 +880,13 @@ test("agent custom tools are registered, activated, and wrap string results", as
 test("parent prompts name allowed subagents and their runtime settings", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-delegation-prompt-"));
 	try {
-		await makeAgent(root, "lead", 'default: true, subagents: [{ name: "worker", model: "test/worker", timeoutSeconds: 90, lifecycle: "resumable" }]');
+		await makeAgent(root, "lead", 'default: true, subagents: [{ name: "worker", model: "test/worker", timeoutSeconds: 90 }]');
 		await makeAgent(root, "worker");
 		const runtime = boot(root);
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		const result = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
 		assert.match(result.systemPrompt, /allowed subagents/);
-		assert.match(result.systemPrompt, /worker: worker \(model test\/worker, 90s deadline, resumable lifecycle\)/);
+		assert.match(result.systemPrompt, /worker: worker \(model test\/worker, 90s deadline, fresh replyable task threads\)/);
 		assert.match(result.systemPrompt, /independent delegate calls together/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -973,7 +1076,7 @@ export default cfg;
 		const agent = (await discoverAgents(root)).agents.find(candidate => candidate.name === "alpha")!;
 		saveAgentSource(agent, {
 			description: "updated", color: null, tools: ["read", "grep"], mcp: ["designhub"],
-			subagents: [{ name: "beta", model: "openai-codex/gpt-5.3-codex-spark:high", lifecycle: "disposable" }], systemPrompt: "Updated prompt\n",
+			subagents: [{ name: "beta", model: "openai-codex/gpt-5.3-codex-spark:high" }], systemPrompt: "Updated prompt\n",
 		}, { designhub: { url: "http://localhost:5101/mcp", headers: { Authorization: "Bearer ${DESIGNHUB_TOKEN}" } } });
 		const source = await readFile(filePath, "utf8");
 		assert.match(source, /description: "updated"/);
@@ -983,7 +1086,7 @@ export default cfg;
 		assert.match(source, /mcp: \["designhub"\]/);
 		assert.match(source, /mcpServers: \{"designhub":\{"url":"http:\/\/localhost:5101\/mcp"/);
 		assert.doesNotMatch(source, /stale-pen-server/);
-		assert.match(source, /subagents: \[\{ name: "beta", model: "openai-codex\/gpt-5.3-codex-spark:high", lifecycle: "disposable" \}\]/);
+		assert.match(source, /subagents: \[\{ name: "beta", model: "openai-codex\/gpt-5.3-codex-spark:high" \}\]/);
 		assert.match(source, /customTools: \{ ping:/);
 		assert.match(source, /This executable field and comment must survive/);
 		assert.match(source, /systemPromptFile: "\.\/prompt\.md"/);
@@ -996,7 +1099,7 @@ export default cfg;
 		assert.equal(updated.mcpServers?.designhub.url, "http://localhost:5101/mcp");
 		assert.equal(updated.mcpServers?.["pen.dev"], undefined);
 		assert.equal(updated.subagents?.[0]?.model, "openai-codex/gpt-5.3-codex-spark:high");
-		assert.equal(updated.subagents?.[0]?.lifecycle, "disposable");
+		assert.equal("lifecycle" in updated.subagents![0], false);
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -1015,7 +1118,7 @@ test("Studio migrates JSON-backed agent edits to agent.ts and removes saved over
 			flag: "alpha",
 			selectAnswers: [
 				"Manage subagents (0)", "Add subagent", "beta · beta",
-				"1 · beta · default model · no timeout · disposable", "Set model (default)", "Done",
+				"1 · beta · default model · no timeout", "Set model (default)", "Done",
 				"Save agent.ts (project)",
 			],
 			inputAnswers: ["openai-codex/gpt-5.3-codex-spark:high"],

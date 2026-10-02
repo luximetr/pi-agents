@@ -32,7 +32,7 @@ for (const name of ["lead", "worker"]) {
   await mkdir(directory, { recursive: true });
   const definition = name === "lead"
     ? { name, description: "Live E2E coordinator", default: true, tools: ["bash"], subagents: [{ name: "worker", model: childModel, timeoutSeconds: 120 }], systemPrompt: "Follow the user's exact test recipe. Only use the requested tools. Never poll subagents or invent extra tasks. After background completions, report their tokens concisely without new tool calls." }
-    : { name, description: "Live E2E worker", tools: ["bash"], systemPrompt: "Execute the single bash command specified in your task exactly once, then respond with only the specified token. Do not use any other tools." };
+    : { name, description: "Live E2E worker", tools: ["bash"], systemPrompt: "Follow the task recipe exactly. For command tasks, execute the specified bash command once and respond only with the specified token. For memory/question tasks, do not use tools: remember the secret and ask the requested question. On a follow-up, use the saved conversation and return exactly what was requested." };
   await writeFile(path.join(directory, "agent.ts"), `export default ${JSON.stringify(definition)};\n`);
 }
 
@@ -158,6 +158,35 @@ async function abortAndResume() {
   } finally { await client.close(); }
 }
 
+async function replyPreservesContext() {
+  const client = new Client("reply");
+  const secret = `THREAD_SECRET_${Date.now()}`;
+  try {
+    await client.command("prompt", { message: `Call delegate once with agent worker and background true. Its task must be: "Remember this secret: ${secret}. Do not print the secret yet. Ask exactly WHICH_COLOR? and stop. Do not use tools." Then reply only QUESTION_STARTED. Do not poll or call any other tools.` });
+    const started = await client.until(() => client.events.find(({ event }) => event.type === "tool_execution_end" && event.toolName === "delegate"), "question delegation");
+    const { runId, threadId } = started.event.result.details;
+    assert.ok(runId && threadId);
+    await client.until(() => completion(client).find(({ event }) => text(event.message).includes("WHICH_COLOR?")), "worker question");
+    await client.until(() => client.events.at(-1)?.event.type === "agent_settled", "main settles after question");
+    const reply = "Use blue. Reply with the remembered secret followed by :blue. Do not use tools.";
+    await client.command("prompt", { message: `Call subagent_control exactly once with action reply, runId ${JSON.stringify(runId)}, and message ${JSON.stringify(reply)}. Do not repeat the secret in the tool arguments. Then reply only ANSWER_SENT. Do not poll or use other tools.` });
+    const replied = await client.until(() => client.events.find(({ event }) => event.type === "tool_execution_end" && event.toolName === "subagent_control"), "reply starts new run");
+    const replyCall = client.events.find(({ event }) => event.type === "tool_execution_start" && event.toolName === "subagent_control");
+    assert.equal(replyCall.event.args.action, "reply");
+    assert.equal(replyCall.event.args.message, reply);
+    assert.ok(!JSON.stringify(replyCall.event.args).includes(secret));
+    const next = replied.event.result.details;
+    assert.equal(next.threadId, threadId);
+    assert.notEqual(next.runId, runId);
+    assert.equal(next.status, "running");
+    await client.until(() => completion(client).find(({ event }) => event.message.details?.runs?.includes(next.runId) && text(event.message).includes(`${secret}:blue`)), "reply recalls saved context");
+    const childAnswer = audit().find(row => row.run === next.runId && row.event.type === "message_end" && row.event.message?.role === "assistant" && text(row.event.message).includes(`${secret}:blue`));
+    assert.ok(childAnswer, "a new child process must recall the secret absent from its reply prompt");
+    console.log("PASS: reply starts a new run in the same thread and recalls saved context without repeating it");
+  } finally { await client.close(); }
+}
+
 await parallelAndUserPriority();
 await abortAndResume();
-console.log("Live background delegation E2E passed.");
+await replyPreservesContext();
+console.log("Live background delegation and reply E2E passed.");

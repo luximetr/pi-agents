@@ -57,7 +57,7 @@ export default {
   limitations: ["Does not modify application code"],    // optional
   promptSummary: "Methodical browser operator.",         // optional
   tools: ["read", "bash"],            // allowlist; omit = keep current, [] = no tools
-  subagents: ["developer"],            // optional delegation allowlist; object entries may set model/timeout/lifecycle
+  subagents: ["developer"],            // optional delegation allowlist; object entries may set model/timeout
   mcp: ["playwright"],                // MCP servers to connect (opt-in!)
   // color: "#ff8800",                 // theme role or hex; auto-assigned by name when omitted
   systemPrompt: "You are...",         // inline…
@@ -81,7 +81,7 @@ export default cfg;
 
 ## Subagents and hierarchy
 
-An agent can delegate isolated work to another agent with the built-in `delegate` tool. Add `background: true` to return a run ID immediately and keep the main agent responsive. Completion results are batched after the main flow fully settles, or wake it when idle; they never steer an active flow. Escape pauses automatic wake-ups without stopping children, and the next user message receives waiting results. Use `subagent_control` with `action: "list" | "status" | "result" | "steer" | "stop"`, `runId` for a specific run, and `message` for steering. `status` reads a run's live phase (including resumable queue waits), current tool, model, elapsed/idle milliseconds, and any deadline/remaining time; `list` returns that metadata for all background runs. Neither waits nor consumes pending results. Terminal statuses remain queryable. Check when needed rather than repeatedly polling; completion delivery is automatic. Background runs and pending results are runtime-only and stop/clear on reload, session replacement, or exit. Parallel workers share the working directory, so assign separate files or worktrees. Without `background`, delegation still waits for the final result:
+An agent can delegate isolated work to another agent with the built-in `delegate` tool. Add `background: true` to return a run ID immediately and keep the main agent responsive. Completion results are batched after the main flow fully settles, or wake it when idle; they never steer an active flow. Escape pauses automatic wake-ups without stopping children, and the next user message receives waiting results. Use `subagent_control` with `action: "list" | "status" | "result" | "reply" | "steer" | "stop"`, `runId` for a specific run, and `message` for replies or steering. `status` reads a run's live phase (including thread preparation), current tool, model, elapsed/idle milliseconds, and any deadline/remaining time; `list` returns that metadata for all delegation runs. Neither waits nor consumes pending results. Terminal statuses remain queryable. Check when needed rather than repeatedly polling; completion delivery is automatic. Background runs and pending results are runtime-only and stop/clear on reload, session replacement, or exit. Parallel workers share the working directory, so assign separate files or worktrees. Without `background`, delegation still waits for the final result:
 
 
 ```ts
@@ -90,17 +90,17 @@ export default {
   description: "Coordinates specialists.",
   subagents: [
     "developer",
-    { name: "researcher", model: "anthropic/claude-sonnet-5", timeoutSeconds: 900, lifecycle: "resumable" },
+    { name: "researcher", model: "anthropic/claude-sonnet-5", timeoutSeconds: 900 },
   ],
   systemPrompt: "Delegate implementation and research; keep the high-level context short.",
 };
 ```
 
-`subagents` is an allowlist. A string entry uses Pi's normal default model selection, has no deadline, and uses the default disposable lifecycle. An object entry can fix the model, `timeoutSeconds`, and/or `lifecycle` for that parent-to-child delegation; different parents may configure the same child differently. In Agent Studio, **Manage subagents → Lifecycle** offers **Disposable** and **Resumable**. The parent automatically sees a roster of allowed child names, descriptions, models, deadlines, and lifecycles in its prompt.
+`subagents` is an allowlist. A string entry inherits the parent's selected model and thinking level and has no deadline. Object entries can fix `model` and `timeoutSeconds`; different parents may configure the same child differently. The parent sees a roster of child names, descriptions, models, and deadlines in its prompt.
 
-An omitted assignment `lifecycle` defaults to `"disposable"`. Disposable runs use a fresh ephemeral `pi --mode rpc --no-session` context. A resumable assignment instead owns a private disk-backed Pi session keyed by the root main-session identity and effective parent-child assignment. It resumes across later delegations, `/reload`, nested delegation, and process restart; another parent targeting the same child has isolated context, and a new main session gets a separate participant. Top-level requests for one participant are serialized (different assignments can still run in parallel). Nested delegation to an already-busy resumable participant fails visibly rather than queues; this conservative rule prevents both direct recursion and concurrent A→B/B→A cycles from deadlocking. A relationship's `timeoutSeconds` covers queue wait plus execution. Persistence errors, malformed or structurally broken session JSONL, and stale locks fail visibly and never fall back to a fresh session. Stale locks are not recovered automatically because the owning parent's child may still be alive; verify no child is running before manually removing the lock path reported by the error. Only each invocation's final answer is returned to its caller.
+Every `delegate` starts a fresh thread and returns `threadId` and `runId`. Same-agent tasks can run in parallel. `subagent_control({ action: "reply", runId, message: "Use option A." })` continues the latest completed run's conversation with a new background execution and run ID. Saved messages, tool results, and compaction context survive; the old process does not. Replies preserve the thread's selected model while using current agent definitions and deadlines. Busy threads require `steer`; stale IDs, failed/interrupted runs, and threads owned by another parent cannot receive replies. Missing or invalid saved history fails rather than silently discarding context. Recheck workspace files on follow-up work. Provider prompt-cache reuse is possible but not guaranteed.
 
-Resumable assignment conversation files live under `~/.pi/agent/pi-agents-subagent-sessions/<hash>.jsonl` with locks under `.locks/`; `PI_CODING_AGENT_DIR` overrides the base directory. Storage directories are owner-only (`0700`). There is no automatic cleanup or reset action yet; new main sessions use separate participants without deleting old files. Missing final JSONL newlines are rejected before resume without modifying history. Queued requests appear in Agent Explorer, can be stopped individually, and retain timeout/failure status for the current runtime. Steering is unavailable until the child starts; its run ID and total deadline stay unchanged.
+Threads remain replyable only within the current runtime. Histories live in an owner-only (`0700`) `pi-agents-threads-*` system temporary directory and are removed after children exit on reload, session replacement, or normal shutdown. Crashes/forced kills may leave sensitive temporary files; remove orphaned directories only after checking no children remain. Run/thread handles, including a nested worker's own child handles, are not restored across process restarts. There is no implicit context reuse between ordinary delegations.
 
 Nested delegation remains limited to four levels. Use self-contained tasks with paths, constraints, and the desired result.
 

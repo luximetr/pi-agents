@@ -18,7 +18,6 @@ export function displaySubagentModel(selected: string | undefined, actual: strin
 	return base === actual ? selected : `${actual} (configured: ${selected})`;
 }
 export const ROOT_SESSION_ENV = "PI_AGENTS_ROOT_SESSION_ID";
-const RESUMABLE_ANCESTRY_ENV = "PI_AGENTS_RESUMABLE_ANCESTRY";
 
 export interface SubagentUsage {
 	provider?: string;
@@ -101,12 +100,12 @@ export interface RunSubagentOptions {
 	runtimeAgentOverrides?: Record<string, unknown>;
 	/** Stable id supplied by the caller; otherwise a process-local id is generated. */
 	id?: string;
-	/** Persist and resume this assignment's participant session instead of creating a fresh session. */
-	lifecycle?: "disposable" | "resumable";
-	/** Identity of the root (user-facing) Pi session. Required for resumable participants. */
+	/** Identity of the root (user-facing) Pi session. */
 	rootSessionId?: string;
-	/** Effective parent-child assignment identity used to isolate resumable context. */
-	participantIdentity?: string;
+	/** Conversation identity. Omit for a fresh task; reuse only for an explicit reply. */
+	threadId?: string;
+	/** Require existing history instead of silently starting fresh on a reply. */
+	resume?: boolean;
 	/** Override the private participant-session directory (primarily for tests). */
 	participantSessionDir?: string;
 }
@@ -149,7 +148,7 @@ type ParticipantWaitFailure = "cancelled" | "timeout";
 
 class ParticipantWaitError extends Error {
 	constructor(public readonly reason: ParticipantWaitFailure) {
-		super(`subagent ${reason} while waiting for its resumable participant`);
+		super(`subagent ${reason} while preparing its task thread`);
 	}
 }
 
@@ -157,58 +156,22 @@ function participantKey(rootSessionId: string, identity: string): string {
 	return createHash("sha256").update(`${rootSessionId}\0${identity}`).digest("hex");
 }
 
-function processIsAlive(pid: number): boolean {
-	try { process.kill(pid, 0); return true; }
-	catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
-}
-
-async function acquireParticipantLock(lockPath: string, signal: AbortSignal, deadlineAt: number | undefined, failIfBusy: boolean): Promise<ParticipantLock> {
+async function acquireParticipantLock(lockPath: string, signal: AbortSignal, deadlineAt: number | undefined): Promise<ParticipantLock> {
+	if (signal.aborted) throw new ParticipantWaitError("cancelled");
+	if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new ParticipantWaitError("timeout");
 	const token = randomUUID();
-	let unreadableSince: number | undefined;
-	while (true) {
-		if (signal.aborted) throw new ParticipantWaitError("cancelled");
-		if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new ParticipantWaitError("timeout");
-		try {
-			await mkdir(lockPath);
-			try {
-				await writeFile(path.join(lockPath, "owner.json"), JSON.stringify({ pid: process.pid, token }), { flag: "wx", mode: 0o600 });
-				return { path: lockPath, token };
-			} catch (error) {
-				// Only remove an empty directory we just created. Recursive recovery can
-				// delete a replacement lock and let two writers enter the same session.
-				try { await rmdir(lockPath); } catch { /* Preserve uncertain ownership. */ }
-				throw error;
-			}
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			if (failIfBusy) {
-				throw new Error(`resumable participant is already busy; nested delegation refuses to queue: ${lockPath}`);
-			}
-			let owner: { pid?: unknown } | undefined;
-			try { owner = JSON.parse(await readFile(path.join(lockPath, "owner.json"), "utf8")) as { pid?: unknown }; }
-			catch { /* The winning process may still be writing owner.json. */ }
-			if (typeof owner?.pid === "number") {
-				unreadableSince = undefined;
-				if (!processIsAlive(owner.pid)) {
-					// The owner's child may have survived its parent. Automatic deletion is
-					// therefore unsafe; require deliberate operator recovery.
-					throw new Error(`stale resumable participant lock (owner pid ${owner.pid} is not alive); verify no child is running, then remove: ${lockPath}`);
-				}
-			} else {
-				unreadableSince ??= Date.now();
-				if (Date.now() - unreadableSince >= 1000) throw new Error(`unreadable resumable participant lock; verify no child is running, then remove: ${lockPath}`);
-			}
-			const waitMs = Math.max(1, Math.min(50, deadlineAt === undefined ? 50 : deadlineAt - Date.now()));
-			await new Promise<void>((resolve, reject) => {
-				const abort = () => { clearTimeout(timer); reject(new ParticipantWaitError("cancelled")); };
-				const timer = setTimeout(() => {
-					signal.removeEventListener("abort", abort);
-					resolve();
-				}, waitMs);
-				signal.addEventListener("abort", abort, { once: true });
-				timer.unref?.();
-			});
-		}
+	try { await mkdir(lockPath); }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`Thread is already busy; use steer on its active run: ${lockPath}`);
+		throw error;
+	}
+	try {
+		await writeFile(path.join(lockPath, "owner.json"), JSON.stringify({ pid: process.pid, token }), { flag: "wx", mode: 0o600 });
+		return { path: lockPath, token };
+	} catch (error) {
+		// Never recursively remove a lock whose ownership is uncertain.
+		try { await rmdir(lockPath); } catch { /* Preserve uncertain ownership. */ }
+		throw error;
 	}
 }
 
@@ -220,7 +183,7 @@ async function releaseParticipantLock(lock: ParticipantLock): Promise<void> {
 	await rmdir(lock.path);
 }
 
-const SESSION_ENTRY_TYPES = new Set(["message", "model_change", "thinking_level_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"]);
+const SESSION_ENTRY_TYPES = new Set(["message", "model_change", "thinking_level_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info", "usage", "context_edit"]);
 
 /** Pi's loader skips malformed JSONL lines, so validate private history before giving it to Pi. */
 async function validateParticipantSession(sessionFile: string): Promise<void> {
@@ -269,13 +232,13 @@ async function validateParticipantSession(sessionFile: string): Promise<void> {
 		if (entry.type === "message") {
 			const message = entry.message as Record<string, unknown> | undefined;
 			const contextRole = message?.role === "user" || message?.role === "assistant" || message?.role === "toolResult" || message?.role === "custom" || message?.role === "hookMessage";
-			if (!message || typeof message !== "object" || typeof message.role !== "string" || !["user", "assistant", "toolResult", "bashExecution", "custom", "hookMessage", "branchSummary", "compactionSummary"].includes(message.role) || (contextRole && (message.content == null || (typeof message.content !== "string" && !Array.isArray(message.content))))) {
+			if (!message || typeof message !== "object" || typeof message.role !== "string" || !["system", "user", "assistant", "toolResult", "bashExecution", "custom", "hookMessage", "branchSummary", "compactionSummary"].includes(message.role) || (contextRole && (message.content == null || (typeof message.content !== "string" && !Array.isArray(message.content))))) {
 				throw new Error(`resumable participant session has an invalid message at line ${index + 1}: ${sessionFile}`);
 			}
 		} else if ((entry.type === "model_change" && (typeof entry.provider !== "string" || typeof entry.modelId !== "string"))
 			|| (entry.type === "thinking_level_change" && typeof entry.thinkingLevel !== "string")
 			|| (entry.type === "compaction" && (typeof entry.summary !== "string" || typeof entry.tokensBefore !== "number"
-				|| (typeof entry.firstKeptEntryId === "string" && !ids.has(entry.firstKeptEntryId))
+				|| (typeof entry.firstKeptEntryId === "string" && entry.firstKeptEntryId !== entry.id && !ids.has(entry.firstKeptEntryId))
 				|| (entry.firstKeptEntryId === undefined && !Array.isArray(entry.retainedTail))))
 			|| (entry.type === "branch_summary" && (typeof entry.summary !== "string" || typeof entry.fromId !== "string" || !ids.has(entry.fromId)))
 			|| ((entry.type === "custom" || entry.type === "custom_message") && typeof entry.customType !== "string")
@@ -318,15 +281,9 @@ function runSubagentProcess(
 		const id = options.id ?? `subagent-${nextSubagentId++}`;
 
 		const childArgs = ["--mode", "rpc"];
-		if (options.lifecycle === "resumable") {
-			if (!options.rootSessionId || !options.participantIdentity) {
-				reject(new Error("resumable subagent requires rootSessionId and participantIdentity"));
-				return;
-			}
-			const key = participantKey(options.rootSessionId, options.participantIdentity);
-			const sessionDir = options.participantSessionDir ?? path.join(getAgentDir(), "pi-agents-subagent-sessions");
-			childArgs.push("--session", path.join(sessionDir, `${key}.jsonl`));
-		} else childArgs.push("--no-session");
+		const key = participantKey(options.rootSessionId ?? "", options.threadId!);
+		const sessionDir = options.participantSessionDir ?? path.join(getAgentDir(), "pi-agents-subagent-sessions");
+		childArgs.push("--session", path.join(sessionDir, `${key}.jsonl`));
 		childArgs.push("--agent", agentName);
 		if (options.model?.trim()) childArgs.push("--model", options.model.trim());
 		const invocation = piInvocation(childArgs, options.executable);
@@ -337,9 +294,6 @@ function runSubagentProcess(
 				PI_AGENTS_SUBAGENT_DEPTH: String(depth + 1),
 				[RUN_ID_ENV]: id,
 				...(options.rootSessionId ? { [ROOT_SESSION_ENV]: options.rootSessionId } : {}),
-				...(options.lifecycle === "resumable" && options.rootSessionId && options.participantIdentity
-					? { [RESUMABLE_ANCESTRY_ENV]: [...(process.env[RESUMABLE_ANCESTRY_ENV]?.split(",").filter(Boolean) ?? []), participantKey(options.rootSessionId, options.participantIdentity)].join(",") }
-					: {}),
 				...(options.observerEndpoint ? { [OBSERVER_ENV]: options.observerEndpoint } : {}),
 				...(options.runtimeAgentOverrides && Object.keys(options.runtimeAgentOverrides).length > 0
 					? { PI_AGENTS_STUDIO_OVERRIDES: JSON.stringify(options.runtimeAgentOverrides) }
@@ -562,7 +516,18 @@ function runSubagentProcess(
 						progress?.(assistantError ? { type: "error", message: assistantError } : { type: "finished" });
 					}
 					gracefulExit = true;
-					child.kill("SIGTERM");
+					// EOF lets Pi flush history and run session_shutdown (including nested
+					// thread cleanup). Bound shutdown if an extension refuses to exit.
+					child.stdin.end();
+					if (!stopEscalationTimer) {
+						stopEscalationTimer = setTimeout(() => {
+							if (settled) return;
+							child.kill("SIGTERM");
+							stopEscalationTimer = setTimeout(() => { if (!settled) child.kill("SIGKILL"); }, gracefulStopMs);
+							stopEscalationTimer.unref?.();
+						}, gracefulStopMs);
+						stopEscalationTimer.unref?.();
+					}
 					break;
 				case "extension_error": {
 					const message = String(event.error ?? "child extension error");
@@ -633,7 +598,7 @@ function runSubagentProcess(
 	});
 }
 
-/** Run a delegated agent, serializing and persisting only resumable participants. */
+/** Run one turn of an isolated task thread. Different threads may execute in parallel. */
 export async function runSubagent(
 	agentName: string,
 	task: string,
@@ -641,24 +606,21 @@ export async function runSubagent(
 	signal: AbortSignal,
 	options: RunSubagentOptions = {},
 ): Promise<string> {
-	if (options.lifecycle !== "resumable") return runSubagentProcess(agentName, task, cwd, signal, options);
+	options = { ...options, threadId: options.threadId ?? randomUUID() };
 	const startedAt = Date.now();
 	const timeoutSeconds = options.timeoutSeconds;
 	if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0)) {
 		throw new Error("subagent timeoutSeconds must be a positive number");
 	}
 	const deadlineAt = timeoutSeconds === undefined ? undefined : startedAt + timeoutSeconds * 1000;
-	if (!options.rootSessionId || !options.participantIdentity) {
-		throw new Error("resumable subagent requires rootSessionId and participantIdentity");
-	}
 	const id = options.id ?? `subagent-${nextSubagentId++}`;
 	const delegationDepth = Number(process.env.PI_AGENTS_SUBAGENT_DEPTH ?? "0");
 	const state: SubagentSnapshot = {
 		id, parentRunId: options.parentRunId, agent: agentName, task,
 		model: options.model?.trim() || undefined,
 		startedAt, lastActivityAt: startedAt, deadlineAt,
-		status: "running", phase: "queued for resumable participant",
-		partialText: "", recentEvents: ["… waiting for resumable participant"],
+		status: "running", phase: "preparing task thread",
+		partialText: "", recentEvents: ["… preparing task thread"],
 	};
 	let childHandle: RunningSubagentHandle | undefined;
 	let requestedStop: SubagentStopReason | undefined;
@@ -678,9 +640,9 @@ export async function runSubagent(
 		requestedStop = reason;
 		state.stopReason = reason;
 		state.status = "stopping";
-		state.phase = reason === "timeout" ? "deadline exceeded while queued for resumable participant" : "stopping while queued for resumable participant";
+		state.phase = reason === "timeout" ? "deadline exceeded before child launch" : "stopping before child launch";
 		state.lastActivityAt = Date.now();
-		state.recentEvents.push(reason === "timeout" ? "⏱ deadline reached while queued" : reason === "user" ? "■ stop requested by user while queued" : `■ ${reason} cancellation requested while queued`);
+		state.recentEvents.push(reason === "timeout" ? "⏱ deadline reached before child launch" : reason === "user" ? "■ stop requested by user before child launch" : `■ ${reason} cancellation requested before child launch`);
 		publish();
 		waitController.abort();
 	};
@@ -689,8 +651,8 @@ export async function runSubagent(
 		state.stopReason = reason;
 		state.status = "failed";
 		state.endedAt = state.lastActivityAt = Date.now();
-		state.phase = reason === "timeout" ? "deadline exceeded while queued for resumable participant" : "cancelled while queued for resumable participant";
-		if (!requestedStop) state.recentEvents.push(reason === "timeout" ? "⏱ deadline reached while queued" : `■ ${reason} cancellation requested while queued`);
+		state.phase = reason === "timeout" ? "deadline exceeded before child launch" : "cancelled before child launch";
+		if (!requestedStop) state.recentEvents.push(reason === "timeout" ? "⏱ deadline reached before child launch" : `■ ${reason} cancellation requested before child launch`);
 		publish();
 		return new SubagentStoppedError(reason, snapshot());
 	};
@@ -715,9 +677,7 @@ export async function runSubagent(
 	let lock: ParticipantLock | undefined;
 	let spawned = false;
 	try {
-		const key = participantKey(options.rootSessionId, options.participantIdentity);
-		const ancestry = process.env[RESUMABLE_ANCESTRY_ENV]?.split(",").filter(Boolean) ?? [];
-		if (ancestry.includes(key)) throw new Error(`resumable delegation cycle detected for agent "${agentName}"; refusing to wait on its own participant`);
+		const key = participantKey(options.rootSessionId ?? "", options.threadId!);
 		const sessionDir = options.participantSessionDir ?? path.join(getAgentDir(), "pi-agents-subagent-sessions");
 		// Never fall back to --no-session, which would silently discard context.
 		await mkdir(sessionDir, { recursive: true, mode: 0o700 });
@@ -725,9 +685,11 @@ export async function runSubagent(
 		const lockDir = path.join(sessionDir, ".locks");
 		await mkdir(lockDir, { recursive: true, mode: 0o700 });
 		await chmod(lockDir, 0o700);
-		// Nested contention is rejected to avoid cross-root A→B/B→A deadlocks.
-		lock = await acquireParticipantLock(path.join(lockDir, key), waitController.signal, deadlineAt, delegationDepth > 0);
-		await validateParticipantSession(path.join(sessionDir, `${key}.jsonl`));
+		// Never queue replies: callers must steer the active run or wait for completion.
+		lock = await acquireParticipantLock(path.join(lockDir, key), waitController.signal, deadlineAt);
+		const sessionFile = path.join(sessionDir, `${key}.jsonl`);
+		if (options.resume && !existsSync(sessionFile)) throw new Error("Thread history is missing; cannot reply without its context.");
+		await validateParticipantSession(sessionFile);
 		if (requestedStop) throw finishQueued(requestedStop);
 		if (signal.aborted) throw finishQueued("parent");
 		if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw finishQueued("timeout");

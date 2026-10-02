@@ -28,9 +28,6 @@ export const Tools: Record<BuiltinTool, BuiltinTool> = {
  */
 export type ToolName = BuiltinTool | (string & {});
 
-/** Conversation lifetime for a parent-to-child assignment. */
-export type SubagentLifecycle = "disposable" | "resumable";
-
 /**
  * Shell execution available to custom tools: `exec(command, args, options?)`
  * resolves in the session cwd and returns `{ stdout, stderr, code }`.
@@ -69,22 +66,15 @@ export interface SubagentConfig {
 	model?: string;
 	/** Total execution limit in seconds for this parent-to-child delegation. Omit for no deadline. */
 	timeoutSeconds?: number;
-	/** Conversation lifetime for this assignment. Omit for disposable behavior. */
-	lifecycle?: SubagentLifecycle;
 }
 
 /** Shorthand agent name or a configured parent-to-child delegation. */
 export type SubagentDeclaration = string | SubagentConfig;
 
-/** Resolve an assignment's lifecycle, defaulting omitted values to disposable. */
-export function resolveSubagentLifecycle(assignment: SubagentConfig): SubagentLifecycle {
-	return assignment.lifecycle ?? "disposable";
-}
-
 /**
  * Agent definition. The interactive agent's model and thinking level are
- * selected in pi itself. A delegated child may have fixed model, timeout, and
- * lifecycle settings configured on its parent's `subagents` entry.
+ * selected in pi itself. A delegated child may have fixed model and timeout
+ * settings configured on its parent's `subagents` entry.
  */
 export interface AgentConfig {
 	/** Unique agent name, used in UI and commands */
@@ -130,7 +120,7 @@ export interface AgentConfig {
 	 * name. Registered when the agent is applied; active only while it is.
 	 */
 	customTools?: Record<string, AgentCustomTool>;
-	/** Agents this agent may delegate to. Object entries can set model, timeout, and lifecycle for that parent-to-child delegation. */
+	/** Agents this agent may delegate to. Object entries can set model and timeout for that parent-to-child delegation. */
 	subagents?: SubagentDeclaration[];
 	/** Auto-select this agent on session start (config.json defaultAgent wins over this) */
 	default?: boolean;
@@ -154,15 +144,6 @@ export interface DiscoveredAgent extends Omit<AgentConfig, "subagents"> {
 	savedOverrideSources?: Array<"global" | "project">;
 	/** True when the effective definition includes an unsaved session-scoped Agent Studio draft. */
 	studioDraft?: boolean;
-}
-
-/** Stable resumable-context identity for one parent-to-child assignment. */
-export function subagentAssignmentIdentity(
-	parent: Pick<DiscoveredAgent, "source" | "filePath" | "name">,
-	child: Pick<DiscoveredAgent, "source" | "filePath" | "name">,
-): string {
-	const identity = (agent: Pick<DiscoveredAgent, "source" | "filePath" | "name">) => [agent.source, path.resolve(agent.filePath), agent.name];
-	return JSON.stringify([identity(parent), identity(child)]);
 }
 
 export interface AgentOverride {
@@ -340,10 +321,10 @@ export function normalizeSubagents(raw: unknown, filePath: string): SubagentConf
 			continue;
 		}
 		if (!entry || typeof entry !== "object") {
-			console.error(`pi-agents: ${filePath}: invalid subagent entry — use a name string or { name, model?, timeoutSeconds?, lifecycle? }`);
+			console.error(`pi-agents: ${filePath}: invalid subagent entry — use a name string or { name, model?, timeoutSeconds? }`);
 			continue;
 		}
-		const candidate = entry as { name?: unknown; model?: unknown; timeoutSeconds?: unknown; lifecycle?: unknown };
+		const candidate = entry as { name?: unknown; model?: unknown; timeoutSeconds?: unknown };
 		const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
 		if (!name) {
 			console.error(`pi-agents: ${filePath}: subagent entry is missing a valid "name"`);
@@ -357,15 +338,10 @@ export function normalizeSubagents(raw: unknown, filePath: string): SubagentConf
 			console.error(`pi-agents: ${filePath}: subagent "${name}" has an invalid "timeoutSeconds"`);
 			continue;
 		}
-		if (candidate.lifecycle !== undefined && candidate.lifecycle !== "disposable" && candidate.lifecycle !== "resumable") {
-			console.error(`pi-agents: ${filePath}: subagent "${name}" has an invalid "lifecycle" — use "disposable" or "resumable"`);
-			continue;
-		}
 		subagents.push({
 			name,
 			...(typeof candidate.model === "string" ? { model: candidate.model.trim() } : {}),
 			...(typeof candidate.timeoutSeconds === "number" ? { timeoutSeconds: candidate.timeoutSeconds } : {}),
-			...(candidate.lifecycle === "disposable" || candidate.lifecycle === "resumable" ? { lifecycle: candidate.lifecycle } : {}),
 		});
 	}
 	return subagents.length > 0 ? subagents : undefined;
@@ -957,11 +933,10 @@ function tsTools(entries: ToolName[], property: ts.ObjectLiteralElementLike | un
 
 function tsSubagents(entries: SubagentConfig[]): string {
 	return `[${entries.map((entry) => {
-		if (!entry.model && entry.timeoutSeconds === undefined && entry.lifecycle === undefined) return JSON.stringify(entry.name);
+		if (!entry.model && entry.timeoutSeconds === undefined) return JSON.stringify(entry.name);
 		const fields = [`name: ${JSON.stringify(entry.name)}`];
 		if (entry.model) fields.push(`model: ${JSON.stringify(entry.model)}`);
 		if (entry.timeoutSeconds !== undefined) fields.push(`timeoutSeconds: ${entry.timeoutSeconds}`);
-		if (entry.lifecycle !== undefined) fields.push(`lifecycle: ${JSON.stringify(entry.lifecycle)}`);
 		return `{ ${fields.join(", ")} }`;
 	}).join(", ")}]`;
 }

@@ -236,7 +236,7 @@ test("explorer supports bounded wide/narrow layouts, drill-down/back, scrolling 
 	await promise;
 });
 
-test("resumable queues are observable, controllable, retained, and transition under one run id", async () => {
+test("parallel task threads remain individually observable, stoppable, steerable, and retained", async () => {
 	const directory = await mkdtemp(path.join(os.tmpdir(), "pi-explorer-queue-"));
 	const executable = path.join(directory, "fake-pi.mjs");
 	const starts = path.join(directory, "starts.log");
@@ -273,7 +273,7 @@ process.stdin.on("data", chunk => {
  }
 });`);
 		await chmod(executable, 0o755);
-		const base = { executable, lifecycle: "resumable" as const, rootSessionId: "root", participantIdentity: "worker", participantSessionDir: path.join(directory, "sessions") };
+		const base = { executable, rootSessionId: "root", threadId: "worker", participantSessionDir: path.join(directory, "sessions") };
 		const startHolder = (task: string) => {
 			const promise = runSubagent("worker", task, directory, new AbortController().signal, base);
 			running.push(promise);
@@ -283,7 +283,7 @@ process.stdin.on("data", chunk => {
 			try { return readFileSync(starts, "utf8").trim().split("\n").length >= count; } catch { return false; }
 		});
 		const observe = (id: string, task: string, extra: Record<string, unknown> = {}, owner = observer) => runSubagent("worker", task, directory, new AbortController().signal, {
-			...base, ...extra, id,
+			...base, threadId: id, ...extra, id,
 			onHandle: handle => { if (handle) owner.attach(handle); },
 			onSnapshot: value => owner.publish(value),
 		});
@@ -291,29 +291,25 @@ process.stdin.on("data", chunk => {
 		const holder1 = startHolder("holder user");
 		await waitForStarts(1);
 		const userRun = observe("queued-user", "queued user");
-		await until(() => observer.handles().some(value => value.id === "queued-user" && value.snapshot().phase.includes("queued")));
+		await waitForStarts(2);
 		const queuedUser = observer.handles().find(value => value.id === "queued-user")!;
-		assert.equal(queuedUser.steer("not yet"), false);
 		queuedUser.stop("user");
 		await assert.rejects(userRun, (error: unknown) => error instanceof SubagentStoppedError && error.reason === "user");
-		assert.equal(readFileSync(starts, "utf8").trim().split("\n").length, 1, "individual cancellation does not launch the waiter");
+		assert.equal(readFileSync(starts, "utf8").trim().split("\n").length, 2, "separate threads run concurrently");
 		assert.equal(await holder1, "done:holder user", "individual cancellation does not stop the holder");
 
 		const holder2 = startHolder("holder timeout");
-		await waitForStarts(2);
+		await waitForStarts(3);
 		await assert.rejects(observe("queued-timeout", "queued timeout", { timeoutSeconds: 0.05 }), (error: unknown) => error instanceof SubagentStoppedError && error.reason === "timeout");
 		const timedOut = observer.handles().find(value => value.id === "queued-timeout")!.snapshot();
 		assert.equal(timedOut.stopReason, "timeout");
-		assert.ok(timedOut.recentEvents.some(event => event.includes("deadline reached while queued")));
+		assert.match(timedOut.phase, /deadline exceeded/);
 		await holder2;
 
 		const holder3 = startHolder("holder transition");
-		await waitForStarts(3);
 		const transitionedRun = observe("stable-transition-id", "spawn after queue");
-		await until(() => observer.handles().some(value => value.id === "stable-transition-id" && value.snapshot().phase.includes("queued")));
+		await until(() => observer.handles().some(value => value.id === "stable-transition-id" && value.snapshot().phase === "starting"));
 		const transitioning = observer.handles().find(value => value.id === "stable-transition-id")!;
-		assert.equal(transitioning.steer("not while queued"), false);
-		await waitForStarts(4);
 		assert.equal(transitioning.steer("after spawn"), true);
 		assert.equal(await transitionedRun, "done:spawn after queue;steer:after spawn");
 		const transitioned = observer.handles().find(value => value.id === "stable-transition-id")!.snapshot();
@@ -322,7 +318,6 @@ process.stdin.on("data", chunk => {
 		await holder3;
 
 		const holder4 = startHolder("holder shutdown");
-		await waitForStarts(5);
 		const shutdownObserver = new SubagentObserver();
 		await shutdownObserver.start();
 		const shutdownRun = observe("queued-shutdown", "queued shutdown", {}, shutdownObserver);
