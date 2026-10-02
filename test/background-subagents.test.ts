@@ -114,6 +114,64 @@ test("abort pauses wake-ups until user input; results remain retrievable", async
 	inbox.close();
 });
 
+test("intermediate assistant errors do not pause delivery after successful retries", async () => {
+	const batches: string[][] = [];
+	const inbox = new CompletionInbox<string>(() => true, results => batches.push(results));
+	inbox.start();
+	inbox.assistantMessageEnded("error");
+	inbox.push("A");
+	await tick();
+	assert.deepEqual(batches, []);
+	inbox.start(); // retries/overflow recovery may start another low-level run
+	inbox.assistantMessageEnded("error");
+	inbox.start();
+	inbox.assistantMessageEnded("toolUse");
+	inbox.assistantMessageEnded("stop");
+	inbox.push("B");
+	inbox.settle();
+	await tick();
+	assert.deepEqual(batches, [["A", "B"]]);
+	inbox.close();
+});
+
+test("terminal assistant errors wait for fresh input, not just another agent_start", async () => {
+	const batches: string[][] = [];
+	const inbox = new CompletionInbox<string>(() => true, results => batches.push(results));
+	inbox.start();
+	inbox.assistantMessageEnded("error");
+	inbox.start();
+	inbox.push("A");
+	inbox.settle();
+	await tick();
+	assert.deepEqual(batches, []);
+	inbox.resume();
+	inbox.start();
+	inbox.assistantMessageEnded("stop");
+	inbox.settle();
+	await tick();
+	assert.deepEqual(batches, [["A"]]);
+	inbox.close();
+});
+
+test("successful retry cannot undo an explicit abort pause", async () => {
+	for (const abort of ["message", "signal"]) {
+		const batches: string[][] = [];
+		const inbox = new CompletionInbox<string>(() => true, results => batches.push(results));
+		inbox.start();
+		inbox.assistantMessageEnded("error");
+		if (abort === "message") inbox.assistantMessageEnded("aborted");
+		else inbox.pause();
+		inbox.start();
+		inbox.assistantMessageEnded("stop");
+		inbox.push("A");
+		inbox.settle();
+		await tick();
+		assert.deepEqual(batches, []);
+		assert.deepEqual(inbox.take(), ["A"]);
+		inbox.close();
+	}
+});
+
 test("queued user messages take priority and shutdown discards pending deliveries", async () => {
 	let pendingUser = true;
 	const batches: string[][] = [];

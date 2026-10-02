@@ -256,10 +256,23 @@ export class CompletionInbox<T> {
 		this.schedule();
 	}
 
+	private assistantFailed = false;
+
 	start() { this.busy = true; }
 	pause() { this.paused = true; }
-	resume() { this.paused = false; }
-	settle() { this.busy = false; this.schedule(); }
+	resume() { this.paused = false; this.assistantFailed = false; }
+	assistantMessageEnded(stopReason: string) {
+		// A message error may precede an automatic retry or overflow recovery.
+		// Only settlement proves it terminal. Aborts remain latched even if a
+		// racing successful message follows; only user input resumes delivery.
+		this.assistantFailed = stopReason === "error";
+		if (stopReason === "aborted") this.pause();
+	}
+	settle() {
+		if (this.assistantFailed) this.pause();
+		this.busy = false;
+		this.schedule();
+	}
 
 	/** Explicit retrieval is allowed even when automatic wake-ups are paused. */
 	take(): T[] { return this.pending.splice(0); }

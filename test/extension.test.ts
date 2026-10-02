@@ -418,6 +418,69 @@ process.stdin.once("data", chunk => {
 	}
 });
 
+test("completion event wiring survives retry errors without undoing terminal or Escape pauses", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-retry-inbox-"));
+	const executable = path.join(root, "fake-pi.mjs");
+	const previousExecutable = process.env.PI_CODING_AGENT_BIN;
+	const runtime = boot(root);
+	const deliveries: any[] = [];
+	runtime.pi.sendMessage = (message: any) => deliveries.push(message);
+	runtime.ctx.isIdle = () => true;
+	runtime.ctx.hasPendingMessages = () => false;
+	try {
+		await makeAgent(root, "lead", 'default: true, subagents: ["worker"]');
+		await makeAgent(root, "worker");
+		await writeFile(executable, `#!/usr/bin/env node
+const send = event => process.stdout.write(JSON.stringify(event) + "\\n");
+process.stdin.once("data", () => {
+ send({type:"agent_start"});
+ send({type:"message_end", message:{role:"assistant", stopReason:"stop", content:[{type:"text", text:"worker-result"}]}});
+ send({type:"agent_settled"});
+});
+`);
+		await chmod(executable, 0o755);
+		process.env.PI_CODING_AGENT_BIN = executable;
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		for (const outcome of ["retry-success", "terminal-error", "aborted-message", "Escape-signal"]) {
+			deliveries.length = 0;
+			const controller = new AbortController();
+			runtime.ctx.signal = controller.signal;
+			await runtime.handlers.get("input")?.({}, runtime.ctx);
+			await runtime.handlers.get("agent_start")?.({}, runtime.ctx);
+			await runtime.handlers.get("turn_start")?.({}, runtime.ctx);
+			const emit = (role: string, stopReason: string) => runtime.handlers.get("message_end")?.({ message: { role, stopReason } }, runtime.ctx);
+			await emit("assistant", "error");
+			const run = await runtime.tools.get("delegate").execute("delegate", { agent: "worker", task: outcome, background: true }, undefined, undefined, runtime.ctx);
+			const deadline = Date.now() + 5000;
+			while (true) {
+				const result = await runtime.tools.get("subagent_control").execute("control", { action: "status", runId: run.details.runId });
+				if (JSON.parse(result.content[0].text).status === "completed") break;
+				assert.ok(Date.now() < deadline, "child must complete");
+				await new Promise(resolve => setTimeout(resolve, 20));
+			}
+			assert.deepEqual(deliveries, [], "intermediate errors do not end the busy flow");
+			if (outcome === "aborted-message") await emit("assistant", "aborted");
+			if (outcome === "Escape-signal") controller.abort();
+			await runtime.handlers.get("agent_start")?.({}, runtime.ctx); // retry starts
+			if (outcome !== "terminal-error") await emit("assistant", "stop");
+			else await emit("toolResult", "stop"); // unrelated messages cannot clear failure
+			await runtime.handlers.get("agent_settled")?.({}, runtime.ctx);
+			await new Promise(resolve => setTimeout(resolve, 70));
+			assert.equal(deliveries.length, outcome === "retry-success" ? 1 : 0);
+			if (outcome !== "retry-success") {
+				await runtime.handlers.get("input")?.({}, runtime.ctx);
+				const next = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
+				assert.match(JSON.stringify(next.message), /worker-result/);
+			}
+		}
+	} finally {
+		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		if (previousExecutable === undefined) delete process.env.PI_CODING_AGENT_BIN;
+		else process.env.PI_CODING_AGENT_BIN = previousExecutable;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("background control exposes live and terminal status without consuming completion delivery", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-background-status-"));
 	const executable = path.join(root, "fake-pi.mjs");

@@ -368,7 +368,7 @@ export default function (pi: ExtensionAPI) {
 		inbox.start();
 	});
 	pi.on("message_end", (event) => {
-		if (event.message.role === "assistant" && ["aborted", "error"].includes(event.message.stopReason)) inbox.pause();
+		if (event.message.role === "assistant") inbox.assistantMessageEnded(event.message.stopReason);
 	});
 	pi.on("agent_settled", () => inbox.settle());
 	pi.on("input", () => { inbox.resume(); });
