@@ -1267,6 +1267,57 @@ test("Agent Studio creates and discovers warning-free agent.ts and prompt.md fil
 	}
 });
 
+test("source saves isolate flat TS/JS/MJS prompts and preserve folder and overlaid source paths", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-prompt-isolation-"));
+	try {
+		const dir = path.join(root, ".pi-agents");
+		await mkdir(dir);
+		await writeFile(path.join(dir, "prompt.md"), "Unrelated prompt");
+		for (const ext of ["ts", "js", "mjs"]) {
+			for (const name of [`a-${ext}`, `b-${ext}`]) {
+				await writeFile(path.join(dir, `${name}.${ext}`), `export default { name: "${name}", description: "flat", systemPrompt: "old" };`);
+			}
+		}
+		await makeAgent(root, "folder", 'systemPromptFile: "./custom.md",');
+		await writeFile(path.join(dir, "folder", "custom.md"), "Source prompt");
+		saveAgentOverride(root, "project", "folder", { systemPrompt: "Overlay prompt" });
+		const before = (await discoverAgents(root)).agents.filter(agent => agent.source === "project");
+		for (const agent of before) saveAgentSource(agent, { systemPrompt: `Saved ${agent.name}` });
+		// Repeat from rediscovery: existing paths must not allocate new files.
+		const after = (await discoverAgents(root)).agents.filter(agent => agent.source === "project");
+		for (const agent of after) {
+			assert.ok(agent.sourceSystemPromptPath, `missing prompt path for ${agent.name}`);
+			assert.equal(await readFile(agent.sourceSystemPromptPath!, "utf8"), `Saved ${agent.name}`);
+			saveAgentSource(agent, { systemPrompt: `Again ${agent.name}` });
+			assert.equal(await readFile(agent.sourceSystemPromptPath!, "utf8"), `Again ${agent.name}`);
+			if (agent.name !== "folder") assert.equal(agent.systemPrompt, `Saved ${agent.name}`);
+		}
+		assert.equal(new Set(after.map(agent => agent.sourceSystemPromptPath)).size, 7);
+		assert.equal(after.find(agent => agent.name === "folder")?.sourceSystemPromptPath, path.join(dir, "folder", "custom.md"));
+		assert.equal(await readFile(path.join(dir, "prompt.md"), "utf8"), "Unrelated prompt");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("source save failures leave existing prompts and definitions intact", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-prompt-failure-"));
+	try {
+		await makeAgent(root, "alpha", 'systemPromptFile: "./custom.md",');
+		const dir = path.join(root, ".pi-agents", "alpha");
+		const promptPath = path.join(dir, "custom.md");
+		await writeFile(promptPath, "Original");
+		const agent = (await discoverAgents(root)).agents.find(agent => agent.name === "alpha")!;
+		const original = await readFile(agent.filePath, "utf8");
+		// A directory at the source staging path forces a write failure after the prompt write.
+		await mkdir(`${agent.filePath}.tmp-${process.pid}`);
+		assert.throws(() => saveAgentSource(agent, { systemPrompt: "Replacement" }));
+		assert.equal(await readFile(promptPath, "utf8"), "Original");
+		assert.equal(await readFile(agent.filePath, "utf8"), original);
+		await writeFile(agent.filePath, 'export default (() => ({ name: "alpha", description: "dynamic" }))();');
+		assert.throws(() => saveAgentSource(agent, { systemPrompt: "Replacement" }), /not a static object/);
+		assert.equal(await readFile(promptPath, "utf8"), "Original");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("direct legacy JSON saves migrate metadata and prompt to TypeScript", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-studio-json-prompt-"));
 	try {

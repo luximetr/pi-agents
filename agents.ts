@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
 import * as ts from "typescript";
 import { getAgentDir, type AgentToolResult, type ExecOptions, type ExecResult, type ExtensionContext, type ThemeColor, type ToolExecutionMode } from "@earendil-works/pi-coding-agent";
@@ -421,7 +420,8 @@ async function loadAgentFile(
 		if (filePath.endsWith(".json")) {
 			mod = JSON.parse(fs.readFileSync(filePath, "utf8"));
 		} else if (filePath.endsWith(".mjs")) {
-			mod = await import(pathToFileURL(filePath).href);
+			// Native ESM imports cache forever; evaluate editable MJS like TS/JS.
+			mod = await jiti.evalModule(fs.readFileSync(filePath, "utf8"), { filename: filePath, async: true, forceTranspile: true });
 		} else {
 			mod = await jiti.import(filePath);
 		}
@@ -862,8 +862,12 @@ export interface DeclarativeAgentInput {
 function writeTextAtomic(filePath: string, content: string, defaultMode = 0o600): void {
 	const mode = fs.existsSync(filePath) ? fs.statSync(filePath).mode & 0o777 : defaultMode;
 	const tempPath = `${filePath}.tmp-${process.pid}`;
-	fs.writeFileSync(tempPath, content, { encoding: "utf8", mode });
-	fs.renameSync(tempPath, filePath);
+	try {
+		fs.writeFileSync(tempPath, content, { encoding: "utf8", mode });
+		fs.renameSync(tempPath, filePath);
+	} finally {
+		if (fs.existsSync(tempPath) && fs.statSync(tempPath).isFile()) fs.unlinkSync(tempPath);
+	}
 }
 
 /** Serialize data-only agent definitions as standalone, warning-free TypeScript. */
@@ -954,7 +958,7 @@ function removePropertyEdit(source: string, property: ts.ObjectLiteralElementLik
 	return { start: property.getFullStart(), end, text: "" };
 }
 
-function updateStaticAgentSource(agent: DiscoveredAgent, override: AgentOverride, mcpServers?: Record<string, McpServerConfig>): void {
+function updatedStaticAgentSource(agent: DiscoveredAgent, override: AgentOverride, promptFile: string, mcpServers?: Record<string, McpServerConfig>): string {
 	const { source, object } = parseEditableSource(agent.filePath);
 	const properties = new Map<string, ts.ObjectLiteralElementLike>();
 	for (const property of object.properties) {
@@ -970,7 +974,7 @@ function updateStaticAgentSource(agent: DiscoveredAgent, override: AgentOverride
 	if (override.subagents !== undefined) desired.set("subagents", tsSubagents(override.subagents));
 	if (override.systemPrompt !== undefined) {
 		desired.set("systemPrompt", null);
-		desired.set("systemPromptFile", JSON.stringify("./prompt.md"));
+		desired.set("systemPromptFile", JSON.stringify(promptFile));
 	}
 
 	const edits: SourceEdit[] = [];
@@ -1007,12 +1011,7 @@ function updateStaticAgentSource(agent: DiscoveredAgent, override: AgentOverride
 
 	let updated = source;
 	for (const edit of edits.sort((a, b) => b.start - a.start)) updated = updated.slice(0, edit.start) + edit.text + updated.slice(edit.end);
-	if (updated !== source) {
-		const mode = fs.statSync(agent.filePath).mode & 0o777;
-		const tempPath = `${agent.filePath}.tmp-${process.pid}`;
-		fs.writeFileSync(tempPath, updated, { encoding: "utf8", mode });
-		fs.renameSync(tempPath, agent.filePath);
-	}
+	return updated;
 }
 
 function readJsonAgentSource(filePath: string): Record<string, unknown> {
@@ -1037,9 +1036,21 @@ function applySerializableOverride(data: Record<string, unknown>, override: Agen
 	if (override.subagents !== undefined) data.subagents = override.subagents.map(entry => ({ ...entry }));
 }
 
-/** Save Studio fields and selected MCP definitions to agent.ts, keeping its prompt in the sibling prompt.md. */
+/** Retain source prompt paths even when an overlay replaced the effective prompt. */
+function sourcePromptPath(agent: DiscoveredAgent): string {
+	if (agent.sourceSystemPromptPath) return agent.sourceSystemPromptPath;
+	const dir = path.dirname(agent.filePath);
+	const flat = dir === getGlobalAgentsDir() || dir === findProjectAgentsDir(dir);
+	const base = flat ? `${path.basename(agent.filePath)}.prompt` : "prompt";
+	let candidate = path.join(dir, `${base}.md`);
+	for (let suffix = 2; fs.existsSync(candidate); suffix++) candidate = path.join(dir, `${base}-${suffix}.md`);
+	return candidate;
+}
+
+/** Save source fields without redirecting distinct agents to a shared prompt. */
 export function saveAgentSource(agent: DiscoveredAgent, override: AgentOverride, mcpServers?: Record<string, McpServerConfig>): string {
-	const promptPath = path.join(path.dirname(agent.filePath), "prompt.md");
+	const promptPath = sourcePromptPath(agent);
+	const promptFile = `./${path.relative(path.dirname(agent.filePath), promptPath).split(path.sep).join("/")}`;
 	const prompt = override.systemPrompt === undefined ? agent.systemPrompt ?? "" : override.systemPrompt ?? "";
 
 	if (agent.filePath.endsWith(".json")) {
@@ -1050,17 +1061,36 @@ export function saveAgentSource(agent: DiscoveredAgent, override: AgentOverride,
 			else delete data.mcpServers;
 		}
 		delete data.systemPrompt;
-		data.systemPromptFile = "./prompt.md";
+		data.systemPromptFile = promptFile;
 		const filePath = path.join(path.dirname(agent.filePath), "agent.ts");
-		writeTextAtomic(promptPath, prompt);
-		writeTextAtomic(filePath, generatedAgentSource(data));
-		fs.unlinkSync(agent.filePath);
+		if (fs.existsSync(filePath)) throw new Error(`agent source already exists: ${filePath}`);
+		withSavedPrompt(promptPath, prompt, () => {
+			writeTextAtomic(filePath, generatedAgentSource(data));
+			try { fs.unlinkSync(agent.filePath); }
+			catch (error) { fs.unlinkSync(filePath); throw error; }
+		});
 		return filePath;
 	}
 
-	if (override.systemPrompt !== undefined) writeTextAtomic(promptPath, prompt);
-	updateStaticAgentSource(agent, override, mcpServers);
+	// Validate/render before touching the prompt; roll it back on a source-write failure.
+	const updated = updatedStaticAgentSource(agent, override, promptFile, mcpServers);
+	const save = () => writeTextAtomic(agent.filePath, updated);
+	if (override.systemPrompt !== undefined) withSavedPrompt(promptPath, prompt, save);
+	else save();
 	return agent.filePath;
+}
+
+// Each rename is atomic, but a source + prompt pair is not crash-atomic. Ordinary
+// write failures restore the prompt; a process/filesystem crash still needs recovery.
+function withSavedPrompt(promptPath: string, prompt: string, save: () => void): void {
+	const previous = fs.existsSync(promptPath) ? fs.readFileSync(promptPath, "utf8") : undefined;
+	writeTextAtomic(promptPath, prompt);
+	try { save(); }
+	catch (error) {
+		if (previous === undefined) fs.unlinkSync(promptPath);
+		else writeTextAtomic(promptPath, previous);
+		throw error;
+	}
 }
 
 /** Create a canonical agent.ts + prompt.md definition for Agent Studio. */
