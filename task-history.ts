@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 /**
- * Opt-in, local POSIX persistence. No Pi session loader, agent config, credentials,
+ * Local POSIX persistence. No Pi session loader, agent config, credentials,
  * prompts or results are serialized into metadata. JSONL itself IS sensitive.
  * SHA-256 detects corruption, not a malicious same-user writer who can reseal it.
  * Filesystem identities are fail-closed associations, not a security sandbox.
@@ -41,8 +41,6 @@ export interface TaskHistoryRecord {
 }
 export interface HistoryScope { rootSessionId: string; projectCwd: string }
 export interface HistoryOptions {
-	/** Literal true required; construction otherwise fails without touching disk. */
-	enabled: true;
 	directory: string;
 	scope: HistoryScope;
 	/** Required backend semantic validator. Must reject invalid/unsupported Pi entries. */
@@ -119,7 +117,6 @@ export class TaskHistoryStore {
 	private constructor(private options: HistoryOptions, private project: Identity, readonly directory: string) {}
 
 	static async open(options: HistoryOptions): Promise<TaskHistoryStore> {
-		requireValue(options.enabled === true, "persistence requires explicit opt-in");
 		requireValue(process.platform !== "win32" && typeof process.getuid === "function", "owner-only POSIX permissions required");
 		requireValue(text(options.scope.rootSessionId), "stable root session ID required");
 		requireValue(typeof options.validateSession === "function", "session validator required");

@@ -5,7 +5,16 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import { stripVTControlCharacters } from "node:util";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
+
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+const testAgentDir = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-extension-home-")));
+process.env.PI_CODING_AGENT_DIR = testAgentDir;
+after(async () => {
+	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+	await rm(testAgentDir, { recursive: true, force: true });
+});
 import * as ts from "typescript";
 import extension from "../index.ts";
 import { startAuthenticatedMcp } from "./http-mcp-fixture.ts";
@@ -16,6 +25,26 @@ import { editSubagents } from "../studio-subagents.ts";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 initTheme("dark", false);
 import { discoverAgents, saveAgentOverride, saveAgentSource, saveDeclarativeAgent } from "../agents.ts";
+
+// Fake RPC children must save the same settled messages they emit.
+const persistedMessages = `
+import { appendFileSync as appendSession, readFileSync as readSession } from 'node:fs';
+import { randomUUID as sessionEntryId } from 'node:crypto';
+const sessionFile = process.argv[process.argv.indexOf('--session') + 1];
+const saveMessage = message => {
+ const entries = readSession(sessionFile, 'utf8').trim().split('\\n').map(JSON.parse);
+ appendSession(sessionFile, JSON.stringify({type:'message', id:sessionEntryId(), parentId:entries.length > 1 ? entries.at(-1).id : null, timestamp:new Date().toISOString(), message:{role:'assistant', stopReason:'stop', ...message, timestamp:Date.now()}})+'\\n');
+};
+let sessionInput = '';
+process.stdin.on('data', chunk => {
+ sessionInput += chunk;
+ let newline;
+ while ((newline = sessionInput.indexOf('\\n')) >= 0) {
+  const command = JSON.parse(sessionInput.slice(0, newline)); sessionInput = sessionInput.slice(newline + 1);
+  if (command.type === 'prompt') saveMessage({role:'user', content:command.message});
+ }
+});
+`;
 
 async function makeAgent(root: string, name: string, extra = "") {
 	await mkdir(path.join(root, ".pi-agents", name), { recursive: true });
@@ -77,7 +106,7 @@ function boot(root: string, options?: {
 		isProjectTrusted: () => options?.trusted ?? true,
 		sessionManager: {
 			getSessionFile: () => options?.sessionFile,
-			getSessionId: () => options?.sessionId,
+			getSessionId: () => options && Object.hasOwn(options, "sessionId") ? options.sessionId : `test-session:${root}`,
 			getBranch: () => options?.branchEntries ?? [],
 			getEntries: () => options?.branchEntries ?? [],
 		},
@@ -107,12 +136,12 @@ function boot(root: string, options?: {
 	return { pi, handlers, commands, messageRenderers, activeToolsets, notifications, entries, tools, statuses, lifecycleEvents, getCustomComponent: () => customComponent, ctx };
 }
 
-test("opt-in task history is wired through delegation, shutdown, reload, explicit user/agent recovery and deletion", async () => {
+test("default-on task history is wired through delegation, shutdown, reload, explicit user/agent recovery and deletion", async () => {
 	const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-history-extension-")));
 	const root = path.join(base, "project");
 	const executable = path.join(base, "fake-pi.mjs");
 	const log = path.join(base, "launches.jsonl");
-	const environment = ["PI_AGENTS_TASK_HISTORY", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_BIN", "PI_AGENTS_ROOT_SESSION_ID"];
+	const environment = ["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_BIN", "PI_AGENTS_ROOT_SESSION_ID"];
 	const previous = Object.fromEntries(environment.map(key => [key, process.env[key]]));
 	let runtime: ReturnType<typeof boot> | undefined;
 	const start = async (sessionId?: string) => {
@@ -130,7 +159,6 @@ test("opt-in task history is wired through delegation, shutdown, reload, explici
 		while (!await predicate()) { assert.ok(Date.now() < end, "history integration timed out"); await new Promise(resolve => setTimeout(resolve, 20)); }
 	};
 	try {
-		process.env.PI_AGENTS_TASK_HISTORY = "1";
 		process.env.PI_CODING_AGENT_DIR = path.join(base, "pi-home");
 		process.env.PI_CODING_AGENT_BIN = executable;
 		delete process.env.PI_AGENTS_ROOT_SESSION_ID;
@@ -247,6 +275,7 @@ test("delegate workspace schema, execution, results, completions and replies pre
 		const base = git("rev-parse", "HEAD");
 		await writeFile(path.join(repo, "source"), "parent dirty");
 		await writeFile(executable, `#!/usr/bin/env node
+${persistedMessages}
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 const session = process.argv[process.argv.indexOf('--session') + 1];
 if (!existsSync(session)) writeFileSync(session, JSON.stringify({type:'session', version:3, id:'test', cwd:process.cwd(), timestamp:new Date().toISOString()}) + '\\n');
@@ -254,7 +283,9 @@ process.stdin.once('data', () => {
  const previous = existsSync('change') ? readFileSync('change', 'utf8') : 'none';
  writeFileSync('change', 'retained');
  console.log(JSON.stringify({type:'agent_start'}));
- console.log(JSON.stringify({type:'message_end', message:{content:[{type:'text', text:JSON.stringify({cwd:process.cwd(), source:readFileSync('source', 'utf8'), previous})}]}}));
+ const message = {content:[{type:'text', text:JSON.stringify({cwd:process.cwd(), source:readFileSync('source', 'utf8'), previous})}]};
+ saveMessage(message);
+ console.log(JSON.stringify({type:'message_end', message}));
  console.log(JSON.stringify({type:'agent_settled'}));
 });
 `);
@@ -299,11 +330,7 @@ process.stdin.once('data', () => {
 		assert.equal(completion.workspaceCwd, result.details.workspaceCwd);
 		assert.equal(completion.workspaceBaseCommit, base);
 		runtime.ctx.cwd = root;
-		const failed = await delegate("worktree");
-		assert.equal(failed.details.status, "failed");
-		assert.equal(failed.details.workspace, "worktree");
-		assert.equal(failed.details.workspaceCwd, undefined);
-		assert.match(failed.content[0].text, /Cannot create subagent worktree/);
+		await assert.rejects(delegate("worktree"), /Task project changed since session startup/);
 	} finally {
 		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
 		if (previousExecutable === undefined) delete process.env.PI_CODING_AGENT_BIN;
@@ -330,10 +357,13 @@ test("truncated foreground/background worktree cards preserve expanded managemen
 		const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { stdio: "pipe" });
 		git("init"); git("add", "."); git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "initial");
 		await writeFile(executable, `#!/usr/bin/env node
+${persistedMessages}
 process.stdin.once("data", () => {
  const text = Array.from({length:3000}, (_, i) => "report-line-" + i + "-" + "x".repeat(30)).join("\\n") + "\\nUNRENDERED_PRIVATE_TAIL";
  console.log(JSON.stringify({type:"agent_start"}));
- console.log(JSON.stringify({type:"message_end", message:{role:"assistant", stopReason:"stop", content:[{type:"text", text}]}}));
+ const message = {role:"assistant", stopReason:"stop", content:[{type:"text", text}]};
+ saveMessage(message);
+ console.log(JSON.stringify({type:"message_end", message}));
  console.log(JSON.stringify({type:"agent_settled"}));
 });
 `);
@@ -419,13 +449,15 @@ process.stdin.once("data", chunk => {
   writeFileSync(file, JSON.stringify(header) + "\\n");
   entries.push(header);
  }
- const prior = entries.filter(e => e.type === "message").map(e => e.message.content);
+ const prior = entries.filter(e => e.type === "message" && e.message.role === "user").map(e => e.message.content);
  const entry = {type:"message", id:randomUUID(), parentId:entries.length > 1 ? entries.at(-1).id : null, timestamp:new Date().toISOString(), message:{role:"user", content:task, timestamp:Date.now()}};
  appendFileSync(file, JSON.stringify(entry) + "\\n");
  appendFileSync(${JSON.stringify(path.join(root, "starts.jsonl"))}, JSON.stringify({task, file, at:Date.now()}) + "\\n");
  send({type:"agent_start"});
  setTimeout(() => {
-  send({type:"message_end", message:{role:"assistant", content:[{type:"text", text:JSON.stringify({prior, task, file, model:args[args.indexOf("--model") + 1]})}]}});
+  const message = {role:"assistant", stopReason:"stop", content:[{type:"text", text:JSON.stringify({prior, task, file, model:args[args.indexOf("--model") + 1]})}], timestamp:Date.now()};
+  appendFileSync(file, JSON.stringify({type:"message", id:randomUUID(), parentId:entry.id, timestamp:new Date().toISOString(), message}) + "\\n");
+  send({type:"message_end", message});
   send({type:"agent_settled"});
  }, task === "question" ? 150 : 300);
 });`);
@@ -460,7 +492,7 @@ process.stdin.once("data", chunk => {
 		await wait(async () => (await status(continued.details.runId)).status === "completed");
 		const result = (await control("result", continued.details.runId)).content[0].text;
 		assert.match(result, /"prior":\["question"\]/);
-		assert.match(result, /"task":"answer"/);
+		assert.match(result, /New instruction:\\nanswer/);
 		assert.match(result, /test\/original/);
 		assert.doesNotMatch(result, /independent/);
 		const foreground = await delegate("foreground", false);
@@ -471,16 +503,17 @@ process.stdin.once("data", chunk => {
 		assert.match(foregroundResult, /"prior":\["foreground"\]/);
 		const savedFile = JSON.parse(foregroundResult.split("\n\n")[1]).file;
 		await rm(savedFile);
-		const missingHistory = await control("reply", foregroundReply.details.runId, "must not start fresh");
-		await wait(async () => (await status(missingHistory.details.runId)).status === "failed");
-		assert.match((await control("result", missingHistory.details.runId)).content[0].text, /history is missing/);
+		const restoredHistory = await control("reply", foregroundReply.details.runId, "restore the sealed conversation");
+		await wait(async () => (await status(restoredHistory.details.runId)).status === "completed");
+		assert.match((await control("result", restoredHistory.details.runId)).content[0].text, /foreground/);
+		assert.ok(existsSync(savedFile), "a missing working session is restored from its sealed checkpoint");
 		const stopped = await delegate("stop me");
 		await control("stop", stopped.details.runId);
 		await wait(async () => ["failed", "interrupted", "timed_out"].includes((await status(stopped.details.runId)).status));
 		await assert.rejects(control("reply", stopped.details.runId, "retry"), /Only completed/);
 		const storage = path.dirname(starts[0].file);
 		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
-		assert.equal(existsSync(storage), false, "shutdown removes saved task histories");
+		assert.equal(existsSync(storage), true, "shutdown retains durable task histories");
 		assert.deepEqual(JSON.parse((await control("list")).content[0].text), []);
 	} finally {
 		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
@@ -503,7 +536,11 @@ test("completion event wiring survives retry errors without undoing terminal or 
 		await makeAgent(root, "lead", 'default: true, subagents: ["worker"]');
 		await makeAgent(root, "worker");
 		await writeFile(executable, `#!/usr/bin/env node
-const send = event => process.stdout.write(JSON.stringify(event) + "\\n");
+${persistedMessages}
+const send = event => {
+ if (event.type === 'message_end') saveMessage(event.message);
+ process.stdout.write(JSON.stringify(event) + "\\n");
+};
 process.stdin.once("data", () => {
  send({type:"agent_start"});
  send({type:"message_end", message:{role:"assistant", stopReason:"stop", content:[{type:"text", text:"worker-result"}]}});
@@ -575,8 +612,12 @@ test("background control exposes live and terminal status without consuming comp
 		await makeAgent(root, "lead", 'default: true, subagents: [{ name: "worker", model: "test/model:high", timeoutSeconds: 30 }]');
 		await makeAgent(root, "worker");
 		await writeFile(executable, `#!/usr/bin/env node
+			${persistedMessages}
 			import { existsSync } from "node:fs";
-			const send = event => process.stdout.write(JSON.stringify(event) + "\\n");
+			const send = event => {
+				if (event.type === 'message_end') saveMessage(event.message);
+				process.stdout.write(JSON.stringify(event) + "\\n");
+			};
 			let buffer = "";
 			process.stdin.on("data", chunk => {
 				buffer += chunk;
@@ -1457,7 +1498,7 @@ test("manual and reviewed AI creation reject hidden/reserved names early without
 					assert.ok(runtime.notifications.some(entry => entry.level === "warning" && /excluded from discovery/.test(entry.message)));
 					assert.ok(!runtime.notifications.some(entry => /Created agent/.test(entry.message)));
 					assert.equal(existsSync(path.join(root, ".pi-agents")), false);
-					assert.equal(existsSync(path.join(root, "home")), false);
+					assert.equal(existsSync(path.join(root, "home", "pi-agents")), false);
 				}
 			}
 		}

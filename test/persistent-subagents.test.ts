@@ -83,7 +83,7 @@ process.stdin.on('end',()=>{
 `);
 	await chmod(executable, 0o755);
 	const options: PersistentBackendOptions = { scope: { rootSessionId: "stable-root", projectCwd: project }, directory: path.join(base, "history"),
-		env: { PI_AGENTS_TASK_HISTORY: "1" }, authorize: () => true, checkpointIntervalMs: 20 };
+		authorize: () => true, checkpointIntervalMs: 20 };
 	const backend = (await PersistentSubagentBackend.open(options))!;
 	t.after(async () => { await backend.shutdown(); await rm(base, { recursive: true, force: true }); });
 	const launches = async () => { try { return (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line)); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; } };
@@ -127,10 +127,15 @@ test("handled prompt with an already active run still waits for its result", asy
 	assert.equal((await f.backend.run({ ...input, instruction: "ACTIVE_HANDLED" }, signal(), { executable: f.executable })).text, "saved answer");
 });
 
-test("opt-in is exact and default off performs no storage or authorization work", async () => {
-	for (const flag of [undefined, "0", "true", ""]) {
-		assert.equal(await PersistentSubagentBackend.open({ scope: { rootSessionId: "", projectCwd: "/unavailable" }, env: { PI_AGENTS_TASK_HISTORY: flag }, authorize: () => { throw new Error("must not authorize"); } }), undefined);
-	}
+test("task history is enabled by default and opening does not authorize or launch tasks", async t => {
+	const f = await fixture(t);
+	const backend = await PersistentSubagentBackend.open({ ...f.options, authorize: () => { throw new Error("must not authorize during discovery"); } });
+	try {
+		assert.ok(backend instanceof PersistentSubagentBackend);
+		assert.ok((await lstat(f.options.directory!)).isDirectory());
+		assert.deepEqual(await backend.list(), []);
+		assert.deepEqual(await f.launches(), []);
+	} finally { await backend.shutdown(); }
 });
 
 test("real child lifecycle persists completed tasks, reloads safely, and recovers only on a fresh instruction", async t => {
@@ -231,7 +236,7 @@ test("prune zero-day retention deletes finished histories while a real child ret
 test("unavailable/corrupt saved state fails before launch, never a fresh session", async t => {
 	const f = await fixture(t);
 	await f.backend.run(input, signal(), { executable: f.executable });
-	const store = await TaskHistoryStore.open({ enabled: true, scope: f.options.scope, directory: f.options.directory!, validateSession: validateRecoverableParticipantSession });
+	const store = await TaskHistoryStore.open({ scope: f.options.scope, directory: f.options.directory!, validateSession: validateRecoverableParticipantSession });
 	const plan = await store.recover(input.threadId, { ...input, latestRunId: "run-1" });
 	await writeFile(plan.checkpointFile, "tampered\n");
 	await assert.rejects(f.backend.recover({ ...input, latestRunId: "run-1", runId: "run-2" }, signal(), { executable: f.executable }), /integrity/);

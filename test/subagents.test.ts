@@ -6,7 +6,18 @@ import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
+
+const extensionRuntimes: Array<{ handlers: Map<string, (event: any, ctx?: any) => any>; ctx: any }> = [];
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+const testAgentDir = realpathSync(await mkdtemp(path.join(os.tmpdir(), "pi-subagents-home-")));
+process.env.PI_CODING_AGENT_DIR = testAgentDir;
+after(async () => {
+	for (const runtime of extensionRuntimes) await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+	await rm(testAgentDir, { recursive: true, force: true });
+});
 import { discoverAgents, findMainCheckoutRoot } from "../agents.ts";
 import { saveCredential } from "../credentials.ts";
 import extension, { matchesDeniedPath } from "../index.ts";
@@ -16,6 +27,25 @@ import { renderDelegateCall, renderDelegateResult, showSubagentInspector } from 
 import { SubagentObserver } from "../subagent-observer.ts";
 
 const noAbort = new AbortController().signal;
+
+const persistedMessages = `
+import { appendFileSync as appendSession, readFileSync as readSession } from 'node:fs';
+import { randomUUID as sessionEntryId } from 'node:crypto';
+const sessionFile = process.argv[process.argv.indexOf('--session') + 1];
+const saveMessage = message => {
+ const entries = readSession(sessionFile, 'utf8').trim().split('\\n').map(JSON.parse);
+ appendSession(sessionFile, JSON.stringify({type:'message', id:sessionEntryId(), parentId:entries.length > 1 ? entries.at(-1).id : null, timestamp:new Date().toISOString(), message:{role:'assistant', stopReason:'stop', ...message, timestamp:Date.now()}})+'\\n');
+};
+let sessionInput = '';
+process.stdin.on('data', chunk => {
+ sessionInput += chunk;
+ let newline;
+ while ((newline = sessionInput.indexOf('\\n')) >= 0) {
+  const command = JSON.parse(sessionInput.slice(0, newline)); sessionInput = sessionInput.slice(newline + 1);
+  if (command.type === 'prompt') saveMessage({role:'user', content:command.message});
+ }
+});
+`;
 
 test("denied paths: matches extensions, root files, and absolute paths", () => {
 	const cwd = "/tmp/project";
@@ -50,7 +80,7 @@ test("end to end: active agent blocks denied file-tool calls", async () => {
 		};
 		extension(pi);
 		const theme = { fg: (role: string, text: string) => text, getColorMode: () => "truecolor" };
-		const ctx: any = { cwd: root, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => undefined }, ui: { theme, setStatus: () => {}, notify: () => {} } };
+		const ctx: any = { cwd: root, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => undefined, getSessionId: () => `test-session:${root}` }, ui: { theme, setStatus: () => {}, notify: () => {} } };
 		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
 		const call = handlers.get("tool_call")!;
 		assert.equal(call({ toolName: "read", input: { path: ".env" } })?.block, true);
@@ -646,8 +676,10 @@ function bootExtension(root: string) {
 	};
 	extension(pi);
 	const theme = { fg: (role: string, text: string) => text, bold: (text: string) => text, getColorMode: () => "truecolor" };
-	const ctx: any = { cwd: root, isIdle: () => true, hasPendingMessages: () => false, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => undefined, getSessionId: () => "root-test-session" }, ui: { theme, setStatus: () => {}, notify: () => {} } };
-	return { handlers, registered, ctx, messages };
+	const ctx: any = { cwd: root, isIdle: () => true, hasPendingMessages: () => false, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => undefined, getSessionId: () => `test-session:${root}` }, ui: { theme, setStatus: () => {}, notify: () => {} } };
+	const runtime = { handlers, registered, ctx, messages };
+	extensionRuntimes.push(runtime);
+	return runtime;
 }
 
 test("background delegation returns immediately, survives parent abort, and batches completion after settlement", async () => {
@@ -661,6 +693,7 @@ test("background delegation returns immediately, survives parent abort, and batc
 		}
 		const fakePi = path.join(root, "fake-pi.mjs");
 		await writeFile(fakePi, `#!/usr/bin/env node
+			${persistedMessages}
 			let buffer = "";
 			process.stdin.on("data", chunk => {
 				buffer += chunk;
@@ -668,7 +701,9 @@ test("background delegation returns immediately, survives parent abort, and batc
 				while ((end = buffer.indexOf("\\n")) >= 0) {
 					const command = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
 					if (command.type === "prompt") setTimeout(() => {
-						process.stdout.write(JSON.stringify({type:"message_end",message:{content:[{type:"text",text:"done " + command.message}]}}) + "\\n");
+						const message = {content:[{type:"text",text:"done " + command.message}]};
+						saveMessage(message);
+						process.stdout.write(JSON.stringify({type:"message_end",message}) + "\\n");
 						process.stdout.write(JSON.stringify({type:"agent_settled"}) + "\\n");
 					}, 150);
 				}
@@ -745,12 +780,15 @@ test("delegation inherits the currently selected parent model unless configured 
 			await writeFile(path.join(root, ".pi-agents", name, "agent.ts"), `export default { name: "${name}", description: "${name}" };`);
 		}
 		await writeFile(fakePi, `#!/usr/bin/env node
+			${persistedMessages}
 			process.stdin.on("data", chunk => {
 				const command = JSON.parse(String(chunk).trim());
 				if (command.type === "prompt") {
 					const selected = process.argv[process.argv.indexOf("--model") + 1];
 					const [provider, model] = selected ? selected.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "").split("/") : ["test", "default"];
-					process.stdout.write(JSON.stringify({ type: "message_end", message: { provider, model, content: [{ type: "text", text: JSON.stringify(process.argv.slice(2)) }], usage: { input: 1, output: 1 } } }) + "\\n");
+					const message = {provider, model, content:[{type:"text", text:JSON.stringify(process.argv.slice(2))}], usage:{input:1, output:1}};
+					saveMessage(message);
+					process.stdout.write(JSON.stringify({type:"message_end", message}) + "\\n");
 					process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
 				}
 			});
@@ -807,6 +845,7 @@ test("end to end: configured subagent timeout returns control to the parent dele
 		`);
 		await writeFile(fakePi, `#!/usr/bin/env node
 			const args = process.argv.slice(2);
+			${persistedMessages}
 			const expected = ["--mode", "rpc", "--session", args[3], "--agent", "worker", "--model", "test/worker-model"];
 			if (JSON.stringify(args) !== JSON.stringify(expected)) process.exit(2);
 			process.stdin.on("data", chunk => {
@@ -850,8 +889,13 @@ test("end to end: delegate truncates oversized child output and preserves the fu
 		`);
 		await writeFile(fakePi, `#!/usr/bin/env node
 			const text = Array.from({ length: 3000 }, (_, i) => "result-line-" + i + "-" + "x".repeat(20)).join("\\n");
-			process.stdout.write(JSON.stringify({ type: "message_end", message: { content: [{ type: "text", text }] } }) + "\\n");
-			process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+			${persistedMessages}
+			process.stdin.once('data', () => {
+				const message = {content:[{type:'text', text}]};
+				saveMessage(message);
+				process.stdout.write(JSON.stringify({type:'message_end', message}) + "\\n");
+				process.stdout.write(JSON.stringify({type:'agent_settled'}) + "\\n");
+			});
 		`);
 		await chmod(fakePi, 0o755);
 		process.env.PI_CODING_AGENT_BIN = fakePi;

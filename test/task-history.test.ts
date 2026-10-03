@@ -32,7 +32,7 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
 	const project = path.join(base, "project");
 	await mkdir(project);
 	const directory = path.join(base, "history");
-	const options: HistoryOptions = { enabled: true, directory, scope: { rootSessionId: "root-session", projectCwd: project }, validateSession };
+	const options: HistoryOptions = { directory, scope: { rootSessionId: "root-session", projectCwd: project }, validateSession };
 	const store = await TaskHistoryStore.open(options);
 	const workspace = await captureHistoryWorkspace(project);
 	const input = { threadId: "thread-1", ...expected, workspace, runId: "run-1" };
@@ -42,14 +42,14 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
 	return { base, project, directory, options, store, workspace, input, created, bytes };
 }
 
-test("opt-in fails before touching disk; semantic validator and stable scope are required", async t => {
-	const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-history-opt-in-")));
+test("history requires a semantic validator and stable scope before touching disk", async t => {
+	const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-history-validation-")));
 	t.after(() => rm(base, { recursive: true, force: true }));
 	const directory = path.join(base, "absent");
-	await assert.rejects(TaskHistoryStore.open({ enabled: false, directory } as unknown as HistoryOptions), /opt-in/);
+	await assert.rejects(TaskHistoryStore.open({ directory, scope: { rootSessionId: "", projectCwd: base }, validateSession }), /stable root/);
 	await assert.rejects(lstat(directory), { code: "ENOENT" });
-	await assert.rejects(TaskHistoryStore.open({ enabled: true, directory, scope: { rootSessionId: "", projectCwd: base }, validateSession }), /stable root/);
-	await assert.rejects(TaskHistoryStore.open({ enabled: true, directory, scope: { rootSessionId: "id", projectCwd: base } } as HistoryOptions), /validator/);
+	await assert.rejects(TaskHistoryStore.open({ directory, scope: { rootSessionId: "id", projectCwd: base } } as HistoryOptions), /validator/);
+	await assert.rejects(lstat(directory), { code: "ENOENT" });
 });
 
 test("checkpoint survives reopen; completed threads recover without execution or duplicated prompt metadata", async t => {

@@ -10,7 +10,7 @@ import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAg
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
 import messageTiming from "./message-timing.ts";
-import { CompletionInbox, PersistentSubagentBackend, TASK_HISTORY_ENV, backgroundRunStatus, type BackgroundRunState } from "./background-subagents.ts";
+import { CompletionInbox, PersistentSubagentBackend, backgroundRunStatus, type BackgroundRunState } from "./background-subagents.ts";
 import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } from "./subagent-observer.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
@@ -380,7 +380,7 @@ export default function (pi: ExtensionAPI) {
 	const executeDelegation: ToolDefinition["execute"] = async (toolCallId, params, signal, onUpdate, ctx) => {
 			const parent = activeAgent;
 			const input = params as { agent?: unknown; task?: unknown; background?: boolean; replyRunId?: string; recoverRunId?: string; workspace?: SubagentWorkspace };
-			if (taskHistoryError) throw new Error(`Persistent task storage unavailable: ${taskHistoryError}. Fix storage or restart with ${TASK_HISTORY_ENV} unset; no temporary fallback was used.`);
+			if (taskHistoryError) throw new Error(`Persistent task storage unavailable: ${taskHistoryError}. Fix storage and reload Pi; no temporary fallback was used.`);
 			const backend = taskBackend;
 			if (backend && fs.realpathSync(ctx.cwd) !== taskProjectCwd) throw new Error("Task project changed since session startup. Reopen the original project/session; durable tasks never silently change workspaces.");
 			if (input.workspace !== undefined && input.workspace !== "shared" && input.workspace !== "worktree") throw new Error("workspace must be 'shared' or 'worktree'");
@@ -398,12 +398,12 @@ export default function (pi: ExtensionAPI) {
 			const previousRunId = input.recoverRunId ?? input.replyRunId;
 			const previousRun = previousRunId ? backgroundRuns.get(previousRunId) : undefined;
 			if (previousRunId && !previousRun) throw new Error("Unknown run ID.");
-			if (input.recoverRunId && !backend) throw new Error(`Recovery requires ${TASK_HISTORY_ENV}=1 and a saved conversation.`);
+			if (input.recoverRunId && !backend) throw new Error("Recovery requires available task storage and a saved conversation.");
 			if (previousRun) {
 				if (previousRun.thread.owner !== parent!.name || previousRun.thread.agent !== agentName || fs.realpathSync(previousRun.thread.cwd) !== fs.realpathSync(ctx.cwd)) throw new Error("Reply denied: this thread belongs to another parent, agent, or workspace.");
 				if (previousRun.thread.latestRunId !== previousRunId) throw new Error(`Reply to the latest run instead: ${previousRun.thread.latestRunId}`);
 				if (previousRun.status === "running") throw new Error("Thread is busy; use steer on the active run.");
-				if (!input.recoverRunId && previousRun.status !== "completed") throw new Error("Only completed runs can receive replies. Use explicit recover with a new instruction when durable history is enabled; otherwise start a fresh delegation.");
+				if (!input.recoverRunId && previousRun.status !== "completed") throw new Error("Only completed runs can receive replies. Use explicit recover with a new instruction or start a fresh delegation.");
 			}
 			if (previousRun && input.workspace !== undefined && input.workspace !== previousRun.thread.workspace) throw new Error("Cannot change workspace mode for an existing thread.");
 			const inheritedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
@@ -686,7 +686,7 @@ export default function (pi: ExtensionAPI) {
 		if (action === "status") return reply(JSON.stringify(status(runId, run)));
 		if (action === "reply" || action === "recover") {
 			if (!message?.trim()) throw new Error(`${action} requires a fresh, non-empty instruction; tasks never restart automatically.`);
-			if (action === "recover" && !taskBackend) throw new Error(`Recovery requires ${TASK_HISTORY_ENV}=1 and saved history.`);
+			if (action === "recover" && !taskBackend) throw new Error("Recovery requires available task storage and saved history.");
 			return executeDelegation(_id, { agent: run.agent, task: message.trim(), background: true, [action === "recover" ? "recoverRunId" : "replyRunId"]: runId }, signal, onUpdate, ctx);
 		}
 		if (action === "delete") {
@@ -714,7 +714,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: SUBAGENT_CONTROL_TOOL,
 		label: "Subagent control",
-		description: "List session-owned live and saved tasks, inspect status/results, steer/stop active runs, or reply to completed runs. With opt-in task history, recover explicitly continues a saved completed/interrupted/failed task using a fresh message and the last safe checkpoint; later workspace effects may already exist. Nothing restarts automatically. Delete removes saved conversation, never workspace/worktrees. Busy threads require steer; stale run IDs are rejected.",
+		description: "List session-owned live and saved tasks, inspect status/results, steer/stop active runs, or reply to completed runs. Task history is retained by default; recover explicitly continues a saved completed/interrupted/failed task using a fresh message and the last safe checkpoint; later workspace effects may already exist. Nothing restarts automatically. Delete removes saved conversation, never workspace/worktrees. Busy threads require steer; stale run IDs are rejected.",
 		parameters: jsonSchemaToTypeBox({
 			type: "object",
 			properties: {
@@ -731,7 +731,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Saved tasks: list | status <runId> | recover <runId> <new instruction> | delete <runId> | prune <days>",
 		handler: async (args, ctx) => {
 			try {
-				if (!taskBackend) throw new Error(taskHistoryError ?? `Task history is off. Start Pi with ${TASK_HISTORY_ENV}=1 to opt in; this retains potentially sensitive conversations.`);
+				if (!taskBackend) throw new Error(taskHistoryError ?? "Task history storage is unavailable. Fix storage and reload Pi.");
 				const [action = "list", runId, ...words] = args.trim().split(/\s+/).filter(Boolean);
 				if (action === "prune") {
 					const days = Number(runId);
@@ -1362,7 +1362,7 @@ export default function (pi: ExtensionAPI) {
 		taskRootSessionId = process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.();
 		taskHistoryError = undefined;
 		try {
-			taskProjectCwd = process.env[TASK_HISTORY_ENV] === "1" ? fs.realpathSync(ctx.cwd) : undefined;
+			taskProjectCwd = fs.realpathSync(ctx.cwd);
 			taskBackend = await PersistentSubagentBackend.open({
 				scope: { rootSessionId: taskRootSessionId ?? "", projectCwd: ctx.cwd },
 				authorize: request => activeAgent?.name === request.owner

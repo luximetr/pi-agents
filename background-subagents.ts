@@ -48,7 +48,6 @@ export function backgroundRunStatus(runId: string, run: BackgroundRunState, snap
 	};
 }
 
-export const TASK_HISTORY_ENV = "PI_AGENTS_TASK_HISTORY";
 export interface TaskAuthorization {
 	owner: string;
 	agent: string;
@@ -63,8 +62,6 @@ export interface PersistentBackendOptions {
 	/** Current permissions, not saved configuration. Called again immediately before launch. */
 	authorize: (request: TaskAuthorization) => boolean | Promise<boolean>;
 	directory?: string;
-	/** Injectable environment for tests; only the literal value "1" opts in. */
-	env?: NodeJS.ProcessEnv;
 	checkpointIntervalMs?: number;
 }
 export interface PersistentTaskInput {
@@ -87,8 +84,7 @@ export interface PersistentTaskResult {
 }
 
 /**
- * Durable backend boundary. open() returns undefined when opt-in is off, so the
- * existing temporary lifecycle remains untouched. No discovery method launches work.
+ * Durable backend boundary. Task history is always retained. No discovery method launches work.
  * Execution locks span preparation, child close, checkpoint/finalization and shutdown.
  */
 export class PersistentSubagentBackend {
@@ -96,13 +92,12 @@ export class PersistentSubagentBackend {
 	private closed = false;
 	private constructor(private store: TaskHistoryStore, private options: PersistentBackendOptions) {}
 
-	static async open(options: PersistentBackendOptions): Promise<PersistentSubagentBackend | undefined> {
-		if ((options.env ?? process.env)[TASK_HISTORY_ENV] !== "1") return undefined;
+	static async open(options: PersistentBackendOptions): Promise<PersistentSubagentBackend> {
 		if (typeof options.authorize !== "function") throw new Error("Persistent tasks require a current authorization callback.");
 		const interval = options.checkpointIntervalMs ?? 1000;
 		if (!Number.isFinite(interval) || interval < 10) throw new Error("Checkpoint interval must be at least 10ms.");
 		const scope = { ...options.scope, projectCwd: await realpath(options.scope.projectCwd) };
-		const store = await TaskHistoryStore.open({ enabled: true, directory: options.directory ?? path.join(getAgentDir(), "pi-agents-task-history"), scope, validateSession: validateRecoverableParticipantSession });
+		const store = await TaskHistoryStore.open({ directory: options.directory ?? path.join(getAgentDir(), "pi-agents-task-history"), scope, validateSession: validateRecoverableParticipantSession });
 		return new PersistentSubagentBackend(store, { ...options, scope, checkpointIntervalMs: interval });
 	}
 
