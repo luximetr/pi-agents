@@ -1,8 +1,14 @@
 {
 	"defaultAgent": null,
 	"keybindings": {
-		"select": ["ctrl+shift+a", "alt+a"],
-		"rotate": ["ctrl+shift+q", "alt+q"],
+		"select": [
+			"ctrl+shift+a",
+			"alt+a"
+		],
+		"rotate": [
+			"ctrl+shift+q",
+			"alt+q"
+		],
 		"inspect": "f9"
 	},
 	"subagents": {
@@ -12,7 +18,11 @@
 	"mcpServers": {
 		"filesystem": {
 			"command": "npx",
-			"args": ["-y", "@modelcontextprotocol/server-filesystem@latest", "."]
+			"args": [
+				"-y",
+				"@modelcontextprotocol/server-filesystem@latest",
+				"."
+			]
 		}
 	}
 }
