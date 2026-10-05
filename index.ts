@@ -1352,17 +1352,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("models", {
 		description: "Manage global model aliases for subagent delegations: /models",
-		handler: async (_args, ctx) => {
-			const edited = await editModelAliases(ctx, config.models ?? [], agents);
-			if (!edited) return;
-			try {
-				const configPath = saveModelAliases(ctx.cwd, edited);
-				config = loadConfig(ctx.cwd, { includeProject: ctx.isProjectTrusted ? ctx.isProjectTrusted() : true });
-				ctx.ui.notify(`Model aliases saved to ${configPath}.`, "info");
-			} catch (err) {
-				ctx.ui.notify(`Could not save model aliases: ${err instanceof Error ? err.message : String(err)}`, "error");
-			}
-		},
+		handler: async (_args, ctx) => { await manageModelAliases(ctx); },
 	});
 
 	pi.registerCommand("agent", {
