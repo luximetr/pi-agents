@@ -135,9 +135,20 @@ export function formatModelReference(raw: string | undefined, aliases: readonly 
 	return resolved.value ?? "default model";
 }
 
+/** Thinking-level suffixes Pi accepts on a model selection. */
+const THINKING_SUFFIX_SOURCE = "(off|minimal|low|medium|high|xhigh|max)";
+
 /** Resolve for execution: the alias target, a bare model string, or undefined to inherit. Warns once on missing aliases. */
 export function resolveExecutionModel(raw: string | undefined, aliases: readonly ModelAlias[] | undefined, warn: (message: string) => void): string | undefined {
 	const resolved = resolveModelAlias(raw, aliases);
-	if (resolved.missing) warn(`Unknown model alias ${resolved.missing}; using the parent model instead.`);
+	if (resolved.missing) {
+		// `@fast:high` looks like an alias with a thinking override. Aliases are
+		// opaque strings, so the suffix belongs on the stored model instead.
+		const base = resolved.missing.match(new RegExp(`^(@[^\\s:]+):${THINKING_SUFFIX_SOURCE}$`));
+		const baseAlias = base ? aliases?.find(candidate => candidate.name === base[1].slice(1)) : undefined;
+		warn(baseAlias
+			? `Model alias ${baseAlias.name} takes its thinking level from its target (${baseAlias.model}); remove the suffix from ${resolved.missing}. Using the parent model instead.`
+			: `Unknown model alias ${resolved.missing}; using the parent model instead.`);
+	}
 	return resolved.value;
 }

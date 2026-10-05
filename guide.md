@@ -238,9 +238,10 @@ Give frequently used subagent models short names, then pick them from a menu ins
 subagents: [{ name: "dev-worker", model: "@fast" }]
 ```
 
-- Store the table in the **global** `~/.pi/agent/pi-agents/config.json` only; project configs never define it. Agent files in any project may reference it.
+- Store the table in the **global** `~/.pi/agent/pi-agents/config.json` only; project configs never define it. Agent files in any project may reference it. A `models` entry in a project `.pi-agents/config.json` is ignored and reported on startup — move it to the global file.
+- These aliases are pi-agents' own and unrelated to Pi's `models.json`, `enabledModels`, or virtual models; they are never registered as Pi models and do not appear in `/model`.
 - `name` is what you type and see: letters, numbers, dot, underscore, hyphen (kebab, snake, and camel all work; spaces are rejected). Names are unique, case-insensitively.
-- `model` is used exactly as written, so a thinking-level suffix like `:high` is part of the stored value.
+- `model` is used exactly as written, so a thinking-level suffix like `:high` is part of the stored value. Write the suffix on the alias target, not on the reference: `@fast` resolves, `@fast:high` does not.
 - Edit aliases in Studio (**Manage model aliases**) or with `/models`. Studio stores the stable `id` in agent files (`@id:m_a1b2c3d4e5f6`), so renaming `fast` → `quick` updates every screen without touching any agent file. Hand-typed `@fast` keeps working; the next Studio save swaps it to the id form.
 - Deleting an alias that is still referenced is allowed after a confirmation: those delegations show `@name (missing)` and warn, then use the parent's model instead. A delegation never fails because of an alias.
 - Bare model IDs (`openai-codex/gpt-6.1-sol:high`) are untouched by aliases and keep working as before. An alias always stores a plain model ID, never another alias.

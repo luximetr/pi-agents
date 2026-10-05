@@ -719,6 +719,11 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 	const globalConfig = loadConfigFrom(getGlobalAgentsDir());
 	const projectDir = opts?.includeProject === false ? null : findProjectAgentsDir(cwd);
 	const projectConfig = projectDir ? loadConfigFrom(projectDir) : {};
+	// A project-level table would be silently dropped, which looks like a typo
+	// instead of a design decision. Say so once, loudly.
+	if (projectConfig.models?.length) {
+		console.error(`pi-agents: ${path.join(projectDir!, "config.json")} defines "models", but model aliases are global-only. Move the table to ${path.join(getGlobalAgentsDir(), "config.json")}; the project entry is ignored.`);
+	}
 	// In a linked worktree the gitignored .pi-agents/.env lives in the main
 	// checkout; the worktree's own .env (when present) still wins per key.
 	const mainAgentsDir = projectDir ? findMainCheckoutAgentsDir(cwd) : null;

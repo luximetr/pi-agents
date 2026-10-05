@@ -1204,9 +1204,20 @@ test("model aliases live in the global config only and round-trip through save a
 	const previousGlobal = hadGlobal ? readFileSync(globalConfig, "utf8") : undefined;
 	try {
 		await mkdir(path.join(root, ".pi-agents"), { recursive: true });
-		// A project-level table is never used: aliases are one global list.
+		// A project-level table is never used: aliases are one global list, and the
+		// ignored entry is reported instead of failing silently.
 		await writeFile(projectConfig, JSON.stringify({ models: [{ name: "project-only", model: "test/project" }], defaultAgent: "alpha" }));
-		assert.equal(loadConfig(root).models, undefined, "project config must not define model aliases");
+		const errors: string[] = [];
+		const originalError = console.error;
+		console.error = (...parts: unknown[]) => { errors.push(parts.join(" ")); };
+		try {
+			assert.equal(loadConfig(root).models, undefined, "project config must not define model aliases");
+		} finally {
+			console.error = originalError;
+		}
+		assert.equal(errors.length, 1);
+		assert.match(errors[0], /model aliases are global-only/);
+		assert.match(errors[0], /config\.json/);
 
 		await mkdir(globalDir, { recursive: true });
 		await writeFile(globalConfig, JSON.stringify({ defaultAgent: "keep-me", models: [{ id: "m_old", name: "old", model: "test/old" }] }));

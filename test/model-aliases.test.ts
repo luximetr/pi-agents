@@ -94,6 +94,19 @@ test("execution resolution warns on missing aliases and inherits", () => {
 	assert.deepEqual(warnings, ["Unknown model alias @ghost; using the parent model instead."]);
 });
 
+test("a thinking suffix on an alias explains where the level belongs", () => {
+	const aliases = [{ id: "m_one", name: "fast", model: "test/fast:max" }];
+	const known: string[] = [];
+	// `@fast:high` is not a reference; the suffix belongs on the alias target.
+	assert.equal(resolveExecutionModel("@fast:high", aliases, message => known.push(message)), undefined);
+	assert.deepEqual(known, ["Model alias fast takes its thinking level from its target (test/fast:max); remove the suffix from @fast:high. Using the parent model instead."]);
+	const unknown: string[] = [];
+	assert.equal(resolveExecutionModel("@ghost:high", aliases, message => unknown.push(message)), undefined);
+	assert.deepEqual(unknown, ["Unknown model alias @ghost:high; using the parent model instead."]);
+	// Absolute and relative model IDs keep their provider-relative paths intact.
+	assert.equal(resolveExecutionModel("commandcode/meta/muse-spark:high", aliases, message => known.push(message)), "commandcode/meta/muse-spark:high");
+});
+
 test("display labels show the alias target, bare models, and missing markers", () => {
 	const aliases = [{ id: "m_one", name: "fast", model: "test/fast:max" }];
 	assert.equal(formatModelReference(undefined, aliases), "default model");

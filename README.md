@@ -178,7 +178,7 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 
 Use **Manage subagents** to add existing agents, remove assignments, or set each child's optional model and timeout. **Set model** opens a picker listing your global model aliases (`@fast → openai-codex/gpt-6-luna:minimal`), **Default (inherit parent's model)**, and **Custom…** for a hand-typed model ID. Choosing an alias stores its stable id, so renaming the alias later updates every delegation without editing agent files. Every delegation starts an isolated, replyable task thread. Existing model/timeout settings are prefilled when edited; **Default** restores inheritance of the parent's currently selected model, and a blank timeout restores no deadline. **Done** keeps changes in the Studio draft; Escape discards changes made in the subagent menu. Then apply or save the draft. Create new child agents from the dashboard first.
 
-Use **Manage model aliases** (or `/models`) to maintain the global alias table: add, rename, change the target model, or delete aliases. The table lives only in `~/.pi/agent/pi-agents/config.json`, so every project shares it:
+Use **Manage model aliases** (or `/models`) to maintain the global alias table: add, rename, change the target model, or delete aliases. The table lives only in `~/.pi/agent/pi-agents/config.json`, so every project shares it. These aliases belong to pi-agents alone: they are not Pi models, never appear in `/model`, and are unrelated to Pi's own `models.json`, `enabledModels`, or virtual models. A `models` entry in a project `.pi-agents/config.json` is ignored and reported at startup.
 
 ```json
 "models": [
@@ -194,7 +194,7 @@ subagents: [{ name: "dev-worker", model: "@fast" }]
 ```
 
 - Names accept kebab, snake, and camel case (letters, numbers, dot, underscore, hyphen) and must be unique; spaces are rejected. Use `/models` to manage them.
-- The stored `model` is passed through exactly as written, so a thinking suffix like `:high` stays part of the value.
+- The stored `model` is passed through exactly as written, so a thinking suffix like `:high` stays part of the value. Put the suffix on the alias target, not on the reference: `@fast` resolves, `@fast:high` does not (and says so).
 - Studio writes the stable id (`@id:m_a1b2c3d4e5f6`) into agent files; hand-typed `@fast` keeps working and is canonicalized on the next Studio save. Renaming an alias therefore needs no file edits.
 - Deleting a referenced alias asks for confirmation first. Unresolved references show `@name (missing)`, warn at delegation time, and fall back to the parent's model — a delegation never fails because of an alias.
 - Plain model IDs keep working unchanged and are never resolved through the alias table. An alias always stores a plain model ID, never another alias.
