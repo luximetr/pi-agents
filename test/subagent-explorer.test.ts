@@ -36,13 +36,12 @@ function coordinationFixture(): CoordinationSnapshot {
 	return {
 		version: 1, scope: { projectCwd: "/tmp/test-project", rootSessionId: "session", participantId: "main" }, createdAt: 1, updatedAt: 2,
 		focus: { taskId: "login", text: "Reviewing the login fix", nextAction: "Review results → finish login task", updatedAt: 2 },
-		tasks: [{ id: "login", title: "Fix login", objective: "Fix login and verify the API", status: "active", owner: "main", amendments: ["Keep the existing token format"], nextAction: "Review API tests", createdAt: 1, updatedAt: 2,
+		tasks: [{ id: "login", title: "Fix login", objective: "Fix login and verify the API", status: "active", owner: "main", nextAction: "Review API tests", createdAt: 1, updatedAt: 2,
 			items: [{ id: "implement", text: "Implement login", status: "completed", owner: "dev-worker", dependsOn: [], createdAt: 1, updatedAt: 2 },
 				{ id: "review", text: "Review API tests", status: "in_progress", owner: "main", dependsOn: ["implement"], createdAt: 1, updatedAt: 2 }] },
-			{ id: "docs", title: "Update docs", objective: "Document authentication", status: "blocked", owner: "researcher", amendments: [], items: [{ id: "draft", text: "Draft auth guide", status: "pending", dependsOn: ["login/review"], createdAt: 1, updatedAt: 2 }], createdAt: 1, updatedAt: 2 }],
+			{ id: "docs", title: "Update docs", objective: "Document authentication", status: "blocked", owner: "researcher", items: [{ id: "draft", text: "Draft auth guide", status: "pending", dependsOn: ["login/review"], createdAt: 1, updatedAt: 2 }], createdAt: 1, updatedAt: 2 }],
 		runs: [{ runId: "login-result", taskId: "login", itemId: "review", agent: "dev-worker", task: "API tests", createdAt: 1 }],
 		results: [{ runId: "login-result", taskId: "login", itemId: "review", agent: "dev-worker", task: "API tests", title: "Login implementation", summary: "All API tests passed; review the token change.", text: "Detailed login report\nThe existing token format is unchanged.", executionStatus: "completed", handling: "new", delivered: false, createdAt: 1, updatedAt: 2 }],
-		userUpdates: [],
 	};
 }
 
@@ -56,30 +55,31 @@ function inspectorHarness(handles: RunningSubagentHandle[], options: SessionInsp
 	return { component, promise, setHeight: (value: number) => { rows = value; }, close: () => component.handleInput("\u001b[20~") };
 }
 
-test("task overview derives progress and worker activity without changing the checklist", () => {
+test("task overview derives progress from items only and never shows report state", () => {
 	const state = coordinationFixture();
 	const runs = [{ ...snapshot("docs-run"), agent: "researcher" }];
 	state.runs.push({ runId: "docs-run", taskId: "docs", itemId: "draft", agent: "researcher", task: "Draft auth guide", createdAt: 1 });
 	const original = structuredClone(state);
 	const lines = renderSessionOverview(state, runs, 120);
 	assert.equal(lines.length, 5);
-	assert.match(lines[0], /Tasks · 2 active · 1 running · 1 to review\s+F9 checklist/);
+	assert.match(lines[0], /Tasks · 2 active · 1 running\s+F9 tasks/);
 	assert.match(lines[1], /Fix login · 1\/2 done · In progress/);
-	assert.match(lines[2], /Review API tests · dev-worker · awaiting review/);
+	assert.match(lines[2], /Review API tests · main · in progress/);
 	assert.match(lines[3], /Update docs · 0\/1 done · Blocked/);
-	assert.match(lines[4], /Draft auth guide · researcher · running/);
+	assert.match(lines[4], /Draft auth guide · pending/);
 	const narrow = renderSessionOverview(state, runs, 40).join("\n");
-	assert.match(narrow, /awaiting review/);
-	assert.match(narrow, /Draft auth guide · running/);
-	assert.doesNotMatch(lines.join("\n"), /Main|Next|No focus/);
-	assert.deepEqual(state, original, "rendering cannot acknowledge reports or edit checklist items");
-	state.results[0].handling = "reviewed";
-	assert.match(renderSessionOverview(state, runs, 120)[2], /awaiting incorporation/);
-	state.results[0].handling = "deferred";
-	assert.match(renderSessionOverview(state, runs, 120).join("\n"), /1 deferred/);
+	assert.match(narrow, /Review API tests · in progress/);
+	assert.match(narrow, /Draft auth guide · pending/);
+	assert.doesNotMatch(lines.join("\n"), /Main|Next|No focus|deferred/);
+	assert.deepEqual(state, original, "rendering never edits checklist items");
+	const baseline = renderSessionOverview(state, runs, 120);
+	for (const handling of ["handled", "deferred", "new"] as const) {
+		state.results[0].handling = handling;
+		assert.deepEqual(renderSessionOverview(state, runs, 120), baseline, "report handling is not shown in the panel");
+	}
 });
 
-test("task overview fits small terminals and retains pending obligations and extra tasks", () => {
+test("task overview fits small terminals and summarizes extra tasks", () => {
 	const state = coordinationFixture();
 	state.tasks[0].title = "中文 🐳\n\x1b[31mReview login\x1b[0m";
 	for (const width of [0, 1, 8, 20, 40, 80, 120]) for (const height of [0, 1, 2, 3, 4, 5, 20]) {
@@ -91,32 +91,25 @@ test("task overview fits small terminals and retains pending obligations and ext
 	assert.match(renderSessionOverview(state, [], 100).join("\n"), /\+5 more tasks/);
 	state.tasks.forEach(task => { task.status = "completed"; });
 	state.results[0].handling = "deferred";
-	assert.match(renderSessionOverview(state, [], 100).join("\n"), /deferred/, "deferred work stays visible");
-	state.results[0].handling = "incorporated";
+	assert.doesNotMatch(renderSessionOverview(state, [], 100).join("\n"), /deferred/, "reports are not shown in the panel");
 	assert.match(renderSessionOverview(state, [], 100)[0], /no active work/);
 	assert.equal(renderSessionOverview(state, [], 100).length, 1);
-	state.userUpdates.push({ id: "amendment", text: "Also verify mobile login", receivedAt: 3, status: "pending" });
-	assert.match(renderSessionOverview(state, [], 100).join("\n"), /pending update|awaiting reconciliation/);
 });
 
-test("Tasks view shows every concurrent item, dependencies, amendments and retained obligations", () => {
+test("Tasks view shows every item, dependencies and dropped work", () => {
 	const state = coordinationFixture();
-	state.tasks[1].status = "superseded";
+	state.tasks[1].status = "dropped";
 	state.results[0].handling = "deferred";
 	state.tasks[0].items.push({ id: "extra", text: "Verify browser flow", status: "pending", dependsOn: [], createdAt: 1, updatedAt: 2 });
-	state.runs.push({ runId: "browser", taskId: "login", itemId: "extra", agent: "tester", task: "Browser verification", createdAt: 1 });
-	state.userUpdates.push({ id: "amendment", text: "Also verify mobile login", receivedAt: 3, status: "pending" });
 	const text = sessionDetailLines(state, [snapshot("browser")]).join("\n");
 	assert.match(text, /Fix login · 1\/3 done · In progress/);
 	assert.match(text, /✓ Implement login/);
 	assert.match(text, /◐ Review API tests/);
-	assert.match(text, /dev-worker · deferred/);
-	assert.match(text, /◐ Verify browser flow\n    tester · running/);
-	assert.match(text, /Amendment: Keep the existing token format/);
-	assert.match(text, /Depends on: Implement login/);
-	assert.match(text, /Update docs · 0\/1 done · Superseded/);
-	assert.match(text, /Also verify mobile login/);
-	assert.doesNotMatch(text, /Main:|Next:|#login/);
+	assert.match(text, /○ Verify browser flow/);
+	assert.match(text, /after: Implement login/);
+	assert.match(text, /Update docs · 0\/1 done · Dropped/);
+	assert.match(text, /Details: Fix login and verify the API/);
+	assert.doesNotMatch(text, /Main:|Next:|#login|deferred|running/);
 });
 
 test("coordination tabs work without live runs; result inspection and delivery do not acknowledge or change focus", async () => {
@@ -126,7 +119,7 @@ test("coordination tabs work without live runs; result inspection and delivery d
 	try {
 		const { component } = harness;
 		assert.match(component.render(120).join("\n"), /\[1 Tasks\]/);
-		assert.match(component.render(120).join("\n"), /Keep the existing token format/);
+		assert.match(component.render(120).join("\n"), /Details: Fix login and verify the API/);
 		component.handleInput("2");
 		assert.match(component.render(120).join("\n"), /No delegated runs/);
 		component.handleInput("3");
@@ -158,10 +151,13 @@ test("Inbox requires explicit handling, keeps deferred results, and retains sele
 		component.handleInput("\r");
 		state.results.unshift({ ...state.results[0], runId: "concurrent", title: "Research result", text: "Different report", createdAt: 0 });
 		assert.match(component.render(120).join("\n"), /Detailed login report/);
-		component.handleInput("r");
+		component.handleInput("h");
 		await pause(0);
-		assert.equal(state.results[1].handling, "reviewed");
+		assert.equal(state.results[1].handling, "handled");
 		assert.equal(state.results[0].handling, "new");
+		component.handleInput("n");
+		await pause(0);
+		assert.equal(state.results[1].handling, "new");
 		component.handleInput("d");
 		component.handleInput("Wait for API changes");
 		component.handleInput("\r");
@@ -170,9 +166,9 @@ test("Inbox requires explicit handling, keeps deferred results, and retains sele
 		assert.equal(state.results[1].note, "Wait for API changes");
 		assert.match(component.render(120).join("\n"), /Handling: deferred/);
 		assert.match(component.render(120).join("\n"), /3 Inbox \(2\)/);
-		component.handleInput("i");
+		component.handleInput("h");
 		await pause(0);
-		assert.equal(state.results[1].handling, "incorporated");
+		assert.equal(state.results[1].handling, "handled");
 		assert.equal(state.tasks[0].items[1].status, "in_progress");
 		assert.equal(JSON.stringify(state.focus), focus);
 		assert.match(component.render(120).join("\n"), /3 Inbox \(1\)/);

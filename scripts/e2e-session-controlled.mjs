@@ -26,7 +26,7 @@ await writeFile(sessionFile, JSON.stringify({ type: "session", version: 3, id: r
 for (const name of ["lead", "worker"]) {
   const directory = path.join(root, ".pi-agents", name);
   await mkdir(directory, { recursive: true });
-  await writeFile(path.join(directory, "agent.ts"), `export default ${JSON.stringify({ name, description: "Controlled session E2E", default: name === "lead", tools: [], ...(name === "lead" ? { subagents: [{ name: "worker", model: "@fast" }] } : {}) })};\n`);
+  await writeFile(path.join(directory, "agent.ts"), `export default ${JSON.stringify({ name, description: "Controlled session E2E", default: name === "lead", tools: name === "lead" ? ["session_plan"] : [], ...(name === "lead" ? { subagents: [{ name: "worker", model: "@fast" }] } : {}) })};\n`);
 }
 // Model aliases are global-only. The controlled worker records the --model it
 // actually received, so alias resolution is proven inside the real Pi host.
@@ -87,7 +87,7 @@ export default function(pi) {
   const plan = async (params, ctx) => JSON.parse((await invoke('session_plan', params, ctx)).content[0].text);
   pi.registerCommand('coordination-setup', { description: 'Run isolated provider-free E2E fixture', handler: async (_args, ctx) => {
     try {
-      assert.ok(pi.getActiveTools().includes('session_plan'), 'bookkeeping tool must be enabled even with tools: []');
+      assert.ok(pi.getActiveTools().includes('session_plan'), 'an agent that lists session_plan must get it enabled');
       const task = await plan({ action: 'create', title: 'Controlled login', objective: 'Verify durable coordination in real Pi', items: [{ id: 'api', text: 'API checks', status: 'in_progress' }, { id: 'auth', text: 'Auth checks', status: 'in_progress' }] }, ctx);
       const first = await invoke('delegate', { agent: 'worker', task: 'API', taskId: task.id, itemId: 'api', background: true }, ctx);
       const second = await invoke('delegate', { agent: 'worker', task: 'AUTH', taskId: task.id, itemId: 'auth', background: true }, ctx);
@@ -108,12 +108,12 @@ export default function(pi) {
       const result = await plan({ action: 'result', runId: first.details.runId }, ctx);
       assert.equal(result.handling, 'new');
       assert.match(result.text, /CONTROLLED_RESULT:API/);
-      await plan({ action: 'update', taskId: task.id, amendment: 'Keep public API stable' }, ctx);
-      await plan({ action: 'handle_result', runId: first.details.runId, handling: 'reviewed', note: 'Read; verification remains' }, ctx);
+      await plan({ action: 'update', taskId: task.id, title: 'Controlled login (updated)' }, ctx);
       await plan({ action: 'handle_result', runId: second.details.runId, handling: 'deferred', note: 'Review after API checks' }, ctx);
-      await assert.rejects(plan({ action: 'update', taskId: task.id, status: 'completed' }, ctx), /unfinished|pending|complete|outstanding/i);
+      await assert.rejects(plan({ action: 'update', taskId: task.id, status: 'completed' }, ctx), /unfinished|pending|complete|outstanding|result/i);
       state = await plan({ action: 'inspect' }, ctx);
       assert.equal(state.tasks[0].status, 'active');
+      assert.equal(state.results.find(result => result.runId === first.details.runId).handling, 'new', 'delivery must not handle a report');
       writeFileSync(${JSON.stringify(reportFile)}, JSON.stringify({ ok: true, first: first.details, second: second.details, state }, null, 2));
     } catch (error) { writeFileSync(${JSON.stringify(reportFile)}, JSON.stringify({ ok: false, error: String(error), stack: error.stack })); }
   } });
@@ -124,11 +124,11 @@ export default function(pi) {
       assert.equal(state.focus, undefined, 'no focus bookkeeping required');
       assert.equal(state.tasks[0].id, previous.state.tasks[0].id);
       assert.equal(state.tasks[0].status, 'active');
-      assert.ok(state.tasks[0].amendments.includes('Keep public API stable'));
-      assert.equal(state.results.find(result => result.runId === previous.first.runId).handling, 'reviewed');
+      assert.equal(state.tasks[0].title, 'Controlled login (updated)');
+      assert.equal(state.results.find(result => result.runId === previous.first.runId).handling, 'new');
       assert.equal(state.results.find(result => result.runId === previous.second.runId).handling, 'deferred');
       assert.equal(readFileSync(${JSON.stringify(launchesFile)}, 'utf8').trim().split('\\n').length, 2, 'reload never restarts workers');
-      for (const result of state.results) await plan({ action: 'handle_result', runId: result.runId, handling: 'incorporated' }, ctx);
+      for (const result of state.results) await plan({ action: 'handle_result', runId: result.runId, handling: 'handled' }, ctx);
       for (const item of state.tasks[0].items) await plan({ action: 'update_item', taskId: state.tasks[0].id, itemId: item.id, status: 'completed' }, ctx);
       const completedState = await plan({ action: 'inspect' }, ctx);
       assert.equal(completedState.tasks[0].status, 'completed', 'last verified item closes its task automatically');
@@ -203,5 +203,5 @@ try {
   const restored = JSON.parse(readFileSync(restoredFile, "utf8"));
   assert.equal(restored.ok, true, restored.stack ?? restored.error);
   assert.equal(client.events.filter(event => event.type === "agent_start").length, 0);
-  console.log("PASS: real Pi loads the extension, resolves a global model alias into the child --model argument, launches two controlled workers, delivers linked reports, preserves checklist progress and explicit handling, rejects unfinished completion, restores without restarting workers, and closes verified checklists automatically.");
+  console.log("PASS: real Pi loads the extension, resolves a global model alias into the child --model argument, launches two controlled workers, delivers linked reports, preserves task progress and handled reports, rejects unfinished completion, restores without restarting workers, and closes verified tasks automatically.");
 } finally { await client.close(); }

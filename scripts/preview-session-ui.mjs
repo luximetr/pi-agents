@@ -23,8 +23,7 @@ const fixtureRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-agen
 const storeOptions = { projectCwd: fixtureRoot, rootSessionId: "renderer-fixture", directory: path.join(fixtureRoot, "coordination") };
 const coordination = SessionCoordination.open(storeOptions);
 coordination.createTask({
-  id: "login", title: "Finish login fix", objective: "Fix login, review worker results, and verify the full flow.", owner: "main",
-  amendments: ["Keep the existing public API."],
+  id: "login", title: "Finish login fix", objective: "Fix login, review worker reports, and verify the full flow.", owner: "main",
   items: [
     { id: "investigate", text: "Investigate the bug", status: "completed" },
     { id: "implement", text: "Implement login fix", status: "in_progress", owner: "dev-worker" },
@@ -40,7 +39,7 @@ coordination.linkRun("login-implementation", { taskId: "login", itemId: "impleme
 coordination.linkRun("auth-options", { taskId: "auth", itemId: "compare", agent: "researcher", task: "auth options" });
 coordination.recordResult({
   runId: "login-implementation", agent: "dev-worker", title: "Login implementation", task: "Implement login fix", executionStatus: "completed",
-  summary: "Login implementation is ready. Review cookie handling and run tests before incorporation.",
+  summary: "Login implementation is ready. Review cookie handling and run tests before marking it handled.",
   text: "Implemented login session renewal and cookie handling.\n\nChanged files: auth/login.ts and auth/login.test.ts.\nThe implementation still needs main-agent review and end-to-end verification.",
 });
 coordination.recordResult({
@@ -52,10 +51,10 @@ coordination.handleResult("legacy-auth", "deferred", "Resume after login E2E.");
 // Read through the same validation path used on application restoration. Fixture
 // timestamps, scope, links, and result flags come from real coordination actions.
 let state = SessionCoordination.open(storeOptions).snapshot();
-assert.equal(state.tasks[0].items[1].status, "in_progress", "unincorporated worker output leaves the parent checklist unfinished");
+assert.equal(state.tasks[0].items[1].status, "in_progress", "an unhandled report leaves the task item unfinished");
 assert.equal(state.results[0].executionStatus, "completed");
 assert.equal(state.results[0].handling, "new");
-assert.throws(() => coordination.updateItem("login", "implement", { status: "completed" }), /unincorporated|pending|outstanding|result/i);
+assert.throws(() => coordination.updateItem("login", "implement", { status: "completed" }), /unhandled result/i);
 const now = Date.now();
 const runs = [
   { id: "auth-options", agent: "researcher", task: "auth options", status: "running", phase: "researching" },
@@ -138,4 +137,4 @@ for (const preview of previews) {
 }
 await writeFile(path.join(output, "fixture.json"), JSON.stringify({ source: "scripts/preview-session-ui.mjs", kind: "rendered fixture previews, not live screenshots", state, runs }, null, 2));
 await rm(fixtureRoot, { recursive: true, force: true });
-console.log(`PASS: validated durable fixture and rendered ${previews.length} fixture previews; viewing preserves checklist progress and unhandled results.\nArtifacts: ${output}`);
+console.log(`PASS: validated durable fixture and rendered ${previews.length} fixture previews; viewing preserves item progress and unhandled reports.\nArtifacts: ${output}`);

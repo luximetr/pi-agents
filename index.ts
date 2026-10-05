@@ -142,10 +142,9 @@ export default function (pi: ExtensionAPI) {
 	let observerContext: ExtensionContext | undefined;
 	let coordination: SessionCoordination | undefined;
 	let coordinationError: string | undefined;
-	let admittedUserUpdateIds: string[] = [];
 	let renderOverview: (() => void) | undefined;
 	const getCoordination = () => {
-		if (!coordination) throw new Error(`Session coordination unavailable: ${coordinationError ?? "session has not started"}`);
+		if (!coordination) throw new Error(`Session state unavailable: ${coordinationError ?? "session has not started"}`);
 		return coordination;
 	};
 	const coordinationSnapshot = () => {
@@ -156,10 +155,26 @@ export default function (pi: ExtensionAPI) {
 		} catch (error) { coordinationError = error instanceof Error ? error.message : String(error); return undefined; }
 	};
 	const coordinationContext = (deliveredOnly = false) => {
-		try { return getCoordination().contextDigest({ deliveredOnly, ...(deliveredOnly ? { admittedUserUpdateIds } : {}) }); }
+		try { return getCoordination().contextDigest({ deliveredOnly }); }
 		catch (error) {
 			coordinationError = error instanceof Error ? error.message : String(error);
-			return `Session coordination unavailable: ${coordinationError}. Retain unfinished obligations in the current conversation; do not claim they have been saved.`;
+			return `Session state unavailable: ${coordinationError}. Unfinished work stays only in this conversation; do not claim it has been saved.`;
+		}
+	};
+	/** session_plan is opt-in per agent; it stays inactive until an agent lists it. */
+	const checklistEnabled = () => pi.getActiveTools().includes(SESSION_PLAN_TOOL);
+	const ensureCoordination = (ctx: ExtensionContext) => {
+		if (coordination) return;
+		const rootSessionId = taskRootSessionId ?? process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.();
+		if (!rootSessionId) return;
+		taskRootSessionId = rootSessionId;
+		try {
+			coordination = SessionCoordination.open({ projectCwd: ctx.cwd, rootSessionId,
+				participantId: process.env[RUN_ID_ENV] ? ctx.sessionManager.getSessionId() : "main" });
+			coordinationError = undefined;
+		} catch (error) {
+			coordinationError = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Session state unavailable: ${coordinationError}`, "warning");
 		}
 	};
 	pi.registerTool(sessionPlanTool(getCoordination, () => renderOverview?.()));
@@ -382,7 +397,9 @@ export default function (pi: ExtensionAPI) {
 	};
 	const completionMessage = (results: BackgroundResult[]) => ({
 		customType: "pi-agents-completions",
-		content: ["Subagent results awaiting reconciliation. Delivery does not mark them handled or complete checklist items. Inspect full reports with session_plan result (runId); explicitly update handling and resume unfinished user work.",
+		content: [checklistEnabled()
+			? "Worker reports are ready. Delivery does not mean they were handled. Read a full report with session_plan result (runId), mark it handled or deferred, then continue unfinished work."
+			: "Worker reports are ready.",
 			...results.slice(0, 8).map(result => {
 				const saved = coordinationSnapshot()?.results.find(item => item.runId === result.runId);
 				return `Run: ${result.runId} · ${result.agent} · ${result.details.status ?? "completed"}${saved?.taskId ? ` · task ${saved.taskId}${saved.itemId ? ` / ${saved.itemId}` : ""}` : ""}\n${(saved?.summary ?? result.text).slice(0, 600)}`;
@@ -397,7 +414,7 @@ export default function (pi: ExtensionAPI) {
 			const saved = coordinationSnapshot()?.results;
 			const ready = results.filter(result => {
 				const handling = saved?.find(item => item.runId === result.runId)?.handling;
-				return handling !== "incorporated" && handling !== "deferred";
+				return handling !== "handled" && handling !== "deferred";
 			});
 			if (ready.length) {
 				pi.sendMessage(completionMessage(ready), { triggerTurn: true, deliverAs: "followUp" });
@@ -406,7 +423,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	);
 	function markCompletionsDelivered(results: BackgroundResult[]) {
-		try { coordination?.markDelivered(results.map(result => result.runId)); }
+		try { if (checklistEnabled()) coordination?.markDelivered(results.map(result => result.runId)); }
 		catch (error) { observerContext?.ui.notify(`Could not save result delivery: ${error instanceof Error ? error.message : error}`, "warning"); }
 		renderOverview?.();
 	}
@@ -419,16 +436,8 @@ export default function (pi: ExtensionAPI) {
 		if (event.message.role === "assistant") inbox.assistantMessageEnded(event.message.stopReason);
 	});
 	pi.on("agent_settled", () => inbox.settle());
-	pi.on("input", (event, ctx) => {
+	pi.on("input", () => {
 		inbox.resume();
-		if (event.text?.trim() && event.source !== "extension") {
-			try {
-				const id = coordination?.captureUserMessage(event.text);
-				if (id && event.streamingBehavior === "steer") admittedUserUpdateIds.push(id);
-			}
-			catch (error) { ctx.ui.notify(`Could not retain user input: ${error instanceof Error ? error.message : error}`, "warning"); }
-			renderOverview?.();
-		}
 	});
 
 	const mcpManager = new McpManager(pi);
@@ -471,21 +480,21 @@ export default function (pi: ExtensionAPI) {
 			const configuredModel = resolveExecutionModel(subagent.model, config.models, (message) => ctx.ui.notify(message, "warning"));
 			const selectedModel = previousRun ? previousRun.thread.model : configuredModel ?? (inheritedModel && thinkingLevel ? `${inheritedModel}:${thinkingLevel}` : inheritedModel);
 			const runId = newRunId();
-			const runCoordination = getCoordination();
-			const state = runCoordination.snapshot();
-			const priorLink = previousRunId ? state.runs.find(run => run.runId === previousRunId) : undefined;
+			const checklist = checklistEnabled();
+			const runCoordination = checklist ? getCoordination() : undefined;
+			const state = runCoordination?.snapshot();
+			const priorLink = previousRunId ? state?.runs.find(run => run.runId === previousRunId) : undefined;
 			let continuationItemId = priorLink?.itemId;
-			if (priorLink) {
-				// A fresh, explicitly requested continuation reopens its own obligation.
-				// It does not acknowledge the previous report or complete checklist items.
+			if (runCoordination && state && priorLink) {
+				// A fresh, explicitly requested continuation reopens its own item.
 				const parentTask = state.tasks.find(task => task.id === priorLink.taskId)!;
-				if (parentTask.status === "completed" || parentTask.status === "superseded") runCoordination.updateTask(parentTask.id, { status: "active", amendment: `Follow-up instruction: ${task}` });
+				if (parentTask.status === "completed" || parentTask.status === "dropped") runCoordination.updateTask(parentTask.id, { status: "active" });
 				const item = parentTask.items.find(item => item.id === priorLink.itemId);
-				if (item?.status === "completed" || item?.status === "superseded") continuationItemId = runCoordination.addItem(parentTask.id, { text: `Follow up: ${task}`, owner: item.owner, dependsOn: [item.id] }).id;
+				if (item?.status === "completed" || item?.status === "dropped") continuationItemId = runCoordination.addItem(parentTask.id, { text: `Follow up: ${task}`, owner: item.owner, dependsOn: [item.id] }).id;
 			}
-			// Unlinked calls get their own obligation instead of guessing a task from stale focus.
-			const taskId = priorLink?.taskId ?? input.taskId ?? runCoordination.createTask({ title: task.split("\n")[0].slice(0, 120), objective: task, owner: parent!.name, items: [{ id: "work", text: task.split("\n")[0].slice(0, 160), status: "in_progress", owner: agentName }] }).id;
-			runCoordination.linkRun(runId, { taskId, itemId: continuationItemId ?? input.itemId ?? (!priorLink && !input.taskId ? "work" : undefined), agent: agentName, task });
+			// Unlinked calls get their own task instead of guessing one from stale state.
+			const taskId = priorLink?.taskId ?? input.taskId ?? (runCoordination ? runCoordination.createTask({ title: task.split("\n")[0].slice(0, 120), objective: task, owner: parent!.name, items: [{ id: "work", text: task.split("\n")[0].slice(0, 160), status: "in_progress", owner: agentName }] }).id : undefined);
+			if (runCoordination && taskId) runCoordination.linkRun(runId, { taskId, itemId: continuationItemId ?? input.itemId ?? (!priorLink && !input.taskId ? "work" : undefined), agent: agentName, task });
 			const thread: TaskThread = previousRun?.thread ?? {
 				id: `thread-${randomUUID()}`, owner: parent!.name, agent: agentName, cwd: ctx.cwd, model: selectedModel,
 				workspace: input.workspace ?? "shared",
@@ -686,8 +695,10 @@ export default function (pi: ExtensionAPI) {
 				try {
 					const report = fullRunReport === undefined ? result.content.map(item => item.text).join("\n")
 						: `Result from ${agentName}:\n\n${fullRunReport}\n\nThread ID: ${thread.id}\nRun ID: ${runId}\nWorkspace: ${thread.workspace}${runWorkspace.workspaceCwd ? `\nCwd: ${runWorkspace.workspaceCwd}` : ""}${runWorkspace.worktreePath ? `\nWorktree: ${runWorkspace.worktreePath}\nBase commit: ${runWorkspace.workspaceBaseCommit}\nChanges retained; review/apply manually (not merged).` : ""}`;
+				if (runCoordination) {
 					runCoordination.recordResult({ runId, agent: agentName, task, text: report, executionStatus: result.details.status as CoordinationResult["executionStatus"] });
 					if (!background) runCoordination.markDelivered([runId]);
+				}
 				} catch (error) {
 					ctx.ui.notify(`Could not retain result ${runId}: ${error instanceof Error ? error.message : error}. Its report remains in this run's output.`, "warning");
 				}
@@ -736,8 +747,8 @@ export default function (pi: ExtensionAPI) {
 				agent: { type: "string", description: "Name of an allowed subagent" },
 				task: { type: "string", description: "Self-contained task" },
 				background: { type: "boolean", description: "Run in the background (default false)" },
-				taskId: { type: "string", description: "Originating session_plan task ID; omitted IDs create a separate task with a checklist" },
-				itemId: { type: "string", description: "Originating checklist item ID within taskId" },
+				taskId: { type: "string", description: "Task ID from session_plan to link this run (optional)" },
+				itemId: { type: "string", description: "Item ID inside that task (optional)" },
 				workspace: { type: "string", enum: ["shared", "worktree"], description: "Workspace for this new thread: shared (default) uses parent cwd; worktree isolates parent HEAD without uncommitted changes. Replies reuse it; changes require manual review/apply." },
 			},
 			required: ["agent", "task"], additionalProperties: false,
@@ -925,7 +936,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (activeName === undefined && originalTools === undefined) {
-			originalTools = pi.getActiveTools();
+			originalTools = pi.getActiveTools().filter(name => name !== SESSION_PLAN_TOOL);
 		}
 
 		// MCP connections may contain agent-specific credentials. Never reuse a
@@ -963,7 +974,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			base = valid;
 		} else {
-			base = pi.getActiveTools().filter(tool => tool !== DELEGATE_TOOL && tool !== SUBAGENT_CONTROL_TOOL);
+			base = pi.getActiveTools().filter(tool => tool !== DELEGATE_TOOL && tool !== SUBAGENT_CONTROL_TOOL && tool !== SESSION_PLAN_TOOL);
 		}
 		const allowedSubagents = (agent.subagents ?? []).filter((subagent) => agents.some((candidate) => candidate.name === subagent.name));
 		const unknownSubagents = (agent.subagents ?? []).filter((subagent) => !agents.some((candidate) => candidate.name === subagent.name));
@@ -971,9 +982,9 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`Agent "${name}": unknown subagents: ${unknownSubagents.map((subagent) => subagent.name).join(", ")}`, "warning");
 		}
 		const delegationTools = allowedSubagents.length > 0 ? [DELEGATE_TOOL, SUBAGENT_CONTROL_TOOL] : [];
-		const active = [...new Set([...base, ...customToolNames, ...mcpToolNames, ...delegationTools, SESSION_PLAN_TOOL])];
-		// Session bookkeeping is always available, alongside configured execution tools.
+		const active = [...new Set([...base, ...customToolNames, ...mcpToolNames, ...delegationTools])];
 		pi.setActiveTools(active);
+		if (active.includes(SESSION_PLAN_TOOL)) ensureCoordination(ctx);
 
 		activeName = agent.name;
 		activeAgent = agent;
@@ -990,7 +1001,7 @@ export default function (pi: ExtensionAPI) {
 		// Clearing an agent must also drop its credentialed MCP connections.
 		await mcpManager.disconnectAll();
 		if (originalTools) {
-			pi.setActiveTools([...new Set([...originalTools, SESSION_PLAN_TOOL])]);
+			pi.setActiveTools([...new Set(originalTools)]);
 			originalTools = undefined;
 		}
 		activeName = undefined;
@@ -1023,7 +1034,7 @@ export default function (pi: ExtensionAPI) {
 			projectRoot,
 			projectAgentsDir,
 			trusted: ctx.isProjectTrusted ? ctx.isProjectTrusted() : true,
-			allTools: pi.getAllTools().filter(tool => tool.name !== SESSION_PLAN_TOOL).map((tool) => ({ name: tool.name, description: tool.description })),
+			allTools: pi.getAllTools().map((tool) => ({ name: tool.name, description: tool.description })),
 			activeTools: pi.getActiveTools(),
 			mcpServers: config.mcpServers ?? {},
 			mcpServerSources: config.mcpServerSources ?? {},
@@ -1148,7 +1159,7 @@ export default function (pi: ExtensionAPI) {
 		const method = await selectMenu(ctx, "Create agent", CREATE_MENU);
 		if (!method) return;
 		const available = {
-			tools: pi.getAllTools().map(tool => tool.name).filter(name => name !== DELEGATE_TOOL && name !== SUBAGENT_CONTROL_TOOL && name !== SESSION_PLAN_TOOL && name !== "powershell" && !name.includes("__")),
+			tools: pi.getAllTools().map(tool => tool.name).filter(name => name !== DELEGATE_TOOL && name !== SUBAGENT_CONTROL_TOOL && name !== "powershell" && !name.includes("__")),
 			mcp: Object.keys(config.mcpServers ?? {}),
 		};
 		let draft: DeclarativeAgentInput;
@@ -1324,7 +1335,7 @@ export default function (pi: ExtensionAPI) {
 			() => observer.handles(),
 			config.subagents?.staleWarningMinutes ?? DEFAULT_STALE_WARNING_MINUTES,
 			"Main session",
-			{
+			checklistEnabled() ? {
 				getCoordination: coordinationSnapshot,
 				onHandleResult: (runId, handling, note) => { getCoordination().handleResult(runId, handling, note); renderOverview?.(); },
 				getResultActions: (runId) => {
@@ -1339,11 +1350,11 @@ export default function (pi: ExtensionAPI) {
 					if (!details?.runId || details.status !== "running") throw new Error(result.content.filter(part => part.type === "text").map(part => part.text).join("\n") || "Continuation did not start.");
 					return result;
 				},
-			},
+			} : undefined,
 		);
 	}
 
-	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Task checklist, runs and inbox", inspectSubagents);
+	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Tasks, runs and inbox", inspectSubagents);
 
 	pi.registerCommand("pi-agents:subagents", {
 		description: "Session tasks, live delegated runs and result inbox: /pi-agents:subagents",
@@ -1411,19 +1422,18 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event) => {
 		const queued = inbox.take();
 		const boundaryState = coordinationSnapshot();
-		admittedUserUpdateIds = boundaryState?.userUpdates.map(update => update.id) ?? [];
 		const savedResults = boundaryState?.results ?? [];
 		// Restoration never starts work. The next explicit safe boundary exposes
 		// any saved reports not yet delivered, including crash/interruption gaps.
 		for (const result of savedResults) {
-			if (result.delivered || result.handling === "incorporated" || queued.some(item => item.runId === result.runId)) continue;
+			if (result.delivered || result.handling === "handled" || queued.some(item => item.runId === result.runId)) continue;
 			queued.push({ runId: result.runId, agent: result.agent, task: result.task, text: result.text,
 				details: { agent: result.agent, status: result.executionStatus === "completed" ? "completed" : result.executionStatus === "failed" ? "failed" : result.executionStatus === "timed_out" ? "timed_out" : "interrupted" } });
 		}
-		const completions = queued.filter(result => savedResults.find(item => item.runId === result.runId)?.handling !== "incorporated");
+		const completions = queued.filter(result => savedResults.find(item => item.runId === result.runId)?.handling !== "handled");
 		const parts: string[] = [];
-		if (coordination) parts.push(COORDINATION_GUIDE);
-		else if (coordinationError) parts.push(`Session coordination storage is unavailable: ${coordinationError}. Report this limitation; do not claim that tasks or results have been retained.`);
+		if (checklistEnabled() && coordination) parts.push(COORDINATION_GUIDE);
+		else if (checklistEnabled() && coordinationError) parts.push(`Session state storage is unavailable: ${coordinationError}. Report this limitation; do not claim that tasks or results have been saved.`);
 		if (activeAgent?.systemPrompt) parts.push(activeAgent.systemPrompt);
 		const delegateGuide = activeAgent ? delegationPrompt(activeAgent) : undefined;
 		if (delegateGuide) parts.push(delegateGuide);
@@ -1444,7 +1454,7 @@ export default function (pi: ExtensionAPI) {
 	// compaction inside an existing agent loop. Undelivered background reports stay
 	// in the transport until settlement; this hook must not bypass that boundary.
 	pi.on("context", event => {
-		if (!coordination) return;
+		if (!coordination || !checklistEnabled()) return;
 		const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === "pi-agents-coordination-context"));
 		return { messages: [...messages, { role: "custom" as const, customType: "pi-agents-coordination-context", display: false,
 			content: coordinationContext(true), timestamp: Date.now() }] };
@@ -1518,27 +1528,21 @@ export default function (pi: ExtensionAPI) {
 		persistedName = undefined;
 		if (selected) await applyAgent(selected, ctx, { silent: true });
 		else {
-			pi.setActiveTools([...new Set([...pi.getActiveTools(), SESSION_PLAN_TOOL])]);
+			pi.setActiveTools(pi.getActiveTools().filter(name => name !== SESSION_PLAN_TOOL));
 			refreshStatus(ctx);
 		}
 		persistedName = activeName;
 		taskRootSessionId = process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.();
 		coordination = undefined;
 		coordinationError = undefined;
-		admittedUserUpdateIds = [];
-		try {
-			coordination = SessionCoordination.open({ projectCwd: ctx.cwd, rootSessionId: taskRootSessionId ?? "",
-				participantId: process.env[RUN_ID_ENV] ? ctx.sessionManager.getSessionId() : "main" });
-		} catch (error) {
-			coordinationError = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`Session coordination unavailable: ${coordinationError}`, "warning");
-		}
+		if (checklistEnabled()) ensureCoordination(ctx);
 		if ((!ctx.mode || ctx.mode === "tui") && typeof ctx.ui.setWidget === "function") {
 			ctx.ui.setWidget("pi-agents-session", (tui, theme) => {
 				renderOverview = () => tui.requestRender();
 				return {
 					invalidate() {},
 					render: width => {
+						if (!checklistEnabled()) return [];
 						const state = coordinationSnapshot();
 						if (coordinationError) return [theme.fg("warning", "Tasks · saved state unavailable".slice(0, Math.max(0, width)))];
 						return renderSessionOverview(state, observer.handles().map(handle => handle.snapshot()), width, Math.max(1, Math.min(5, (tui.terminal.rows ?? 24) - 10))).map((line, index) => theme.fg(index === 0 ? "accent" : "muted", line));
@@ -1559,13 +1563,14 @@ export default function (pi: ExtensionAPI) {
 			await refreshPersistedTasks();
 			// A missing live owner is never a reason to restart. Retain an explicit
 			// interruption/report gap for each unfinished durable delegation instead.
-			if (coordination) {
-				const saved = coordination.snapshot();
+			const store = (() => { try { return getCoordination(); } catch { return undefined; } })();
+			if (store && checklistEnabled()) {
+				const saved = store.snapshot();
 				for (const link of saved.runs) {
 					if (saved.results.some(result => result.runId === link.runId)) continue;
 					const run = backgroundRuns.get(link.runId);
 					if (run && !run.persisted && run.status === "running") continue;
-					coordination.recordResult({ ...link, executionStatus: (run?.status === "completed" ? "completed" : "interrupted"),
+					store.recordResult({ ...link, executionStatus: (run?.status === "completed" ? "completed" : "interrupted"),
 						text: `No retained final report for this delegation after reload. Execution history: ${run?.status ?? "unavailable"}. Nothing was restarted. Inspect saved history and current workspace before an explicit recovery with a new instruction.` });
 				}
 			}
@@ -1624,7 +1629,6 @@ export default function (pi: ExtensionAPI) {
 		await taskBackend?.shutdown();
 		coordination = undefined;
 		coordinationError = undefined;
-		admittedUserUpdateIds = [];
 		taskBackend = undefined;
 		taskHistoryError = undefined;
 		taskRootSessionId = undefined;

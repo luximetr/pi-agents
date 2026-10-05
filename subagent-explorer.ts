@@ -4,7 +4,7 @@ import { Input, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi
 import { getSubagentWorkspace, isActiveRun } from "./subagent-observer.ts";
 import { displaySubagentModel, type RunningSubagentHandle, type SubagentSnapshot } from "./subagents.ts";
 import type { CoordinationSnapshot, CoordinationResult } from "./session-coordination.ts";
-import { checklistActivity, checklistMark, checklistProgress, coordinationText, taskDisplayStatus } from "./session-overview.ts";
+import { checklistMark, checklistProgress, coordinationText, taskDisplayStatus } from "./session-overview.ts";
 
 export interface SessionInspectorOptions {
 	getCoordination: () => CoordinationSnapshot | undefined;
@@ -14,38 +14,28 @@ export interface SessionInspectorOptions {
 	getResultActions?: (runId: string) => readonly string[];
 }
 
-/** All saved objectives remain visible, including superseded work and deferred obligations. */
-export function sessionDetailLines(state: CoordinationSnapshot | undefined, runs: readonly SubagentSnapshot[] = []): string[] {
+/** Every saved task stays visible, including dropped work. */
+export function sessionDetailLines(state: CoordinationSnapshot | undefined, _runs: readonly SubagentSnapshot[] = []): string[] {
 	if (!state) return ["Tasks are unavailable. Check startup/storage warnings."];
 	const lines: string[] = [];
-	if (!state.tasks.length) lines.push("No tasks yet. Accepted work will appear here with its checklist.");
+	if (!state.tasks.length) lines.push("No tasks yet. New work will appear here.");
 	for (const task of state.tasks) {
-		const status = taskDisplayStatus(task, state);
-		const mark = task.status === "completed" ? "✓" : task.status === "superseded" ? "−" : task.status === "blocked" ? "!" : status === "Pending" ? "○" : "◐";
+		const status = taskDisplayStatus(task);
+		const mark = task.status === "completed" ? "✓" : task.status === "dropped" ? "−" : task.status === "blocked" ? "!" : status === "Pending" ? "○" : "◐";
 		lines.push(`${mark} ${task.title} · ${checklistProgress(task)} · ${status}`);
 		for (const item of task.items) {
-			lines.push(`  ${checklistMark(state, runs, task.id, item)} ${item.text}${item.status === "superseded" ? " · superseded" : ""}`);
-			const activity = checklistActivity(state, runs, task.id, item.id);
-			for (const detail of activity) lines.push(`    ${detail}`);
-			if (!activity.length && item.status === "in_progress") lines.push(`    ${item.owner ?? task.owner} · in progress`);
-			if (item.dependsOn.length && item.status !== "completed" && item.status !== "superseded") lines.push(`    Depends on: ${item.dependsOn.map(id => task.items.find(candidate => candidate.id === id)?.text ?? id).join(", ")}`);
+			lines.push(`  ${checklistMark(item)} ${item.text}${item.status === "dropped" ? " · dropped" : ""}`);
+			if (item.dependsOn.length && item.status !== "completed" && item.status !== "dropped") lines.push(`    after: ${item.dependsOn.map(id => task.items.find(candidate => candidate.id === id)?.text ?? id).join(", ")}`);
 		}
-		for (const detail of checklistActivity(state, runs, task.id)) lines.push(`  ${detail}`);
-		if (task.objective !== task.title) lines.push(`  Objective: ${task.objective}`);
-		for (const amendment of task.amendments) lines.push(`  Amendment: ${amendment}`);
+		if (task.objective !== task.title) lines.push(`  Details: ${task.objective}`);
 		lines.push("");
-	}
-	const updates = state.userUpdates.filter(update => update.status === "pending");
-	if (updates.length) {
-		lines.push(`User updates awaiting reconciliation (${updates.length})`);
-		for (const update of updates) lines.push(`  • ${update.text}`);
 	}
 	return lines.map(coordinationText);
 }
 
 /** Stable identity selection in the UI survives new arrivals and handling changes. */
 function inboxResults(state: CoordinationSnapshot | undefined): CoordinationResult[] {
-	const order = { new: 0, reviewed: 1, deferred: 2, incorporated: 3 };
+	const order = { new: 0, deferred: 1, handled: 2 };
 	return [...state?.results ?? []].sort((a, b) => order[a.handling] - order[b.handling] || a.createdAt - b.createdAt || a.runId.localeCompare(b.runId));
 }
 
@@ -192,7 +182,7 @@ export function showSubagentInspector(
 		};
 		const editing = () => mode === "steer" || mode === "reply" || mode === "recover" || mode === "defer";
 		const tabs = (state: CoordinationSnapshot | undefined) => {
-			const pending = state?.results.filter(result => result.handling !== "incorporated").length ?? 0;
+			const pending = state?.results.filter(result => result.handling !== "handled").length ?? 0;
 			return ([['session', '1 Tasks'], ['runs', '2 Runs'], ['inbox', `3 Inbox${pending ? ` (${pending})` : ''}`]] as const)
 				.map(([name, label]) => tab === name ? theme.fg("accent", theme.bold(`[${label}]`)) : theme.fg("muted", label)).join("  ");
 		};
@@ -221,7 +211,7 @@ export function showSubagentInspector(
 				sessionMax = Math.max(0, lines.length - bodyHeight);
 				sessionTop = Math.min(sessionTop, sessionMax);
 				body = lines.slice(sessionTop, sessionTop + bodyHeight);
-				footer = `Objectives and checklists · ${sessionTop + 1}–${Math.min(lines.length, sessionTop + bodyHeight)} / ${lines.length}`;
+				footer = `Tasks and items · ${sessionTop + 1}–${Math.min(lines.length, sessionTop + bodyHeight)} / ${lines.length}`;
 				keys = width < 70 ? "↑↓ scroll · 1/2/3 views · F9 close" : "↑↓ scroll · ⌃U/⌃D page · g/G start/end · 1/2/3 views · Esc/F9 close";
 			} else {
 				const results = inboxResults(state);
@@ -238,7 +228,7 @@ export function showSubagentInspector(
 						selected.taskId, selected.itemId, selected.note, selected.summary, selected.text, task?.title, task?.status, item?.text];
 					if (!reportCache || !key.every((value, index) => value === reportCache!.key[index])) {
 						reportCache = { key, lines: [`${selected.title} · ${selected.agent}`, `Handling: ${selected.handling} · Execution: ${selected.executionStatus}`,
-							`Run: ${selected.runId}`, `Task: ${task?.title ?? selected.taskId ?? "Unlinked"}${task?.status === "superseded" ? " (superseded)" : ""}${item ? ` › ${item.text}` : selected.itemId ? ` › ${selected.itemId}` : ""}`,
+							`Run: ${selected.runId}`, `Task: ${task?.title ?? selected.taskId ?? "Unlinked"}${task?.status === "dropped" ? " (dropped)" : ""}${item ? ` › ${item.text}` : selected.itemId ? ` › ${selected.itemId}` : ""}`,
 							...(selected.note ? [`Note: ${selected.note}`] : []), "", selected.summary, "", "Full report", selected.text || "No report text retained."].flatMap(wrap) };
 					}
 					const lines = reportCache.lines;
@@ -250,20 +240,20 @@ export function showSubagentInspector(
 					const index = Math.max(0, results.findIndex(result => result.runId === selectedResultId));
 					const entries = results.map(result => {
 						const task = state?.tasks.find(task => task.id === result.taskId);
-						return [`${result.runId === selectedResultId ? "›" : " "} ${result.handling === "new" ? "●" : result.handling === "incorporated" ? "✓" : result.handling === "deferred" ? "◷" : "○"} ${result.title} · ${result.handling}`,
-							`    ${result.agent} · ${result.executionStatus} · ${task?.title ?? result.taskId ?? "Unlinked task"}${task?.status === "superseded" ? " (superseded)" : ""}`,
+						return [`${result.runId === selectedResultId ? "›" : " "} ${result.handling === "new" ? "●" : result.handling === "handled" ? "✓" : "◷"} ${result.title} · ${result.handling}`,
+							`    ${result.agent} · ${result.executionStatus} · ${task?.title ?? result.taskId ?? "Unlinked task"}${task?.status === "dropped" ? " (dropped)" : ""}`,
 							`    ${result.summary.replace(/\s+/g, " ")}`].map(line => coordinationText(line).replace(/[\n\t]+/g, " "));
 					});
 					const visibleEntries = Math.max(1, Math.floor(bodyHeight / 3));
 					const top = Math.max(0, Math.min(index - Math.floor(visibleEntries / 2), entries.length - visibleEntries));
 					body = entries.slice(top, top + visibleEntries).flat();
-					if (!results.length) body = ["Inbox is empty.", "Results appear here when runs finish; checklist completion requires verification."];
+					if (!results.length) body = ["Inbox is empty.", "Results appear here when runs finish."];
 					footer = selected ? `↑↓ select · Enter inspect · ${selected.runId}` : "No results to handle.";
 				}
-				keys = [options?.onHandleResult && selected ? "r reviewed · i incorporated · d defer · n new" : "", actions.includes("reply") ? "p reply" : "", actions.includes("recover") ? "c recover" : "", "1/2/3 views · F9 close"].filter(Boolean).join(" · ");
+				keys = [options?.onHandleResult && selected ? "h handled · d defer · n new" : "", actions.includes("reply") ? "p reply" : "", actions.includes("recover") ? "c recover" : "", "1/2/3 views · F9 close"].filter(Boolean).join(" · ");
 				if (width < 80) {
 					footer = [inspectResult ? "↑↓ scroll · Esc back" : selected ? "↑↓ · Enter inspect" : "Inbox empty", actions.includes("reply") ? "p reply" : "", actions.includes("recover") ? "c recover" : ""].filter(Boolean).join(" · ");
-					keys = options?.onHandleResult && selected ? "r review · i incorporate · d defer · F9" : "1/2/3 views · Esc/F9 close";
+					keys = options?.onHandleResult && selected ? "h handle · d defer · F9" : "1/2/3 views · Esc/F9 close";
 				}
 			}
 			input.focused = editing();
@@ -395,7 +385,7 @@ export function showSubagentInspector(
 						const runId = actionRunId;
 						if (action === "defer") {
 							mode = "normal";
-							perform(() => options!.onHandleResult!(runId, "deferred", message || undefined), "Result deferred; the obligation remains visible.");
+							perform(() => options!.onHandleResult!(runId, "deferred", message || undefined), "Report deferred; it stays in the inbox.");
 						} else if (!message) notice = "Enter a fresh instruction before sending.";
 						else if (!options?.getResultActions?.(runId).includes(action)) { mode = "normal"; notice = `${action} is no longer available for this run.`; }
 						else {
@@ -417,11 +407,11 @@ export function showSubagentInspector(
 						if (inspectResult) inspectResult = false;
 						else { close(); return; }
 					} else if (matchesKey(data, Key.enter) && selected) { inspectResult = true; resultTop = 0; }
-					else if (selected && !actionBusy && ["r", "i", "d", "n"].includes(data) && options.onHandleResult) {
+					else if (selected && !actionBusy && ["h", "d", "n"].includes(data) && options.onHandleResult) {
 						if (data === "d") { mode = "defer"; actionRunId = selected.runId; input.setValue(""); }
 						else {
-							const handling = data === "r" ? "reviewed" : data === "i" ? "incorporated" : "new";
-							perform(() => options.onHandleResult!(selected.runId, handling), `Result marked ${handling}.${handling === "incorporated" ? " Parent checklist remains explicit." : ""}`);
+							const handling = data === "h" ? "handled" : "new";
+							perform(() => options.onHandleResult!(selected.runId, handling), `Report marked ${handling}.`);
 						}
 					} else if (selected && !actionBusy && (data === "p" || data === "c")) {
 						const action = data === "p" ? "reply" : "recover";

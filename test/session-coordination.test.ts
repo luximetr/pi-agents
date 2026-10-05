@@ -24,24 +24,21 @@ function link(store: SessionCoordination, runId: string, taskId = "login", itemI
 	store.linkRun(runId, { taskId, itemId, agent: "worker", task: "Implement login" });
 }
 
-test("simultaneous result and user arrival preserves focus and multiple unfinished tasks", t => {
+test("result arrivals preserve multiple unfinished tasks and legacy focus", t => {
 	const { store } = fixture(t);
 	task(store);
 	task(store, "settings");
 	const focus = store.setFocus({ taskId: "login", text: "Reviewing the login fix", nextAction: "Finish login tests" });
 	link(store, "run-login"); link(store, "run-settings", "settings");
 	store.recordResult(report("run-settings"));
-	const updateId = store.captureUserMessage("Also keep the existing login appearance.");
 	store.recordResult(report("run-login"));
 	assert.deepEqual(store.snapshot().focus, focus);
 	assert.equal(store.snapshot().tasks.filter(task => task.status === "active").length, 2);
 	assert.equal(store.snapshot().results.filter(result => result.handling === "new").length, 2);
-	assert.equal(store.snapshot().userUpdates.find(update => update.id === updateId)?.status, "pending");
 	assert.doesNotMatch(store.contextDigest(), /Main:|Next:|Reviewing the login fix/);
-	assert.match(store.contextDigest(), /keep the existing login appearance/);
 });
 
-test("inspection and delivery never handle a result or complete the parent obligation", t => {
+test("inspection and delivery never handle a report or complete the parent task", t => {
 	const { store, options } = fixture(t);
 	task(store); link(store, "run-1", "login", "implementation");
 	store.recordResult(report("run-1"));
@@ -55,29 +52,26 @@ test("inspection and delivery never handle a result or complete the parent oblig
 	assert.equal(restored.tasks[0].status, "active");
 	assert.equal(restored.tasks[0].items[0].status, "pending");
 	assert.throws(() => store.updateItem("login", "implementation", { status: "completed" }), /unhandled result/);
-	store.handleResult("run-1", "reviewed", "Reviewed diff; tests still pending");
-	assert.match(store.pendingDigest(), /reviewed/);
-	assert.throws(() => store.updateItem("login", "implementation", { status: "completed" }), /unhandled result/);
-	store.handleResult("run-1", "incorporated", "Applied review and test findings");
+	store.handleResult("run-1", "handled", "Applied the fix and tests");
 	store.updateItem("login", "implementation", { status: "completed" });
 	assert.throws(() => store.updateTask("login", { status: "completed" }), /unfinished checklist/);
 	store.updateItem("login", "review", { status: "completed" });
-	assert.equal(store.snapshot().tasks[0].status, "completed", "last verified checklist item closes the task automatically");
-	assert.match(store.pendingDigest(), /no unhandled results/);
+	assert.equal(store.snapshot().tasks[0].status, "completed", "last finished item closes the task automatically");
+	assert.match(store.pendingDigest(), /no reports to handle/);
 });
 
-test("deferred and superseded work remain visible across reload without changing focus", t => {
+test("deferred and dropped work remain visible across reload without changing focus", t => {
 	const { store, options } = fixture(t);
 	task(store); link(store, "run-1");
 	store.setFocus({ taskId: "login", text: "Finishing tests" });
 	store.recordResult(report("run-1"));
 	store.handleResult("run-1", "deferred", "Wait for the API decision");
-	store.updateTask("login", { status: "superseded", amendment: "User chose a different login approach" });
+	store.updateTask("login", { status: "dropped" });
 	const reopened = SessionCoordination.open(options);
-	assert.equal(reopened.snapshot().tasks[0].status, "superseded");
+	assert.equal(reopened.snapshot().tasks[0].status, "dropped");
 	assert.equal(reopened.snapshot().focus?.text, "Finishing tests");
-	assert.match(reopened.contextDigest(), /1 superseded/);
-	assert.match(reopened.pendingDigest(), /deferred.*completed/);
+	assert.match(reopened.contextDigest(), /1 dropped/);
+	assert.match(reopened.pendingDigest(), /deferred/);
 	assert.match(reopened.pendingDigest(), /Wait for the API decision/);
 });
 
@@ -93,7 +87,7 @@ test("unresolved linked runs prevent completion and reload never turns them into
 	reopened.recordResult({ ...report("run-1"), executionStatus: "interrupted", text: "Process is no longer present; inspect saved history." });
 	assert.match(reopened.pendingDigest(), /interrupted/);
 	assert.throws(() => reopened.updateTask("task", { status: "completed" }), /unhandled result/);
-	reopened.handleResult("run-1", "incorporated", "Recorded interruption and resumed required work elsewhere");
+	reopened.handleResult("run-1", "handled", "Recorded interruption and resumed required work elsewhere");
 	reopened.updateTask("task", { status: "completed" });
 });
 
@@ -104,24 +98,28 @@ test("linked unfinished execution also prevents completing a checklist item", t 
 	assert.equal(store.snapshot().tasks[0].items[0].status, "pending");
 });
 
-test("user amendments are mapped explicitly and never replace other unfinished requests", t => {
+test("old files are mapped to plain words and drop removed fields on load", t => {
 	const { store, options } = fixture(t);
-	task(store); task(store, "settings");
-	store.setFocus({ taskId: "login", text: "Reviewing implementation" });
-	const amendment = store.captureUserMessage("Do not change the login appearance.");
-	const question = store.captureUserMessage("What is the current progress?");
-	assert.throws(() => store.reconcileUserMessage(amendment, { amendment: "Keep login appearance" }), /requires a task/);
-	assert.throws(() => store.reconcileUserMessage(amendment, { taskId: "missing" }), /unknown task/);
-	store.reconcileUserMessage(amendment, { taskId: "login", amendment: "Keep login appearance", note: "Clarification of accepted login task" });
-	store.reconcileUserMessage(amendment, { taskId: "login", amendment: "Keep login appearance" });
-	store.reconcileUserMessage(question, { note: "Status question answered; existing obligations remain" });
-	const restored = SessionCoordination.open(options).snapshot();
-	assert.deepEqual(restored.tasks[0].amendments, ["Keep login appearance"]);
-	assert.equal(restored.tasks[1].status, "active");
-	assert.equal(restored.focus?.text, "Reviewing implementation");
-	assert.equal(restored.userUpdates.filter(update => update.status === "pending").length, 0);
-	assert.throws(() => store.reconcileUserMessage(amendment, { taskId: "settings" }), /already reconciled differently/);
-	assert.throws(() => store.reconcileUserMessage(amendment, { taskId: "login", amendment: "Change login appearance" }), /already reconciled differently/);
+	task(store);
+	link(store, "run-1"); link(store, "run-2");
+	store.recordResult(report("run-1"));
+	store.recordResult(report("run-2"));
+	const envelope = JSON.parse(readFileSync(store.file, "utf8"));
+	const payload = JSON.parse(envelope.payload);
+	payload.tasks[0].status = "superseded";
+	payload.tasks[0].amendments = ["Old note"];
+	payload.results[0].handling = "incorporated";
+	payload.results[1].handling = "reviewed";
+	payload.userUpdates = [{ id: "old", text: "Old message", receivedAt: 1, status: "pending", note: "old" }];
+	envelope.payload = JSON.stringify(payload);
+	envelope.sha256 = createHash("sha256").update(envelope.payload).digest("hex");
+	writeFileSync(store.file, JSON.stringify(envelope), { mode: 0o600 });
+	const reopened = SessionCoordination.open(options).snapshot();
+	assert.equal(reopened.tasks[0].status, "dropped");
+	assert.equal(reopened.results[0].handling, "handled");
+	assert.equal(reopened.results[1].handling, "new");
+	assert.equal((reopened as any).userUpdates, undefined);
+	assert.equal((reopened.tasks[0] as any).amendments, undefined);
 });
 
 test("multiple store instances preserve both writers and return detached snapshots", t => {
@@ -133,11 +131,11 @@ test("multiple store instances preserve both writers and return detached snapsho
 	external.tasks[0].title = "Corrupted outside store";
 	external.tasks[0].items.length = 0;
 	assert.equal(other.snapshot().tasks[0].title, "Fix login");
-	store.updateTask("settings", { amendment: "Keep settings migrations compatible" });
+	store.updateTask("settings", { nextAction: "Keep settings migrations compatible" });
 	other.updateTask("login", { nextAction: "Run tests" });
 	assert.deepEqual(store.snapshot(), other.snapshot());
 	assert.equal(store.snapshot().tasks[0].items.length, 2);
-	assert.deepEqual(other.snapshot().tasks[1].amendments, ["Keep settings migrations compatible"]);
+	assert.equal(other.snapshot().tasks[1].nextAction, "Keep settings migrations compatible");
 });
 
 test("invalid IDs, statuses, dependencies, cycles, and associations reject atomically", t => {
@@ -177,10 +175,9 @@ test("explicit result handling is idempotent across duplicate completion deliver
 	assert.deepEqual(store.snapshot().results[0], before);
 });
 
-test("compact digests restore checklist steps and amendments without legacy focus fields", t => {
+test("compact digests restore checklist steps without legacy focus fields", t => {
 	const { store, options } = fixture(t);
 	task(store);
-	store.updateTask("login", { amendment: "Keep public API compatibility" });
 	store.setFocus({ taskId: "login", text: "Review implementation", nextAction: "Review results then finish login tests" });
 	for (let index = 0; index < 16; index++) {
 		link(store, `run-${index}`);
@@ -189,10 +186,9 @@ test("compact digests restore checklist steps and amendments without legacy focu
 	const digest = SessionCoordination.open(options).contextDigest({ maxResults: 2 });
 	assert.ok(digest.length <= 6000);
 	assert.doesNotMatch(digest, /Main:|Next:|Resume:|Review results then finish login tests/);
-	assert.match(digest, /Keep public API compatibility/);
 	assert.match(digest, /implementation \[pending/);
-	assert.match(digest, /\+14 more saved results/);
-	assert.doesNotMatch(digest, /Large report content\. Large report content\. Large report content\. Large report content\. Large report content\. Large report content\. Large report content\. Large report content\. Large report content\. Large report content\./);
+	assert.match(digest, /\+14 more saved reports/);
+	assert.ok(!digest.includes("Large report content. ".repeat(1000).trimEnd()));
 	assert.ok(store.pendingDigest({ maxChars: 100 }).length <= 100);
 	assert.ok(store.contextDigest({ maxChars: 20 }).length <= 20);
 	assert.throws(() => store.contextDigest({ maxChars: -1 }), /invalid digest limit/);
@@ -216,29 +212,6 @@ test("in-loop restoration with deliveredOnly reveals counts but defers arriving 
 	assert.equal(store.snapshot().results[1].delivered, false);
 });
 
-test("in-loop restoration withholds queued user text until admitted at the next user boundary", t => {
-	const { store, options } = fixture(t);
-	task(store);
-	store.setFocus({ taskId: "login", text: "Reviewing login" });
-	const admitted = store.captureUserMessage("Keep public login API compatibility.");
-	const admittedIds = [admitted] as const;
-	const queued = store.captureUserMessage("Queued follow-up: switch next to the settings task.");
-	const digest = store.contextDigest({ deliveredOnly: true, admittedUserUpdateIds: admittedIds });
-	assert.match(digest, /Keep public login API compatibility/);
-	assert.match(digest, /User updates awaiting reconciliation: 2/);
-	assert.match(digest, /1 user inputs waiting for the next user boundary/);
-	assert.doesNotMatch(digest, /Queued follow-up|switch next to the settings task/);
-	assert.ok(!digest.includes(queued));
-	assert.equal(store.snapshot().focus?.text, "Reviewing login");
-	assert.equal(store.snapshot().userUpdates[1].status, "pending");
-	assert.match(SessionCoordination.open(options).contextDigest(), /Queued follow-up: switch next to the settings task/);
-	assert.match(store.contextDigest({ admittedUserUpdateIds: [admitted, queued] }), /Queued follow-up/);
-	const noneAdmitted = store.contextDigest({ admittedUserUpdateIds: [] });
-	assert.match(noneAdmitted, /2 user inputs waiting for the next user boundary/);
-	assert.doesNotMatch(noneAdmitted, /Keep public login API compatibility|Queued follow-up/);
-	assert.throws(() => store.contextDigest({ admittedUserUpdateIds: ["bad\nID"] }), /invalid admitted user update IDs/);
-});
-
 test("canonical project, root session, and participant identities isolate persisted state", t => {
 	const { store, options, base } = fixture(t);
 	task(store);
@@ -252,7 +225,7 @@ test("canonical project, root session, and participant identities isolate persis
 	assert.throws(() => SessionCoordination.open({ ...options, rootSessionId: "" }), /stable root session/);
 });
 
-test("persistence is private, complete, and refuses corruption instead of resetting obligations", t => {
+test("persistence is private, complete, and refuses corruption instead of resetting tasks", t => {
 	const { store, options } = fixture(t);
 	task(store); link(store, "run-1"); store.recordResult(report("run-1"));
 	assert.equal(lstatSync(store.directory).mode & 0o777, 0o700);
@@ -279,9 +252,9 @@ test("busy and crash-left locks fail closed without erasing or duplicating tasks
 	task(store);
 	const lock = path.join(store.directory, ".lock");
 	mkdirSync(lock, { mode: 0o700 });
-	assert.throws(() => store.updateTask("login", { amendment: "Should not be saved" }), /store is busy/);
+	assert.throws(() => store.updateTask("login", { title: "Should not be saved" }), /store is busy/);
 	assert.throws(() => SessionCoordination.open(options), /store is busy/);
-	assert.deepEqual(store.snapshot().tasks[0].amendments, []);
+	assert.equal(store.snapshot().tasks[0].title, "Fix login");
 	rmSync(lock, { recursive: true });
 	assert.equal(SessionCoordination.open(options).snapshot().tasks.length, 1);
 });
@@ -290,15 +263,14 @@ test("unassigned reports can be linked explicitly without changing existing hand
 	const { store } = fixture(t);
 	task(store);
 	store.recordResult(report("unassigned"));
-	store.handleResult("unassigned", "reviewed");
+	store.handleResult("unassigned", "handled");
 	link(store, "unassigned", "login", "implementation");
 	const result = store.snapshot().results[0];
 	assert.equal(result.taskId, "login");
 	assert.equal(result.itemId, "implementation");
-	assert.equal(result.handling, "reviewed");
+	assert.equal(result.handling, "handled");
 	assert.equal(store.snapshot().focus, undefined);
 });
-
 
 test("automatic task completion waits for task-level reports and adding work reopens it", t => {
 	const { store, options } = fixture(t);
@@ -308,9 +280,9 @@ test("automatic task completion waits for task-level reports and adding work reo
 	store.updateItem("login", "review", { status: "completed" });
 	assert.equal(store.snapshot().tasks[0].status, "active", "missing linked report blocks automatic closure");
 	store.recordResult(report("report"));
-	store.handleResult("report", "reviewed");
+	store.handleResult("report", "deferred");
 	assert.equal(store.snapshot().tasks[0].status, "active");
-	store.handleResult("report", "incorporated");
+	store.handleResult("report", "handled");
 	assert.equal(SessionCoordination.open(options).snapshot().tasks[0].status, "completed");
 	store.addItem("login", { id: "regression", text: "Verify another browser" });
 	assert.equal(store.snapshot().tasks[0].status, "active");

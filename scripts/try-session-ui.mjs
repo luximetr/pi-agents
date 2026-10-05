@@ -18,9 +18,9 @@ const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
 const wrapper = path.join(root, "pi-under-test.sh");
 const launch = path.join(root, "launch.sh");
 const agents = [
-  { name: "session-demo", description: "Interactive session overview demo", default: true, tools: [], mcp: [],
+  { name: "session-demo", description: "Interactive session overview demo", default: true, tools: ["session_plan"], mcp: [],
     subagents: [{ name: "demo-tester", timeoutSeconds: 120 }, { name: "demo-researcher", timeoutSeconds: 120 }],
-    systemPrompt: "Help the user inspect session coordination. Use session_plan for accepted objectives and checklist items. Follow the user's requested result handling. Keep demo work inside this temporary project." },
+    systemPrompt: "Help the user inspect session tasks. Use session_plan for accepted tasks and items. Follow the user's requested handling. Keep demo work inside this temporary project." },
   ...["demo-tester", "demo-researcher"].map(name => ({ name, description: "Temporary demo worker", tools: ["bash"], mcp: [],
     systemPrompt: "Follow the requested demo task exactly. Execute only its requested wait/printf command and report the token. Do not modify files or start other work." })),
 ];
@@ -34,7 +34,7 @@ await writeFile(launch, `#!/bin/sh\ncd ${quote(root)} || exit 1\nexec ${quote(wr
 const prompt = `Create two independent demo tasks with checklists: API check and auth research. Give each task a worker item and a review item.
 Delegate demo-tester in the background for the API task: execute bash \`sleep 20; printf API_OK\` once, then report API_OK.
 Delegate demo-researcher in the background for the research task: execute bash \`sleep 35; printf AUTH_OK\` once, then report AUTH_OK.
-Link each run to its task and checklist item. After launching, reply "Demo running". When reports arrive, leave them new and both tasks active so I can inspect the Inbox. Do not mark results incorporated or checklist items completed until I ask. Do not edit files.`;
+Link each run to its task and item. After launching, reply "Demo running". When reports arrive, leave them new and both tasks active so I can inspect the Inbox. Do not mark reports handled or items completed until I ask. Do not edit files.`;
 await writeFile(path.join(root, "demo-prompt.txt"), prompt + "\n", { mode: 0o600 });
 console.log(`Demo project: ${root}\nResume later: ${quote(launch)}\n\nThe demo starts two workers and leaves their reports awaiting review.\nIn Pi, press F9. Keys: 1 Tasks · 2 Runs · 3 Inbox.\nThis uses your normal Pi credentials and model tokens.\n`);
 if (prepareOnly) process.exit(0);
