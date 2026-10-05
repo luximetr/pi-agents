@@ -22,9 +22,10 @@ import { mcpToolName } from "../mcp.ts";
 import { STUDIO_LABELS, StudioAction } from "../studio-menu.ts";
 import { showAgentSelector } from "../ui.ts";
 import { editSubagents } from "../studio-subagents.ts";
+import { editModelAliases } from "../studio-models.ts";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 initTheme("dark", false);
-import { discoverAgents, saveAgentOverride, saveAgentSource, saveDeclarativeAgent } from "../agents.ts";
+import { discoverAgents, loadConfig, saveAgentOverride, saveAgentSource, saveDeclarativeAgent, saveModelAliases } from "../agents.ts";
 
 // Fake RPC children must save the same settled messages they emit.
 const persistedMessages = `
@@ -1113,6 +1114,43 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 	}
 });
 
+test("/models manages global aliases and Studio delegates the same table", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-models-command-"));
+	const globalDir = path.join(testAgentDir, "pi-agents");
+	const globalConfig = path.join(globalDir, "config.json");
+	const hadGlobal = existsSync(globalConfig);
+	const previousGlobal = hadGlobal ? readFileSync(globalConfig, "utf8") : undefined;
+	try {
+		await makeAgent(root, "alpha", "default: true");
+		await makeAgent(root, "beta");
+		await mkdir(globalDir, { recursive: true });
+		await writeFile(globalConfig, JSON.stringify({ models: [{ id: "m_old", name: "old", model: "test/old-model" }] }));
+		const runtime = boot(root, {
+			selectAnswers: ["Add alias", "@fresh → test/fresh-model:max", "Rename (used by 0 subagent entries)", "Done"],
+			inputAnswers: ["fresh", "test/fresh-model:max"],
+			editorAnswers: ["renamed"],
+		});
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+		await runtime.commands.get("models").handler("", runtime.ctx);
+		const saved = JSON.parse(readFileSync(globalConfig, "utf8"));
+		assert.equal(saved.models.length, 2);
+		assert.equal(saved.models[0].name, "old", "existing aliases are retained");
+		assert.equal(saved.models[1].name, "renamed");
+		assert.equal(saved.models[1].model, "test/fresh-model:max");
+		assert.ok(saved.models[1].id.startsWith("m_"), "new aliases get a stable generated id");
+		assert.ok(runtime.notifications.some(entry => entry.message.includes(globalConfig)));
+		// Escaping the manager changes nothing on disk.
+		const cancelling = boot(root, { selectAnswers: [undefined] });
+		await cancelling.handlers.get("session_start")?.({ reason: "startup" }, cancelling.ctx);
+		await cancelling.commands.get("models").handler("", cancelling.ctx);
+		assert.deepEqual(JSON.parse(readFileSync(globalConfig, "utf8")).models, saved.models);
+	} finally {
+		if (previousGlobal === undefined) await rm(globalConfig, { force: true });
+		else await writeFile(globalConfig, previousGlobal);
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("Studio sets a startup default without activating or discarding edits", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-default-ui-"));
 	try {
@@ -1157,6 +1195,40 @@ test("/new inherits agent, model, reasoning and drafts across extension replacem
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("model aliases live in the global config only and round-trip through save and load", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-alias-config-"));
+	const globalDir = path.join(testAgentDir, "pi-agents");
+	const globalConfig = path.join(globalDir, "config.json");
+	const projectConfig = path.join(root, ".pi-agents", "config.json");
+	const hadGlobal = existsSync(globalConfig);
+	const previousGlobal = hadGlobal ? readFileSync(globalConfig, "utf8") : undefined;
+	try {
+		await mkdir(path.join(root, ".pi-agents"), { recursive: true });
+		// A project-level table is never used: aliases are one global list.
+		await writeFile(projectConfig, JSON.stringify({ models: [{ name: "project-only", model: "test/project" }], defaultAgent: "alpha" }));
+		assert.equal(loadConfig(root).models, undefined, "project config must not define model aliases");
+
+		await mkdir(globalDir, { recursive: true });
+		await writeFile(globalConfig, JSON.stringify({ defaultAgent: "keep-me", models: [{ id: "m_old", name: "old", model: "test/old" }] }));
+		const savedPath = saveModelAliases(root, [{ id: "m_fast", name: "fast", model: "test/fast:max" }]);
+		assert.equal(savedPath, globalConfig);
+		const raw = JSON.parse(readFileSync(globalConfig, "utf8"));
+		assert.equal(raw.defaultAgent, "keep-me", "unrelated global fields are preserved");
+		assert.deepEqual(raw.models, [{ id: "m_fast", name: "fast", model: "test/fast:max" }]);
+		const loaded = loadConfig(root);
+		assert.deepEqual(loaded.models, [{ id: "m_fast", name: "fast", model: "test/fast:max" }]);
+		assert.equal(loaded.defaultAgent, "alpha", "project config still wins for project-scoped fields");
+
+		saveModelAliases(root, []);
+		assert.equal(JSON.parse(readFileSync(globalConfig, "utf8")).models, undefined);
+		assert.equal(loadConfig(root).models, undefined);
+	} finally {
+		if (previousGlobal === undefined) await rm(globalConfig, { force: true });
+		else await writeFile(globalConfig, previousGlobal);
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("subagent editor validates timeouts and cancels without mutating existing settings", async () => {
 	const current = [{ name: "missing", model: "old/model", timeoutSeconds: 20 }];
 	const runtime = boot("/tmp", {
@@ -1176,7 +1248,7 @@ test("subagent editor validates timeouts and cancels without mutating existing s
 	assert.equal(current.length, 1);
 
 	const populated = boot("/tmp", {
-		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Set model (old/model)", "1 · missing · updated/model:max · 20s (missing agent)", "Set timeout (20s)", "Done"],
+		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Set model (old/model)", "Custom… (type a model ID)", "1 · missing · updated/model:max · 20s (missing agent)", "Set timeout (20s)", "Done"],
 	});
 	const seen: string[] = [];
 	populated.ctx.ui.editor = async (_title: string, prefill: string) => {
@@ -1188,11 +1260,69 @@ test("subagent editor validates timeouts and cancels without mutating existing s
 	assert.deepEqual(current, [{ name: "missing", model: "old/model", timeoutSeconds: 20 }]);
 
 	const dismissed = boot("/tmp", {
-		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Set model (old/model)", "Done"],
-		editorAnswers: [undefined],
+		selectAnswers: ["1 · missing · old/model · 20s (missing agent)", "Set model (old/model)", undefined, "Done"],
 	});
 	assert.deepEqual(await editSubagents(dismissed.ctx, "parent", [], current), current);
 
+});
+
+test("subagent model picker stores aliases by id and canonicalizes hand-typed names", async () => {
+	const aliases = [
+		{ id: "m_fast", name: "fast", model: "test/fast:max" },
+		{ id: "m_strong", name: "strong", model: "test/strong:high" },
+	];
+	const available = [{ name: "worker" }, { name: "researcher" }] as never;
+	const current = [{ name: "worker" }, { name: "researcher", model: "test/raw" }];
+	const runtime = boot("/tmp", {
+		selectAnswers: [
+			"1 · worker · default model · no timeout", "Set model (default model)", "@fast → test/fast:max",
+			"2 · researcher · test/raw · no timeout", "Set model (test/raw)", "Custom… (type a model ID)",
+			"Done",
+		],
+		editorAnswers: ["@strong"],
+	});
+	assert.deepEqual(await editSubagents(runtime.ctx, "parent", available, current, aliases), [
+		{ name: "worker", model: "@id:m_fast" },
+		{ name: "researcher", model: "@id:m_strong" },
+	]);
+	assert.deepEqual(current, [{ name: "worker" }, { name: "researcher", model: "test/raw" }]);
+
+	const missing = boot("/tmp", {
+		selectAnswers: ["1 · worker · @ghost (missing) · no timeout", "Set model (@ghost (missing))", "Default (inherit parent's model)", "Done"],
+	});
+	assert.deepEqual(await editSubagents(missing.ctx, "parent", available, [{ name: "worker", model: "@ghost" }], aliases), [{ name: "worker" }]);
+});
+
+test("Models manager adds, renames, and deletes aliases with usage warnings", async () => {
+	const agents = [{ name: "worker", subagents: [{ name: "dev", model: "@id:m_fast" }] }];
+	const runtime = boot("/tmp", {
+		selectAnswers: [
+			"Add alias", "@strong → test/strong:high", "Rename (used by 0 subagent entries)",
+			"@heavy → test/strong:high", "Set model (test/strong:high)", "Done",
+		],
+		inputAnswers: ["strong", "test/strong:high"],
+		editorAnswers: ["heavy", "test/heavy-model:low"],
+	});
+	runtime.ctx.ui.confirm = async () => true;
+	const edited = await editModelAliases(runtime.ctx, [{ id: "m_fast", name: "fast", model: "test/fast:max" }], agents as never);
+	assert.deepEqual(edited, [
+		{ id: "m_fast", name: "fast", model: "test/fast:max" },
+		{ name: "heavy", model: "test/heavy-model:low", id: edited![1].id },
+	]);
+	assert.ok(edited![1].id.startsWith("m_"), "Studio-created aliases get a stable generated id");
+
+	const deleter = boot("/tmp", { selectAnswers: ["@fast → test/fast:max", "Delete alias", "Done"] });
+	deleter.ctx.ui.confirm = async (title: string, message: string) => {
+		assert.match(title, /Delete alias "@fast"/);
+		assert.match(message, /used by 1 subagent entry/);
+		return true;
+	};
+	assert.deepEqual(await editModelAliases(deleter.ctx, [{ id: "m_fast", name: "fast", model: "test/fast:max" }], agents as never), []);
+
+	const cancelled = boot("/tmp", { selectAnswers: [undefined] });
+	const before = [{ id: "m_fast", name: "fast", model: "test/fast:max" }];
+	assert.equal(await editModelAliases(cancelled.ctx, before, agents as never), undefined);
+	assert.deepEqual(before, [{ id: "m_fast", name: "fast", model: "test/fast:max" }]);
 });
 
 test("Studio adds configured subagents, restores drafts, and saves an empty delegation list", async () => {
@@ -1201,7 +1331,7 @@ test("Studio adds configured subagents, restores drafts, and saves an empty dele
 		await makeAgent(root, "alpha", "default: true, tools: undefined");
 		await makeAgent(root, "beta");
 		const runtime = boot(root, {
-			selectAnswers: ["Manage subagents (0)", "Add subagent", "beta · beta", "1 · beta · default model · no timeout", "Set model (default)", "1 · beta · test/model · no timeout", "Set timeout (none)", "Done", "Apply as session draft"],
+			selectAnswers: ["Manage subagents (0)", "Add subagent", "beta · beta", "1 · beta · default model · no timeout", "Set model (default model)", "Custom… (type a model ID)", "1 · beta · test/model · no timeout", "Set timeout (none)", "Done", "Apply as session draft"],
 			inputAnswers: ["test/model", "30"],
 			customActions: [component => component.handleInput("\x1bOS")],
 		});
@@ -1924,7 +2054,7 @@ test("Studio migrates JSON-backed agent edits to agent.ts and removes saved over
 			flag: "alpha",
 			selectAnswers: [
 				"Manage subagents (0)", "Add subagent", "beta · beta",
-				"1 · beta · default model · no timeout", "Set model (default)", "Done",
+				"1 · beta · default model · no timeout", "Set model (default model)", "Custom… (type a model ID)", "Done",
 				"Save agent.ts (project)",
 			],
 			inputAnswers: ["openai-codex/gpt-5.3-codex-spark:high"],

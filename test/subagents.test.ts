@@ -1004,3 +1004,72 @@ test("depth guard rejects recursive delegation beyond the limit", async () => {
 		else process.env.PI_AGENTS_SUBAGENT_DEPTH = previous;
 	}
 });
+
+test("end to end: model aliases resolve at delegate time, warn on missing, and pass bare models through", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-model-alias-"));
+	const fakePi = path.join(root, "fake-pi.mjs");
+	const previousBin = process.env.PI_CODING_AGENT_BIN;
+	const globalDir = path.join(testAgentDir, "pi-agents");
+	const globalConfig = path.join(globalDir, "config.json");
+	const hadGlobalConfig = existsSync(globalConfig);
+	const previousGlobalConfig = hadGlobalConfig ? readFileSync(globalConfig, "utf8") : undefined;
+	const notifications: string[] = [];
+	try {
+		await mkdir(path.join(root, ".pi-agents", "lead"), { recursive: true });
+		await writeFile(path.join(root, ".pi-agents", "lead", "agent.ts"), `
+			export default { name: "lead", description: "Lead", default: true, subagents: [
+				{ name: "aliased", model: "@fast" },
+				{ name: "byId", model: "@id:m_stable" },
+				{ name: "bare", model: "test/bare-model:low" },
+				{ name: "missing", model: "@ghost" },
+			] };
+		`);
+		for (const name of ["aliased", "byId", "bare", "missing"]) {
+			await mkdir(path.join(root, ".pi-agents", name), { recursive: true });
+			await writeFile(path.join(root, ".pi-agents", name, "agent.ts"), `export default { name: "${name}", description: "${name}" };`);
+		}
+		await mkdir(globalDir, { recursive: true });
+		await writeFile(globalConfig, JSON.stringify({
+			models: [
+				{ id: "m_fast", name: "fast", model: "test/fast-model:max" },
+				{ id: "m_stable", name: "renamed-later", model: "test/id-model:high" },
+			],
+		}));
+		await writeFile(fakePi, `#!/usr/bin/env node
+			${persistedMessages}
+			process.stdin.on("data", chunk => {
+				const command = JSON.parse(String(chunk).trim());
+				if (command.type !== "prompt") return;
+				const selected = process.argv[process.argv.indexOf("--model") + 1];
+				const message = {content:[{type:"text",text:selected ?? "no-model"}]};
+				saveMessage(message);
+				process.stdout.write(JSON.stringify({type:"message_end",message}) + "\\n");
+				process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+			});
+		`);
+		await chmod(fakePi, 0o755);
+		process.env.PI_CODING_AGENT_BIN = fakePi;
+		const { handlers, registered, ctx } = bootExtension(root);
+		ctx.ui.notify = (message: string) => notifications.push(message);
+		ctx.model = { provider: "test", id: "parent" };
+		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+		const delegate = registered.find(tool => tool.name === "delegate")!;
+		const run = async (agent: string) => (await delegate.execute(`alias-${agent}`, { agent, task: "report model" }, undefined, undefined, ctx)).content[0].text.split("\n\n")[1];
+		assert.equal(await run("aliased"), "test/fast-model:max");
+		// Id references survive renames: the stored name changed, the id still resolves.
+		assert.equal(await run("byId"), "test/id-model:high");
+		assert.equal(await run("bare"), "test/bare-model:low");
+		// Unknown aliases warn and inherit the parent model (test/parent + max thinking level).
+		assert.equal(await run("missing"), "test/parent:max");
+		assert.ok(notifications.some(message => message.includes("Unknown model alias @ghost")), `expected a missing-alias warning, got: ${JSON.stringify(notifications)}`);
+		const prompt = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx);
+		assert.match(prompt.systemPrompt, /aliased: aliased \(model @fast → test\/fast-model:max/);
+		assert.match(prompt.systemPrompt, /missing: missing \(model @ghost \(missing\)/);
+	} finally {
+		if (previousBin === undefined) delete process.env.PI_CODING_AGENT_BIN;
+		else process.env.PI_CODING_AGENT_BIN = previousBin;
+		if (previousGlobalConfig === undefined) await rm(globalConfig, { force: true });
+		else await writeFile(globalConfig, previousGlobalConfig);
+		await rm(root, { recursive: true, force: true });
+	}
+});

@@ -74,7 +74,7 @@ test("legacy installer includes Agent Explorer and workspace backend modules", a
 	const f = await fixture();
 	try {
 		await execFileAsync(process.execPath, [installer, "install", f.target, "--legacy"], { env: f.env });
-		for (const file of ["subagent-observer.ts", "subagent-transcript.ts", "subagent-explorer.ts", "subagent-workspace.ts", "task-history.ts", "session-coordination.ts", "session-overview.ts", "session-plan-tool.ts"]) {
+		for (const file of ["subagent-observer.ts", "subagent-transcript.ts", "subagent-explorer.ts", "subagent-workspace.ts", "task-history.ts", "session-coordination.ts", "session-overview.ts", "session-plan-tool.ts", "model-aliases.ts", "studio-models.ts", "studio-subagents.ts", "credentials.ts", "guide.md"]) {
 			assert.equal(await realpath(path.join(f.target, ".pi", "extensions", "pi-agents", file)), path.join(await realpath(repoRoot), file));
 		}
 	} finally { await rm(f.root, { recursive: true, force: true }); }

@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { createJiti } from "jiti";
 import * as ts from "typescript";
 import { getAgentDir, type AgentToolResult, type ExecOptions, type ExecResult, type ExtensionContext, type ThemeColor, type ToolExecutionMode } from "@earendil-works/pi-coding-agent";
+import { normalizeModelAliases, type ModelAlias } from "./model-aliases.ts";
 
 /** Pi's built-in tools (always available). */
 export const TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
@@ -61,7 +62,7 @@ export interface AgentCustomTool {
 export interface SubagentConfig {
 	/** Name of the allowed child agent. */
 	name: string;
-	/** Pi model pattern or provider/model ID used for this delegation. Omit to inherit the parent's currently selected Pi model. */
+	/** Pi model pattern or provider/model ID used for this delegation. `@name` / `@id:` references a global model alias. Omit to inherit the parent's currently selected Pi model. */
 	model?: string;
 	/** Total execution limit in seconds for this parent-to-child delegation. Omit for no deadline. */
 	timeoutSeconds?: number;
@@ -162,6 +163,8 @@ export interface AgentOverride {
 
 export interface PiAgentsConfig {
 	defaultAgent?: string;
+	/** Global model aliases for subagent delegations, keyed by stable id. Project configs never define these. */
+	models?: ModelAlias[];
 	/** Picker and rotation order; unlisted agents follow alphabetically. */
 	agentOrder?: string[];
 	/** Declarative Agent Studio overlays, keyed by agent name. */
@@ -627,6 +630,7 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 				: undefined,
 			mcpServers,
 			env: loadEnvFile(dir),
+			models: normalizeModelAliases(parsed.models),
 		};
 	} catch (err) {
 		console.error(`pi-agents: failed to parse ${configPath}: ${err}`);
@@ -745,7 +749,18 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 		mcpServers: { ...BUILTIN_MCP_SERVERS, ...globalConfig.mcpServers, ...projectConfig.mcpServers },
 		mcpServerSources,
 		env,
+		// Model aliases are global-only: one table in ~/.pi/agent/pi-agents/config.json.
+		// Agent files in any scope may reference them.
+		models: globalConfig.models,
 	};
+}
+
+/** Save the global model alias table, preserving unrelated config.json fields. */
+export function saveModelAliases(cwd: string, aliases: ModelAlias[]): string {
+	return updateAgentsConfig(cwd, "global", raw => {
+		if (aliases.length > 0) raw.models = aliases.map(alias => ({ ...alias }));
+		else delete raw.models;
+	});
 }
 
 /**

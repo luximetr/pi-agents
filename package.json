@@ -12,9 +12,11 @@
   },
   "type": "module",
   "scripts": {
-    "test": "jiti test/helpers.test.ts && jiti test/credentials.test.ts && jiti test/studio-assistance.test.ts && jiti test/message-timing.test.ts && jiti test/extension.test.ts && jiti test/mcp.test.ts && jiti test/subagents.test.ts && jiti test/background-subagents.test.ts && jiti test/session-coordination.test.ts && jiti test/task-history.test.ts && jiti test/persistent-subagents.test.ts && jiti test/subagent-explorer.test.ts && jiti test/installer.test.ts",
+    "test": "jiti test/helpers.test.ts && jiti test/credentials.test.ts && jiti test/studio-assistance.test.ts && jiti test/message-timing.test.ts && jiti test/model-aliases.test.ts && jiti test/extension.test.ts && jiti test/mcp.test.ts && jiti test/subagents.test.ts && jiti test/background-subagents.test.ts && jiti test/session-coordination.test.ts && jiti test/task-history.test.ts && jiti test/persistent-subagents.test.ts && jiti test/subagent-explorer.test.ts && jiti test/installer.test.ts",
     "test:e2e:live": "node scripts/e2e-background.mjs",
     "test:e2e:controlled": "node scripts/e2e-session-controlled.mjs",
+    "try:aliases": "node scripts/try-model-aliases.mjs",
+    "try:session": "node scripts/try-session-ui.mjs",
     "typecheck": "tsc --noEmit"
   },
   "allowScripts": {

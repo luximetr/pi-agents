@@ -88,10 +88,13 @@ Installs are idempotent; after installing, `/reload` in a running pi session (or
 cd <this repo>
 npm ci
 mkdir -p .pi/extensions/pi-agents
+# One symlink per module the extension imports (keep this list and bin/install.mjs FILES in sync)
 ln -sf ../../index.ts .pi/extensions/pi-agents/index.ts
 ln -sf ../../agents.ts .pi/extensions/pi-agents/agents.ts
 ln -sf ../../mcp.ts .pi/extensions/pi-agents/mcp.ts
 ln -sf ../../ui.ts .pi/extensions/pi-agents/ui.ts
+ln -sf ../../message-timing.ts .pi/extensions/pi-agents/message-timing.ts
+ln -sf ../../credentials.ts .pi/extensions/pi-agents/credentials.ts
 ln -sf ../../subagents.ts .pi/extensions/pi-agents/subagents.ts
 ln -sf ../../background-subagents.ts .pi/extensions/pi-agents/background-subagents.ts
 ln -sf ../../task-history.ts .pi/extensions/pi-agents/task-history.ts
@@ -100,8 +103,16 @@ ln -sf ../../subagent-observer.ts .pi/extensions/pi-agents/subagent-observer.ts
 ln -sf ../../subagent-transcript.ts .pi/extensions/pi-agents/subagent-transcript.ts
 ln -sf ../../subagent-explorer.ts .pi/extensions/pi-agents/subagent-explorer.ts
 ln -sf ../../session-coordination.ts .pi/extensions/pi-agents/session-coordination.ts
+ln -sf ../../session-handoff.ts .pi/extensions/pi-agents/session-handoff.ts
 ln -sf ../../session-plan-tool.ts .pi/extensions/pi-agents/session-plan-tool.ts
 ln -sf ../../session-overview.ts .pi/extensions/pi-agents/session-overview.ts
+ln -sf ../../model-aliases.ts .pi/extensions/pi-agents/model-aliases.ts
+ln -sf ../../studio-assistance.ts .pi/extensions/pi-agents/studio-assistance.ts
+ln -sf ../../studio-field-editor.ts .pi/extensions/pi-agents/studio-field-editor.ts
+ln -sf ../../studio-menu.ts .pi/extensions/pi-agents/studio-menu.ts
+ln -sf ../../studio-models.ts .pi/extensions/pi-agents/studio-models.ts
+ln -sf ../../studio-subagents.ts .pi/extensions/pi-agents/studio-subagents.ts
+ln -sf ../../guide.md .pi/extensions/pi-agents/guide.md
 ```
 
 Project-local extensions load only in **trusted** projects — pi will ask on first interactive start (or run `/trust`).
@@ -165,7 +176,28 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 - **Set as default agent** saves a project/global startup default immediately, without activating the agent or applying pending edits. Project defaults take precedence over global defaults; resumed sessions keep their own agent selection.
 - **`/new` preserves your current agent, model, reasoning level, and unsaved Studio drafts** across session replacement (including plain Pi mode). Model inheritance requires the model and its credentials to remain available; reasoning is clamped to the model's supported levels. This does not change Pi's model defaults for a fresh launch.
 
-Use **Manage subagents** to add existing agents, remove assignments, or set each child's optional model and timeout. Every delegation starts an isolated, replyable task thread. Existing model/timeout settings are prefilled when edited; blank settings restore inheritance of the parent's currently selected model or no deadline. **Done** keeps changes in the Studio draft; Escape discards changes made in the subagent menu. Then apply or save the draft. Create new child agents from the dashboard first.
+Use **Manage subagents** to add existing agents, remove assignments, or set each child's optional model and timeout. **Set model** opens a picker listing your global model aliases (`@fast → openai-codex/gpt-6-luna:minimal`), **Default (inherit parent's model)**, and **Custom…** for a hand-typed model ID. Choosing an alias stores its stable id, so renaming the alias later updates every delegation without editing agent files. Every delegation starts an isolated, replyable task thread. Existing model/timeout settings are prefilled when edited; **Default** restores inheritance of the parent's currently selected model, and a blank timeout restores no deadline. **Done** keeps changes in the Studio draft; Escape discards changes made in the subagent menu. Then apply or save the draft. Create new child agents from the dashboard first.
+
+Use **Manage model aliases** (or `/models`) to maintain the global alias table: add, rename, change the target model, or delete aliases. The table lives only in `~/.pi/agent/pi-agents/config.json`, so every project shares it:
+
+```json
+"models": [
+  { "id": "m_a1b2c3d4e5f6", "name": "fast", "model": "openai-codex/gpt-6-luna:minimal" },
+  { "id": "m_9f8e7d6c5b4a", "name": "strong", "model": "openai-codex/gpt-6.1-sol:high" }
+]
+```
+
+Then reference an alias from any agent:
+
+```ts
+subagents: [{ name: "dev-worker", model: "@fast" }]
+```
+
+- Names accept kebab, snake, and camel case (letters, numbers, dot, underscore, hyphen) and must be unique; spaces are rejected. Use `/models` to manage them.
+- The stored `model` is passed through exactly as written, so a thinking suffix like `:high` stays part of the value.
+- Studio writes the stable id (`@id:m_a1b2c3d4e5f6`) into agent files; hand-typed `@fast` keeps working and is canonicalized on the next Studio save. Renaming an alias therefore needs no file edits.
+- Deleting a referenced alias asks for confirmation first. Unresolved references show `@name (missing)`, warn at delegation time, and fall back to the parent's model — a delegation never fails because of an alias.
+- Plain model IDs keep working unchanged and are never resolved through the alias table. An alias always stores a plain model ID, never another alias.
 
 The MCP editor includes curated recipes for Playwright, iOS Simulator, pen.dev, DocHub, DesignHub, and TaskHub. They remain disconnected until assigned to an agent. Project/global `mcpServers` with the same name override the bundled recipe.
 
@@ -243,7 +275,8 @@ export default {
   tools: ["read", "grep", "find"],
   subagents: [
     "developer", // uses the parent's currently selected Pi model
-    { name: "researcher", model: "anthropic/claude-sonnet-5", timeoutSeconds: 900 },
+    { name: "researcher", model: "@fast", timeoutSeconds: 900 }, // @fast = a global model alias
+    { name: "reviewer", model: "anthropic/claude-sonnet-5" }, // plain model IDs still work
   ],
   systemPrompt: "Stay high-level; delegate implementation and research tasks.",
 };
@@ -251,7 +284,7 @@ export default {
 
 This adds `delegate` and `subagent_control` automatically. The parent sees its allowed children's names, descriptions, models, and deadlines. Every `delegate` creates a fresh conversation (`threadId`) and execution (`runId`), including foreground delegations. Independent threads run in parallel even for the same agent. To answer a worker's question or continue its task, call `subagent_control({ action: "reply", runId, message: "Use option A." })`. This starts a **new background run in the same thread**, loading saved messages, tool results, and compaction summaries. Reply to the latest completed run; stale IDs, busy threads, failed/interrupted runs, and another parent's threads are rejected. Use `steer` while running. A new `delegate` never implicitly reuses context.
 
-Children use the configured model or inherit the parent's model and thinking level. Replies retain the thread's selected model; current agent definitions, permissions, and configured deadlines apply again. Prompt-cache hits remain provider-dependent, not guaranteed by persistence. Process memory and open connections are not retained; workers should recheck workspace files before continuing. Delegation remains allowlisted and capped at four nested levels. Set `PI_CODING_AGENT_BIN` if needed.
+Children use the configured model or inherit the parent's model and thinking level. A configured `model` may be a plain Pi model ID or a `@alias` from the global **model aliases** table, which lets you switch a model once for every delegation that uses it. Replies retain the thread's selected model; current agent definitions, permissions, and configured deadlines apply again. Prompt-cache hits remain provider-dependent, not guaranteed by persistence. Process memory and open connections are not retained; workers should recheck workspace files before continuing. Delegation remains allowlisted and capped at four nested levels. Set `PI_CODING_AGENT_BIN` if needed.
 
 **Background delegation:** `delegate({ agent: "worker", task: "…", background: true })` returns a run ID immediately instead of waiting. The main agent can continue working or respond to you while multiple children run. Completion/failure results accumulate in a session-owned inbox and are delivered together only after the main agent fully settles (including retries and queued user messages), never as mid-flow steering. When idle, results automatically start a follow-up turn. Escape pauses automatic wake-ups while children continue; your next message includes waiting results. `subagent_control` supports `list`, `status`, `result`, `reply`, `recover`, `steer`, and `stop` actions; use `runId` for a specific run and `message` for replies or steering. `subagent_control({ action: "status", runId: "…" })` returns live phase, current tool, model, elapsed/idle milliseconds, and any deadline/remaining time without waiting or consuming pending results. `list` returns the same metadata for all session-owned background runs. Status includes `threadId` and `latestRunId` and remains available after completion, failure, timeout, or interruption; before observation starts it reports `starting`. Check status when needed rather than repeatedly polling; completion delivery remains automatic. Progress also remains visible in Agent Explorer. Omitting `background` preserves blocking delegation. `/reload`, session replacement, and exit stop live workers; saved coordination and reports remain available when the same session is restored. Restoration never restarts workers automatically. Children share the working directory by default: give parallel workers separate files, or select `workspace: "worktree"` per delegation as described below.
 
@@ -351,6 +384,8 @@ Stopping a run clears acknowledged queued steering/follow-ups before RPC abort, 
 A manual interruption or deadline returns diagnostic context to the parent so it can choose another approach. Delegate tool output stays compact by default; use Pi's tool-expand key to expand the Markdown preview. Delegation previews are capped at Pi's standard 2,000-line/50 KB tool limit; oversized output is also linked from a private temporary file. The full report is retained in durable coordination for explicit `session_plan result`, `subagent_control result`, or Inbox inspection after reload. Completion notifications and handling acknowledgements stay compact. The agent cannot choose its deadline at call time: configure `timeoutSeconds` on the parent's subagent entry. Omit it to run without a deadline.
 
 **Try it interactively before publishing:** `node scripts/try-session-ui.mjs` opens Pi in a temporary demo project and starts two background workers using this checkout in both parent and children. It uses your normal Pi credentials/model and consumes tokens, without installing the checkout into your settings. Press F9 and use `1` Tasks, `2` Runs, or `3` Inbox; the demo leaves reports new for inspection. Ask the main agent to review/incorporate the reports when ready. The printed launcher resumes the same demo session later. Use `--prepare-only` to inspect generated files without starting Pi, or pass `--model provider/model` to choose a model.
+
+**Try model aliases without touching your settings:** `npm run try:aliases` (or `node scripts/try-model-aliases.mjs`) builds a temporary, isolated Pi home and demo project, loads this checkout through `--extension`, and seeds `@fast` / `@strong` in the *sandbox* `pi-agents/config.json`. Your real `~/.pi/agent` config and settings stay untouched; `auth.json` is copied so your own model credentials work, and tokens are consumed. Use `/models` to edit aliases, `F7 → F4 → Manage subagents → Set model` to pick one, and `F9 → 2 Runs` to confirm the model each child actually received. `--prepare-only` writes the sandbox without starting Pi.
 
 **Live integration test:** `npm run test:e2e:live` uses your existing Pi credentials with `openai-codex/gpt-6.1-sol:medium` as coordinator and `openai-codex/gpt-6-luna` as worker. It consumes provider tokens and runs in a temporary project with this checkout explicitly loaded in both parent and children. It verifies overlapping child execution, user follow-up acceptance, deferred batched results, abort/resume, reply context, and durable coordination: checklist progress, linked results, amendments, reviewed/deferred handling, and restart without relaunching workers. Use `node scripts/e2e-background.mjs --coordination-only` for the coordination scenario. RPC/audit logs remain in the printed temporary directory. Override models with `E2E_MAIN_MODEL` / `E2E_CHILD_MODEL`.
 

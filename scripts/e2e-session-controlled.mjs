@@ -26,8 +26,14 @@ await writeFile(sessionFile, JSON.stringify({ type: "session", version: 3, id: r
 for (const name of ["lead", "worker"]) {
   const directory = path.join(root, ".pi-agents", name);
   await mkdir(directory, { recursive: true });
-  await writeFile(path.join(directory, "agent.ts"), `export default ${JSON.stringify({ name, description: "Controlled session E2E", default: name === "lead", tools: [], ...(name === "lead" ? { subagents: ["worker"] } : {}) })};\n`);
+  await writeFile(path.join(directory, "agent.ts"), `export default ${JSON.stringify({ name, description: "Controlled session E2E", default: name === "lead", tools: [], ...(name === "lead" ? { subagents: [{ name: "worker", model: "@fast" }] } : {}) })};\n`);
 }
+// Model aliases are global-only. The controlled worker records the --model it
+// actually received, so alias resolution is proven inside the real Pi host.
+await mkdir(path.join(agentDir, "pi-agents"), { recursive: true });
+await writeFile(path.join(agentDir, "pi-agents", "config.json"), JSON.stringify({
+  models: [{ id: "m_controlled", name: "fast", model: "test/alias-model:max" }],
+}, null, 2));
 await writeFile(childExecutable, `#!/usr/bin/env node
 import { appendFileSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -40,7 +46,7 @@ process.stdin.on('data', chunk => {
     const command = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
     if (command.type === 'abort') { clearTimeout(timer); emit({ type: 'agent_settled' }); continue; }
     if (command.type !== 'prompt') continue;
-    appendFileSync(${JSON.stringify(launchesFile)}, JSON.stringify({ at: Date.now(), task: command.message }) + '\\n');
+    appendFileSync(${JSON.stringify(launchesFile)}, JSON.stringify({ at: Date.now(), task: command.message, model: process.argv[process.argv.indexOf('--model') + 1] }) + '\\n');
     const entries = readFileSync(file, 'utf8').trim().split('\\n').map(JSON.parse);
     let parentId = entries.length > 1 ? entries.at(-1).id : null;
     const save = message => {
@@ -95,6 +101,8 @@ export default function(pi) {
       }
       assert.equal(state.results.length, 2, 'both child processes must finish');
       assert.equal(state.focus, undefined, 'no focus bookkeeping required');
+      const launches = readFileSync(${JSON.stringify(launchesFile)}, 'utf8').trim().split('\\n').map(JSON.parse);
+      assert.ok(launches.length === 2 && launches.every(launch => launch.model === 'test/alias-model:max'), 'the @fast alias resolves before the child launch: ' + JSON.stringify(launches));
       assert.ok(state.results.every(result => result.handling === 'new' && result.taskId === task.id));
       assert.deepEqual(new Set(state.results.map(result => result.itemId)), new Set(['api', 'auth']));
       const result = await plan({ action: 'result', runId: first.details.runId }, ctx);
@@ -195,5 +203,5 @@ try {
   const restored = JSON.parse(readFileSync(restoredFile, "utf8"));
   assert.equal(restored.ok, true, restored.stack ?? restored.error);
   assert.equal(client.events.filter(event => event.type === "agent_start").length, 0);
-  console.log("PASS: real Pi loads the extension, launches two controlled workers, delivers linked reports, preserves checklist progress and explicit handling, rejects unfinished completion, restores without restarting workers, and closes verified checklists automatically.");
+  console.log("PASS: real Pi loads the extension, resolves a global model alias into the child --model argument, launches two controlled workers, delivers linked reports, preserves checklist progress and explicit handling, rejects unfinished completion, restores without restarting workers, and closes verified checklists automatically.");
 } finally { await client.close(); }

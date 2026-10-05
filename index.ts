@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, validateAgentName, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
+import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, saveModelAliases, validateAgentName, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
 import messageTiming from "./message-timing.ts";
@@ -18,6 +18,8 @@ import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } fro
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
 import { AgentField, AgentScope, AuthoringMethod, CREATE_MENU, SCOPE_MENU, selectMenu } from "./studio-menu.ts";
+import { editModelAliases } from "./studio-models.ts";
+import { formatModelReference, resolveExecutionModel, resolveModelAlias, type ModelAlias } from "./model-aliases.ts";
 import {
 	renderDelegateCall,
 	renderDelegateResult,
@@ -464,7 +466,10 @@ export default function (pi: ExtensionAPI) {
 			if (previousRun && input.workspace !== undefined && input.workspace !== previousRun.thread.workspace) throw new Error("Cannot change workspace mode for an existing thread.");
 			const inheritedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 			const thinkingLevel = pi.getThinkingLevel?.();
-			const selectedModel = previousRun ? previousRun.thread.model : subagent.model ?? (inheritedModel && thinkingLevel ? `${inheritedModel}:${thinkingLevel}` : inheritedModel);
+			// `@alias` references resolve against the global model table. Unknown
+			// aliases warn and fall back to the parent model; the delegation still runs.
+			const configuredModel = resolveExecutionModel(subagent.model, config.models, (message) => ctx.ui.notify(message, "warning"));
+			const selectedModel = previousRun ? previousRun.thread.model : configuredModel ?? (inheritedModel && thinkingLevel ? `${inheritedModel}:${thinkingLevel}` : inheritedModel);
 			const runId = newRunId();
 			const runCoordination = getCoordination();
 			const state = runCoordination.snapshot();
@@ -744,7 +749,8 @@ export default function (pi: ExtensionAPI) {
 			const configured = activeAgent?.subagents?.find(candidate => candidate.name === name)?.model;
 			const inherited = observerContext?.model;
 			const level = pi.getThinkingLevel?.();
-			const model = configured ?? (inherited ? `${inherited.provider}/${inherited.id}${level ? `:${level}` : ""}` : undefined);
+			const resolvedConfigured = configured === undefined ? undefined : resolveModelAlias(configured, config.models).value;
+			const model = resolvedConfigured ?? (inherited ? `${inherited.provider}/${inherited.id}${level ? `:${level}` : ""}` : undefined);
 			return renderDelegateCall({ ...call, model }, theme);
 		},
 		renderResult(result, options, theme, context) {
@@ -1022,7 +1028,23 @@ export default function (pi: ExtensionAPI) {
 			mcpServers: config.mcpServers ?? {},
 			mcpServerSources: config.mcpServerSources ?? {},
 			mcpStatuses: mcpManager.getStatuses(serverNames),
+			modelAliases: config.models ?? [],
 		};
+	}
+
+	/** Save the global alias table after the Models manager runs, then refresh. */
+	async function manageModelAliases(ctx: ExtensionContext): Promise<ModelAlias[] | undefined> {
+		const edited = await editModelAliases(ctx, config.models ?? [], agents);
+		if (!edited) return undefined;
+		try {
+			const configPath = saveModelAliases(ctx.cwd, edited);
+			config = loadConfig(ctx.cwd, { includeProject: ctx.isProjectTrusted ? ctx.isProjectTrusted() : true });
+			ctx.ui.notify(`Model aliases saved to ${configPath}.`, "info");
+			return config.models ?? [];
+		} catch (err) {
+			ctx.ui.notify(`Could not save model aliases: ${err instanceof Error ? err.message : String(err)}`, "error");
+			return undefined;
+		}
 	}
 
 	async function reapplyAgent(name: string, ctx: ExtensionContext, opts?: { silent?: boolean }) {
@@ -1042,6 +1064,7 @@ export default function (pi: ExtensionAPI) {
 			...selectorOptions(ctx),
 			hasSessionDraft: studioDrafts.has(name),
 			agents,
+			onManageModels: () => manageModelAliases(ctx),
 			onSetDefault: async () => {
 				const trusted = ctx.isProjectTrusted ? ctx.isProjectTrusted() : true;
 				const scope = await selectMenu(ctx, `Default agent · ${name}`, SCOPE_MENU.filter(item => trusted || item.id === AgentScope.Global));
@@ -1327,6 +1350,21 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => inspectSubagents(ctx),
 	});
 
+	pi.registerCommand("models", {
+		description: "Manage global model aliases for subagent delegations: /models",
+		handler: async (_args, ctx) => {
+			const edited = await editModelAliases(ctx, config.models ?? [], agents);
+			if (!edited) return;
+			try {
+				const configPath = saveModelAliases(ctx.cwd, edited);
+				config = loadConfig(ctx.cwd, { includeProject: ctx.isProjectTrusted ? ctx.isProjectTrusted() : true });
+				ctx.ui.notify(`Model aliases saved to ${configPath}.`, "info");
+			} catch (err) {
+				ctx.ui.notify(`Could not save model aliases: ${err instanceof Error ? err.message : String(err)}`, "error");
+			}
+		},
+	});
+
 	pi.registerCommand("agent", {
 		description: "Select an agent: /agent <name>, /agent for picker, /agent none to clear",
 		getArgumentCompletions: (prefix: string) => {
@@ -1366,7 +1404,7 @@ export default function (pi: ExtensionAPI) {
 		const lines = agent.subagents.map((childConfig) => {
 			const child = agents.find((candidate) => candidate.name === childConfig.name);
 			const runtime = [
-				childConfig.model ? `model ${childConfig.model}` : "default model",
+				childConfig.model ? `model ${formatModelReference(childConfig.model, config.models)}` : "default model",
 				childConfig.timeoutSeconds ? `${childConfig.timeoutSeconds}s deadline` : "no deadline",
 				"fresh replyable task threads",
 			].join(", ");

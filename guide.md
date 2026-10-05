@@ -9,10 +9,11 @@ This extension defines "agents" in code — each agent is a tool allowlist + sys
 - The active agent's system prompt is appended every turn; its work tools follow its allowlist, custom tools, MCP assignments, and delegation permissions. The `session_plan` bookkeeping tool remains enabled even with `tools: []`.
 - No agent selected = plain Pi's work tools and prompt, with session coordination still available.
 - `/agent:help <question>` answers a question from this guide (e.g. `/agent:help how do I add an MCP server?`).
+- `/models` manages the global **model aliases** used by subagent delegations (e.g. `@fast` → `openai-codex/gpt-6-luna:minimal`), so one edit switches that model everywhere.
 
 ## Agent Studio
 
-Open `f7`, select an agent, and press `F4`. Studio can edit the effective system prompt, direct tool allowlist, MCP assignments and HTTP endpoint URLs, and subagents. Tool and MCP selectors show the highlighted item's description and connection details in a right-side pane. In **Manage MCP servers**, open a server's settings and choose **Edit endpoint URL**; **Save agent.ts** persists it as an agent-local definition.
+Open `f7`, select an agent, and press `F4`. Studio can edit the effective system prompt, direct tool allowlist, MCP assignments and HTTP endpoint URLs, and subagents. Tool and MCP selectors show the highlighted item's description and connection details in a right-side pane. In **Manage MCP servers**, open a server's settings and choose **Edit endpoint URL**; **Save agent.ts** persists it as an agent-local definition. In **Manage subagents**, **Set model** picks from your global model aliases or accepts a custom model ID; **Manage model aliases** (also `/models`) maintains that table.
 
 - **Apply as session draft**: activates immediately, persists in session history, follows session-tree navigation, and is inherited by delegated children. The dashboard marks it `◆ draft`.
 - **Save agent.ts**: writes edits directly to the agent definition, copies selected MCP definitions into its local `mcpServers`, removes stale unselected local MCP definitions, and removes saved overlays folded into it. Static TypeScript object exports retain imports, comments, custom tools, and unrelated fields; direct Studio saves keep the system prompt in `prompt.md` via `systemPromptFile`. A discovered legacy `agent.json` is migrated to canonical `agent.ts` + `prompt.md` files when saved.
@@ -57,7 +58,7 @@ export default {
   limitations: ["Does not modify application code"],    // optional
   promptSummary: "Methodical browser operator.",         // optional
   tools: ["read", "bash"],            // work-tool allowlist; [] keeps session_plan bookkeeping
-  subagents: ["developer"],            // optional delegation allowlist; object entries may set model/timeout
+  subagents: ["developer"],            // optional delegation allowlist; object entries may set model/timeout, e.g. { name: "developer", model: "@fast" }
   mcp: ["playwright"],                // MCP servers to connect (opt-in!)
   // color: "#ff8800",                 // theme role or hex; auto-assigned by name when omitted
   systemPrompt: "You are...",         // inline…
@@ -90,13 +91,14 @@ export default {
   description: "Coordinates specialists.",
   subagents: [
     "developer",
-    { name: "researcher", model: "anthropic/claude-sonnet-5", timeoutSeconds: 900 },
+    { name: "researcher", model: "@fast", timeoutSeconds: 900 },
+    { name: "reviewer", model: "anthropic/claude-sonnet-5" },
   ],
   systemPrompt: "Delegate implementation and research; keep the high-level context short.",
 };
 ```
 
-`subagents` is an allowlist. A string entry inherits the parent's selected model and thinking level and has no deadline. Object entries can fix `model` and `timeoutSeconds`; different parents may configure the same child differently. The parent sees a roster of child names, descriptions, models, and deadlines in its prompt.
+`subagents` is an allowlist. A string entry inherits the parent's selected model and thinking level and has no deadline. Object entries can fix `model` and `timeoutSeconds`; `model` is either a plain Pi model ID or a `@alias` from the global model-alias table (see **Model aliases**), so one edit switches that model for every delegation using it. Different parents may configure the same child differently. The parent sees a roster of child names, descriptions, models, and deadlines in its prompt.
 
 Every `delegate` starts a fresh thread and returns `threadId` and `runId`. Same-agent tasks can run in parallel. `subagent_control({ action: "reply", runId, message: "Use option A." })` continues the latest completed run's conversation with a new background execution and run ID. Saved messages, tool results, and compaction context survive; the old process does not. Replies preserve the thread's selected model while using current agent definitions and deadlines. Busy threads require `steer`; stale IDs, failed/interrupted runs, and threads owned by another parent cannot receive replies. Missing or invalid saved history fails rather than silently discarding context. Recheck workspace files on follow-up work. Provider prompt-cache reuse is possible but not guaranteed.
 
@@ -202,6 +204,10 @@ export default {
     "staleWarningMinutes": 5,
     "gracefulStopSeconds": 5
   },
+  "models": [
+    { "id": "m_a1b2c3d4e5f6", "name": "fast", "model": "openai-codex/gpt-6-luna:minimal" },
+    { "id": "m_9f8e7d6c5b4a", "name": "strong", "model": "openai-codex/gpt-6.1-sol:high" }
+  ],
   "mcpServers": {
     "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
     "github": {
@@ -222,6 +228,22 @@ export default {
 - `keybindings`: each action takes a single key or an array of fallbacks (terminal key encoding varies). The built-in `f7`, `f8`, and `f9` fallbacks are always retained.
 - `subagents.staleWarningMinutes`: inactivity threshold shown by the inspector; it does not stop the child.
 - `subagents.gracefulStopSeconds`: delay before escalating RPC abort to process signals.
+
+## Model aliases (global only)
+
+Give frequently used subagent models short names, then pick them from a menu instead of retyping model IDs:
+
+```ts
+// .pi-agents/lead/agent.ts
+subagents: [{ name: "dev-worker", model: "@fast" }]
+```
+
+- Store the table in the **global** `~/.pi/agent/pi-agents/config.json` only; project configs never define it. Agent files in any project may reference it.
+- `name` is what you type and see: letters, numbers, dot, underscore, hyphen (kebab, snake, and camel all work; spaces are rejected). Names are unique, case-insensitively.
+- `model` is used exactly as written, so a thinking-level suffix like `:high` is part of the stored value.
+- Edit aliases in Studio (**Manage model aliases**) or with `/models`. Studio stores the stable `id` in agent files (`@id:m_a1b2c3d4e5f6`), so renaming `fast` → `quick` updates every screen without touching any agent file. Hand-typed `@fast` keeps working; the next Studio save swaps it to the id form.
+- Deleting an alias that is still referenced is allowed after a confirmation: those delegations show `@name (missing)` and warn, then use the parent's model instead. A delegation never fails because of an alias.
+- Bare model IDs (`openai-codex/gpt-6.1-sol:high`) are untouched by aliases and keep working as before. An alias always stores a plain model ID, never another alias.
 
 ## MCP servers
 

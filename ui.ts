@@ -2,6 +2,7 @@ import type { ExtensionContext, MessageRenderer, Theme, ThemeColor } from "@eare
 import { getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, Input, Key, Markdown, SelectList, Spacer, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type SelectItem } from "@earendil-works/pi-tui";
 import { BUILTIN_MCP_SERVER_DESCRIPTIONS, canSaveAgentSource, parseAgentColor, type AgentOverride, type DiscoveredAgent, type McpServerConfig } from "./agents.ts";
+import type { ModelAlias } from "./model-aliases.ts";
 import { editAgentField } from "./studio-field-editor.ts";
 import { editSubagents } from "./studio-subagents.ts";
 import { AgentField, COLOR_MENU, ColorAction, STUDIO_LABELS, StudioAction, selectMenu, type MenuItem } from "./studio-menu.ts";
@@ -239,6 +240,7 @@ export interface AgentSelectorOptions {
 	mcpServers: Record<string, McpServerConfig>;
 	mcpServerSources: Record<string, "builtin" | "global" | "project">;
 	mcpStatuses: Record<string, McpRuntimeStatus>;
+	modelAliases?: ModelAlias[];
 }
 
 type AgentDetailTab = "overview" | "tools" | "mcp" | "prompt";
@@ -527,7 +529,7 @@ export async function chooseAgentColor(ctx: ExtensionContext, current?: string):
 export async function showAgentStudio(
 	ctx: ExtensionContext,
 	agent: DiscoveredAgent,
-	options: AgentSelectorOptions & { agents?: readonly DiscoveredAgent[]; hasSessionDraft: boolean; onSetDefault?: () => Promise<void>; onCredentialsSaved?: () => Promise<void>; onTestMcp?: (name: string, server?: McpServerConfig) => Promise<string | void> },
+	options: AgentSelectorOptions & { agents?: readonly DiscoveredAgent[]; hasSessionDraft: boolean; onManageModels?: () => Promise<ModelAlias[] | undefined>; onSetDefault?: () => Promise<void>; onCredentialsSaved?: () => Promise<void>; onTestMcp?: (name: string, server?: McpServerConfig) => Promise<string | void> },
 ): Promise<AgentStudioResult> {
 	let tools = agent.tools === undefined ? [...options.activeTools] : [...agent.tools];
 	let inheritsTools = agent.tools === undefined;
@@ -564,6 +566,7 @@ export async function showAgentStudio(
 			item(StudioAction.Tools, inheritsTools ? "inherited" : String(tools.length)),
 			item(StudioAction.Mcp, String(mcp.length)),
 			item(StudioAction.Subagents, String(subagents?.length ?? 0)),
+			item(StudioAction.Models, String(options.modelAliases?.length ?? 0)),
 			...(options.onSetDefault ? [item(StudioAction.Default)] : []),
 			item(StudioAction.Apply),
 			...(sourceIsEditable
@@ -606,8 +609,13 @@ export async function showAgentStudio(
 			continue;
 		}
 		if (choice === StudioAction.Subagents) {
-			const edited = await editSubagents(ctx, agent.name, options.agents ?? [], subagents ?? []);
+			const edited = await editSubagents(ctx, agent.name, options.agents ?? [], subagents ?? [], options.modelAliases ?? []);
 			if (edited !== undefined) subagents = edited;
+			continue;
+		}
+		if (choice === StudioAction.Models) {
+			const edited = await options.onManageModels?.();
+			if (edited !== undefined) options.modelAliases = edited;
 			continue;
 		}
 		if (choice === StudioAction.Mcp) {
