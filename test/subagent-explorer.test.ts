@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { SubagentObserver, getSubagentWorkspace, isActiveRun, newRunId } from "../subagent-observer.ts";
-import { buildRunTree, showSubagentInspector, workspaceDetails } from "../subagent-explorer.ts";
+import { buildRunTree, sessionDetailLines, showSubagentInspector, workspaceDetails, type SessionInspectorOptions } from "../subagent-explorer.ts";
+import { renderSessionOverview } from "../session-overview.ts";
+import type { CoordinationSnapshot } from "../session-coordination.ts";
 import { MAX_TRANSCRIPT_CHARS, SubagentTranscript } from "../subagent-transcript.ts";
 import { SubagentStoppedError, runSubagent, type RunningSubagentHandle, type SubagentSnapshot } from "../subagents.ts";
 
@@ -29,6 +31,245 @@ function handleFor(state: SubagentSnapshot, publish: (state: SubagentSnapshot) =
 		steer(message) { state.partialText = message; publish({ ...state }); return true; },
 	};
 }
+
+function coordinationFixture(): CoordinationSnapshot {
+	return {
+		version: 1, scope: { projectCwd: "/tmp/test-project", rootSessionId: "session", participantId: "main" }, createdAt: 1, updatedAt: 2,
+		focus: { taskId: "login", text: "Reviewing the login fix", nextAction: "Review results → finish login task", updatedAt: 2 },
+		tasks: [{ id: "login", title: "Fix login", objective: "Fix login and verify the API", status: "active", owner: "main", amendments: ["Keep the existing token format"], nextAction: "Review API tests", createdAt: 1, updatedAt: 2,
+			items: [{ id: "implement", text: "Implement login", status: "completed", owner: "dev-worker", dependsOn: [], createdAt: 1, updatedAt: 2 },
+				{ id: "review", text: "Review API tests", status: "in_progress", owner: "main", dependsOn: ["implement"], createdAt: 1, updatedAt: 2 }] },
+			{ id: "docs", title: "Update docs", objective: "Document authentication", status: "blocked", owner: "researcher", amendments: [], items: [{ id: "draft", text: "Draft auth guide", status: "pending", dependsOn: ["login/review"], createdAt: 1, updatedAt: 2 }], createdAt: 1, updatedAt: 2 }],
+		runs: [{ runId: "login-result", taskId: "login", itemId: "review", agent: "dev-worker", task: "API tests", createdAt: 1 }],
+		results: [{ runId: "login-result", taskId: "login", itemId: "review", agent: "dev-worker", task: "API tests", title: "Login implementation", summary: "All API tests passed; review the token change.", text: "Detailed login report\nThe existing token format is unchanged.", executionStatus: "completed", handling: "new", delivered: false, createdAt: 1, updatedAt: 2 }],
+		userUpdates: [],
+	};
+}
+
+function inspectorHarness(handles: RunningSubagentHandle[], options: SessionInspectorOptions, height = 28) {
+	let component: any;
+	let rows = height;
+	const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
+	const promise = showSubagentInspector({ mode: "tui", ui: { theme, custom: (factory: any) => new Promise<void>(resolve => {
+		component = factory({ terminal: { get rows() { return rows; } }, requestRender() {} }, theme, {}, resolve);
+	}) } } as any, () => handles, 5, "Login session", options);
+	return { component, promise, setHeight: (value: number) => { rows = value; }, close: () => component.handleInput("\u001b[20~") };
+}
+
+test("task overview derives progress and worker activity without changing the checklist", () => {
+	const state = coordinationFixture();
+	const runs = [{ ...snapshot("docs-run"), agent: "researcher" }];
+	state.runs.push({ runId: "docs-run", taskId: "docs", itemId: "draft", agent: "researcher", task: "Draft auth guide", createdAt: 1 });
+	const original = structuredClone(state);
+	const lines = renderSessionOverview(state, runs, 120);
+	assert.equal(lines.length, 5);
+	assert.match(lines[0], /Tasks · 2 active · 1 running · 1 to review\s+F9 checklist/);
+	assert.match(lines[1], /Fix login · 1\/2 done · In progress/);
+	assert.match(lines[2], /Review API tests · dev-worker · awaiting review/);
+	assert.match(lines[3], /Update docs · 0\/1 done · Blocked/);
+	assert.match(lines[4], /Draft auth guide · researcher · running/);
+	const narrow = renderSessionOverview(state, runs, 40).join("\n");
+	assert.match(narrow, /awaiting review/);
+	assert.match(narrow, /Draft auth guide · running/);
+	assert.doesNotMatch(lines.join("\n"), /Main|Next|No focus/);
+	assert.deepEqual(state, original, "rendering cannot acknowledge reports or edit checklist items");
+	state.results[0].handling = "reviewed";
+	assert.match(renderSessionOverview(state, runs, 120)[2], /awaiting incorporation/);
+	state.results[0].handling = "deferred";
+	assert.match(renderSessionOverview(state, runs, 120).join("\n"), /1 deferred/);
+});
+
+test("task overview fits small terminals and retains pending obligations and extra tasks", () => {
+	const state = coordinationFixture();
+	state.tasks[0].title = "中文 🐳\n\x1b[31mReview login\x1b[0m";
+	for (const width of [0, 1, 8, 20, 40, 80, 120]) for (const height of [0, 1, 2, 3, 4, 5, 20]) {
+		const lines = renderSessionOverview(state, [snapshot("active")], width, height);
+		assert.ok(lines.length <= height);
+		assert.ok(lines.every(line => visibleWidth(line) <= width && !/[\n\r]/.test(line) && !line.includes("\x1b[31m")));
+	}
+	state.tasks.push(...Array.from({ length: 5 }, (_, index) => ({ ...state.tasks[1], id: `extra-${index}` })));
+	assert.match(renderSessionOverview(state, [], 100).join("\n"), /\+5 more tasks/);
+	state.tasks.forEach(task => { task.status = "completed"; });
+	state.results[0].handling = "deferred";
+	assert.match(renderSessionOverview(state, [], 100).join("\n"), /deferred/, "deferred work stays visible");
+	state.results[0].handling = "incorporated";
+	assert.match(renderSessionOverview(state, [], 100)[0], /no active work/);
+	assert.equal(renderSessionOverview(state, [], 100).length, 1);
+	state.userUpdates.push({ id: "amendment", text: "Also verify mobile login", receivedAt: 3, status: "pending" });
+	assert.match(renderSessionOverview(state, [], 100).join("\n"), /pending update|awaiting reconciliation/);
+});
+
+test("Tasks view shows every concurrent item, dependencies, amendments and retained obligations", () => {
+	const state = coordinationFixture();
+	state.tasks[1].status = "superseded";
+	state.results[0].handling = "deferred";
+	state.tasks[0].items.push({ id: "extra", text: "Verify browser flow", status: "pending", dependsOn: [], createdAt: 1, updatedAt: 2 });
+	state.runs.push({ runId: "browser", taskId: "login", itemId: "extra", agent: "tester", task: "Browser verification", createdAt: 1 });
+	state.userUpdates.push({ id: "amendment", text: "Also verify mobile login", receivedAt: 3, status: "pending" });
+	const text = sessionDetailLines(state, [snapshot("browser")]).join("\n");
+	assert.match(text, /Fix login · 1\/3 done · In progress/);
+	assert.match(text, /✓ Implement login/);
+	assert.match(text, /◐ Review API tests/);
+	assert.match(text, /dev-worker · deferred/);
+	assert.match(text, /◐ Verify browser flow\n    tester · running/);
+	assert.match(text, /Amendment: Keep the existing token format/);
+	assert.match(text, /Depends on: Implement login/);
+	assert.match(text, /Update docs · 0\/1 done · Superseded/);
+	assert.match(text, /Also verify mobile login/);
+	assert.doesNotMatch(text, /Main:|Next:|#login/);
+});
+
+test("coordination tabs work without live runs; result inspection and delivery do not acknowledge or change focus", async () => {
+	const state = coordinationFixture();
+	const handled: string[] = [];
+	const harness = inspectorHarness([], { getCoordination: () => state, onHandleResult: (_runId, handling) => { handled.push(handling); } });
+	try {
+		const { component } = harness;
+		assert.match(component.render(120).join("\n"), /\[1 Tasks\]/);
+		assert.match(component.render(120).join("\n"), /Keep the existing token format/);
+		component.handleInput("2");
+		assert.match(component.render(120).join("\n"), /No delegated runs/);
+		component.handleInput("3");
+		assert.match(component.render(120).join("\n"), /\[3 Inbox \(1\)\]/);
+		component.handleInput("\r");
+		state.results[0].delivered = true;
+		assert.match(component.render(120).join("\n"), /Detailed login report/);
+		assert.match(component.render(120).join("\n"), /Handling: new · Execution: completed/);
+		assert.deepEqual(handled, []);
+		assert.equal(state.focus?.text, "Reviewing the login fix");
+		for (const width of [120, 80, 40, 12]) for (const height of [28, 8, 2]) {
+			harness.setHeight(height);
+			const lines = component.render(width);
+			assert.ok(lines.length <= height);
+			assert.ok(lines.every((line: string) => visibleWidth(line) <= width));
+		}
+	} finally { harness.close(); }
+	await harness.promise;
+});
+
+test("Inbox requires explicit handling, keeps deferred results, and retains selection during concurrent arrivals", async () => {
+	const state = coordinationFixture();
+	const focus = JSON.stringify(state.focus);
+	const harness = inspectorHarness([], { getCoordination: () => state,
+		onHandleResult(runId, handling, note) { Object.assign(state.results.find(result => result.runId === runId)!, { handling, note }); } });
+	try {
+		const { component } = harness;
+		component.handleInput("3");
+		component.handleInput("\r");
+		state.results.unshift({ ...state.results[0], runId: "concurrent", title: "Research result", text: "Different report", createdAt: 0 });
+		assert.match(component.render(120).join("\n"), /Detailed login report/);
+		component.handleInput("r");
+		await pause(0);
+		assert.equal(state.results[1].handling, "reviewed");
+		assert.equal(state.results[0].handling, "new");
+		component.handleInput("d");
+		component.handleInput("Wait for API changes");
+		component.handleInput("\r");
+		await pause(0);
+		assert.equal(state.results[1].handling, "deferred");
+		assert.equal(state.results[1].note, "Wait for API changes");
+		assert.match(component.render(120).join("\n"), /Handling: deferred/);
+		assert.match(component.render(120).join("\n"), /3 Inbox \(2\)/);
+		component.handleInput("i");
+		await pause(0);
+		assert.equal(state.results[1].handling, "incorporated");
+		assert.equal(state.tasks[0].items[1].status, "in_progress");
+		assert.equal(JSON.stringify(state.focus), focus);
+		assert.match(component.render(120).join("\n"), /3 Inbox \(1\)/);
+	} finally { harness.close(); }
+	await harness.promise;
+});
+
+test("Inbox checks reply/recovery eligibility again at submit and reports callback failures", async () => {
+	const state = coordinationFixture();
+	let actions = ["reply", "recover"];
+	const requests: unknown[][] = [];
+	let reject = false;
+	const harness = inspectorHarness([], { getCoordination: () => state, getResultActions: () => actions,
+		onResultAction: async (...args) => { if (reject) throw new Error("Latest-run ownership changed"); requests.push(args); } });
+	try {
+		const { component } = harness;
+		component.handleInput("3");
+		assert.match(component.render(120).join("\n"), /p reply · c recover/);
+		component.handleInput("p");
+		component.handleInput("Please check 123");
+		actions = [];
+		component.handleInput("\r");
+		await pause(0);
+		assert.deepEqual(requests, []);
+		assert.match(component.render(120).join("\n"), /no longer available/);
+		actions = ["recover"];
+		component.handleInput("c");
+		component.handleInput("Continue after checking current files");
+		component.handleInput("\r");
+		await pause(0);
+		assert.deepEqual(requests, [["recover", "login-result", "Continue after checking current files"]]);
+		assert.equal(state.results[0].handling, "new");
+		reject = true;
+		component.handleInput("c");
+		component.handleInput("Try again");
+		component.handleInput("\r");
+		await pause(0);
+		assert.match(component.render(120).join("\n"), /Latest-run ownership changed/);
+	} finally { harness.close(); }
+	await harness.promise;
+});
+
+test("live Inbox refresh reads one snapshot and cached report layout still reflects handling, notes and resizing", async () => {
+	const state = coordinationFixture();
+	state.results[0].text = Array.from({ length: 100 }, (_, i) => `Large report line ${i}: ${"evidence ".repeat(20)}`).join("\n");
+	let reads = 0;
+	const harness = inspectorHarness([], { getCoordination: () => { reads++; return structuredClone(state); } });
+	try {
+		const { component } = harness;
+		component.handleInput("3");
+		component.handleInput("\r");
+		for (let i = 0; i < 3; i++) {
+			reads = 0;
+			component.render(120);
+			assert.equal(reads, 1, "one internally consistent snapshot per render");
+		}
+		state.results[0].handling = "deferred";
+		state.results[0].note = "Waiting for API changes";
+		assert.match(component.render(120).join("\n"), /Handling: deferred/);
+		assert.match(component.render(120).join("\n"), /Note: Waiting for API changes/);
+		const narrow = component.render(40);
+		assert.ok(narrow.every((line: string) => visibleWidth(line) <= 40));
+		component.handleInput("G");
+		assert.match(component.render(40).join("\n"), /Large report line 99/);
+	} finally { harness.close(); }
+	await harness.promise;
+});
+
+test("switching coordination tabs preserves Runs scroll position, steering, tree navigation and stop controls", async () => {
+	const parent = snapshot("parent");
+	const child = snapshot("child", "parent");
+	parent.transcript = [{ id: "text", kind: "assistant", text: Array.from({ length: 100 }, (_, i) => `preserved-${i}`).join("\n") }];
+	const harness = inspectorHarness([handleFor(parent), handleFor(child)], { getCoordination: coordinationFixture });
+	try {
+		const { component } = harness;
+		component.handleInput("2");
+		component.render(120);
+		component.handleInput("\r");
+		component.handleInput("g");
+		assert.match(component.render(120).join("\n"), /preserved-0\n/);
+		component.handleInput("1");
+		component.render(120);
+		component.handleInput("2");
+		assert.match(component.render(120).join("\n"), /preserved-0\n/);
+		component.handleInput("s");
+		component.handleInput("Check 123 more cases");
+		component.handleInput("\r");
+		assert.equal(parent.partialText, "Check 123 more cases");
+		component.handleInput("\u001b[C");
+		assert.match(component.render(120).join("\n"), /Main session|child/);
+		component.handleInput("x");
+		component.handleInput("y");
+		assert.equal(child.status, "failed");
+		assert.equal(parent.status, "running");
+	} finally { harness.close(); }
+	await harness.promise;
+});
 
 test("optional workspace metadata distinguishes unknown, shared and detached worktrees safely", () => {
 	const run = snapshot("workspace");

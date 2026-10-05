@@ -523,6 +523,146 @@ process.stdin.once("data", chunk => {
 	}
 });
 
+test("durable checklists preserve amendments and handling across concurrent arrivals, compaction and reload", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-coordination-integration-"));
+	const executable = path.join(root, "fake-pi.mjs");
+	const previousExecutable = process.env.PI_CODING_AGENT_BIN;
+	let runtime = boot(root, { sessionId: "coordination-integration" });
+	const deliveries: any[] = [];
+	let queuedUser = false;
+	const prepare = async () => {
+		runtime.pi.sendMessage = (message: any) => deliveries.push(message);
+		runtime.ctx.isIdle = () => true;
+		runtime.ctx.hasPendingMessages = () => queuedUser;
+		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+	};
+	const plan = async (params: any) => {
+		const result = await runtime.tools.get("session_plan").execute("plan", params, undefined, undefined, runtime.ctx);
+		return params.action === "list" ? result.content[0].text : JSON.parse(result.content[0].text);
+	};
+	const waitForResults = async (count: number) => {
+		const deadline = Date.now() + 10000;
+		while ((await plan({ action: "inspect" })).results.length < count) {
+			assert.ok(Date.now() < deadline, "both child reports must be persisted");
+			await new Promise(resolve => setTimeout(resolve, 20));
+		}
+	};
+	try {
+		await makeAgent(root, "lead", 'default: true, subagents: ["worker"]');
+		await makeAgent(root, "worker");
+		await writeFile(executable, `#!/usr/bin/env node
+${persistedMessages}
+const send = event => {
+ if (event.type === 'message_end') saveMessage(event.message);
+ process.stdout.write(JSON.stringify(event) + "\\n");
+};
+process.stdin.once("data", () => {
+ send({type:"agent_start"});
+ setTimeout(() => {
+  send({type:"message_end", message:{role:"assistant", stopReason:"stop", content:[{type:"text", text:"FULL_REPORT_" + "detail ".repeat(10000) + "_END_REPORT"}]}});
+  send({type:"agent_settled"});
+ }, 60);
+});
+`);
+		await chmod(executable, 0o755);
+		process.env.PI_CODING_AGENT_BIN = executable;
+		await prepare();
+		await runtime.handlers.get("input")?.({ text: "Finish login and investigate authentication options", source: "interactive" }, runtime.ctx);
+		const login = await plan({ action: "create", title: "Finish login", objective: "Fix and validate login", items: [{ id: "implementation", text: "Implement fix" }, { id: "review", text: "Review fix", dependsOn: ["implementation"] }] });
+		const research = await plan({ action: "create", title: "Auth research", objective: "Compare auth options", items: [{ id: "research", text: "Evaluate alternatives" }] });
+		const input = (await plan({ action: "inspect" })).userUpdates[0];
+		await plan({ action: "reconcile_input", inputId: input.id, taskId: login.id, note: "Accepted two objectives; authentication options tracked in the second task" });
+		await runtime.handlers.get("agent_start")?.({}, runtime.ctx);
+		const delegate = (taskId: string, itemId: string) => runtime.tools.get("delegate").execute("delegate", { agent: "worker", task: "Produce implementation evidence", taskId, itemId, background: true }, undefined, undefined, runtime.ctx);
+		const [first, second] = await Promise.all([delegate(login.id, "implementation"), delegate(research.id, "research")]);
+		await waitForResults(2);
+		assert.deepEqual(deliveries, [], "busy loop retains reports without injecting them");
+		queuedUser = true;
+		await runtime.handlers.get("input")?.({ text: "Keep the public login API unchanged", source: "rpc", streamingBehavior: "followUp" }, runtime.ctx);
+		await runtime.handlers.get("agent_settled")?.({}, runtime.ctx);
+		await new Promise(resolve => setTimeout(resolve, 70));
+		assert.deepEqual(deliveries, [], "queued user amendment wins over an automatic completion wake");
+		let state = await plan({ action: "inspect" });
+		assert.equal(state.focus, undefined, "checklists do not require focus bookkeeping");
+		assert.equal(state.tasks.length, 2, "arrival and user amendments do not replace objectives");
+		assert.ok(state.results.every((result: any) => result.handling === "new" && !result.delivered));
+		const busyContext = await runtime.handlers.get("context")?.({ messages: [{ role: "user", content: "original request", timestamp: Date.now() }] }, runtime.ctx);
+		assert.doesNotMatch(busyContext.messages.at(-1).content, /FULL_REPORT_/);
+		assert.doesNotMatch(busyContext.messages.at(-1).content, /Keep the public login API unchanged/);
+		assert.match(busyContext.messages.at(-1).content, /safe delivery boundary/);
+		queuedUser = false;
+		const boundary = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
+		assert.equal(boundary.message.details.runs.length, 2);
+		assert.doesNotMatch(boundary.message.content, /_END_REPORT/);
+		const safeContext = await runtime.handlers.get("context")?.({ messages: [] }, runtime.ctx);
+		assert.match(safeContext.messages[0].content, /Keep the public login API unchanged/);
+		assert.match(safeContext.messages[0].content, /Implement fix/);
+		assert.match((await plan({ action: "result", runId: first.details.runId })).text, /_END_REPORT/);
+		assert.equal((await plan({ action: "result", runId: first.details.runId })).handling, "new", "inspection is not acknowledgement");
+		state = await plan({ action: "inspect" });
+		const amendment = state.userUpdates.find((entry: any) => entry.status === "pending");
+		await plan({ action: "reconcile_input", inputId: amendment.id, taskId: login.id, amendment: amendment.text });
+		const acknowledged = await plan({ action: "handle_result", runId: first.details.runId, handling: "reviewed", note: "Read implementation; validation still needed" });
+		assert.doesNotMatch(JSON.stringify(acknowledged), /FULL_REPORT_/);
+		await plan({ action: "handle_result", runId: second.details.runId, handling: "deferred", note: "Resume research after login validation" });
+		await assert.rejects(plan({ action: "update", taskId: login.id, status: "completed" }), /unfinished|pending|result|item/i);
+		await runtime.handlers.get("session_shutdown")?.({ reason: "reload" }, runtime.ctx);
+		runtime = boot(root, { sessionId: "coordination-integration" });
+		await prepare();
+		await new Promise(resolve => setTimeout(resolve, 70));
+		assert.deepEqual(deliveries, [], "restoration never automatically wakes or launches a worker");
+		state = await plan({ action: "inspect" });
+		assert.equal(state.focus, undefined, "checklists do not require focus bookkeeping");
+		assert.equal(state.results.find((result: any) => result.runId === second.details.runId).handling, "deferred");
+		assert.deepEqual(state.tasks.find((task: any) => task.id === login.id).amendments, ["Keep the public login API unchanged"]);
+		const restored = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "compacted base" }, runtime.ctx);
+		assert.match(restored.systemPrompt, /session_plan/);
+		const compactedContext = await runtime.handlers.get("context")?.({ messages: [] }, runtime.ctx);
+		assert.match(compactedContext.messages[0].content, /Keep the public login API unchanged/);
+		assert.match(compactedContext.messages[0].content, /deferred/);
+		assert.match(compactedContext.messages[0].content, /Review fix/);
+		assert.doesNotMatch(compactedContext.messages[0].content, /Main:|Next:/);
+		const repeatedContext = await runtime.handlers.get("context")?.({ messages: compactedContext.messages }, runtime.ctx);
+		assert.equal(repeatedContext.messages.length, 1, "ephemeral continuity context never accumulates");
+		const full = await runtime.tools.get("subagent_control").execute("result", { action: "result", runId: first.details.runId }, undefined, undefined, runtime.ctx);
+		assert.match(full.content[0].text, /_END_REPORT/);
+		await plan({ action: "handle_result", runId: first.details.runId, handling: "incorporated", note: "Validated and applied the result" });
+		await plan({ action: "update_item", taskId: login.id, itemId: "implementation", status: "completed" });
+		await plan({ action: "update_item", taskId: login.id, itemId: "review", status: "completed" });
+		assert.equal((await plan({ action: "inspect", taskId: login.id })).status, "completed", "checklist completion closes the task");
+		assert.equal((await plan({ action: "inspect", taskId: research.id })).status, "active", "finishing one task preserves the other");
+		await runtime.handlers.get("agent_start")?.({}, runtime.ctx);
+		const continued = await runtime.tools.get("subagent_control").execute("reply", { action: "reply", runId: first.details.runId, message: "Verify the completed fix against the amendment" }, undefined, undefined, runtime.ctx);
+		await waitForResults(3);
+		state = await plan({ action: "inspect" });
+		const resumedTask = state.tasks.find((task: any) => task.id === login.id);
+		assert.equal(resumedTask.status, "active");
+		assert.equal(resumedTask.items.length, 3, "explicit follow-up adds an obligation after a finished item");
+		assert.equal(state.runs.find((run: any) => run.runId === continued.details.runId).taskId, login.id);
+		assert.equal(state.focus, undefined, "checklists do not require focus bookkeeping");
+		assert.equal(state.results.find((result: any) => result.runId === first.details.runId).handling, "incorporated");
+		const stale = await runtime.tools.get("subagent_control").execute("stale", { action: "reply", runId: first.details.runId, message: "stale instruction" }, undefined, undefined, runtime.ctx)
+			.catch((error: Error) => ({ content: [{ text: error.message }] }));
+		assert.match(stale.content[0].text, /latest run|Unknown run ID/);
+		const previousReport = await runtime.tools.get("subagent_control").execute("old-result", { action: "result", runId: first.details.runId }, undefined, undefined, runtime.ctx);
+		assert.match(previousReport.content[0].text, /_END_REPORT/);
+		assert.equal(state.results.find((result: any) => result.runId === continued.details.runId).delivered, false);
+		await runtime.handlers.get("session_shutdown")?.({ reason: "reload" }, runtime.ctx);
+		runtime = boot(root, { sessionId: "coordination-integration" });
+		await prepare();
+		const restoredBoundary = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
+		assert.ok(restoredBoundary.message.details.runs.includes(continued.details.runId));
+		state = await plan({ action: "inspect" });
+		assert.equal(state.results.find((result: any) => result.runId === continued.details.runId).delivered, true, "restored notifications wait until the next safe boundary");
+		assert.equal(state.results.find((result: any) => result.runId === continued.details.runId).handling, "new");
+	} finally {
+		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
+		if (previousExecutable === undefined) delete process.env.PI_CODING_AGENT_BIN;
+		else process.env.PI_CODING_AGENT_BIN = previousExecutable;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("completion event wiring survives retry errors without undoing terminal or Escape pauses", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-retry-inbox-"));
 	const executable = path.join(root, "fake-pi.mjs");
@@ -703,7 +843,7 @@ test("background control exposes live and terminal status without consuming comp
 		await waitFor(async () => deliveries.length === 1);
 		assert.equal(deliveries[0].details.runs.length, 3, "status checks leave every completion in the inbox");
 		assert.match(deliveries[0].content, /worker-result/);
-		assert.match(deliveries[0].content, /Background task failed/);
+		assert.match(deliveries[0].content, /worker · failed/);
 		assert.equal(deliveries[0].display, true);
 		const renderCompletion = runtime.messageRenderers.get("pi-agents-completions");
 		for (const expanded of [false, true]) {
@@ -822,7 +962,7 @@ test("dashboard reorder and whole-folder deletion take effect without reload", a
 		await readFile(path.join(root, ".pi-agents", "beta", "agent.ts"));
 		await runtime.commands.get("agent").handler("alpha", runtime.ctx);
 		assert.ok(runtime.notifications.some(item => /Unknown agent/.test(item.message)), "deleted agent is unavailable immediately");
-		assert.deepEqual(runtime.activeToolsets.at(-1), ["read", "bash"]);
+		assert.deepEqual(runtime.activeToolsets.at(-1), ["read", "bash", "session_plan"]);
 		runtime.ctx.ui.custom = originalCustom;
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -1260,7 +1400,7 @@ test("session startup activates config.defaultAgent", async () => {
 		await writeFile(path.join(root, ".pi-agents", "config.json"), JSON.stringify({ defaultAgent: "beta" }));
 		const runtime = boot(root);
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		assert.deepEqual(runtime.activeToolsets.at(-1), ["read"]);
+		assert.deepEqual(runtime.activeToolsets.at(-1), ["read", "session_plan"]);
 		assert.deepEqual(runtime.entries.at(-1), { customType: "pi-agents-state", data: { name: "beta" } });
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -1290,7 +1430,7 @@ test("a persisted plain-pi selection suppresses configured defaults", async () =
 		await writeFile(sessionFile, `${JSON.stringify({ type: "custom", customType: "pi-agents-state", data: { name: null } })}\n`);
 		const runtime = boot(root, { sessionFile });
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		assert.deepEqual(runtime.activeToolsets, []);
+		assert.deepEqual(runtime.activeToolsets, [["read", "bash", "session_plan"]]);
 		assert.deepEqual(runtime.entries, []);
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -1303,7 +1443,7 @@ test("untrusted projects do not load or activate project agents", async () => {
 		await makeAgent(root, "project-agent", "default: true");
 		const runtime = boot(root, { trusted: false });
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		assert.deepEqual(runtime.activeToolsets, []);
+		assert.deepEqual(runtime.activeToolsets, [["read", "bash", "session_plan"]]);
 		assert.ok(runtime.notifications.some((entry) => entry.level === "warning" && /not trusted/.test(entry.message)));
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -1324,7 +1464,7 @@ test("agent custom tools are registered, activated, and wrap string results", as
 		`);
 		const runtime = boot(root);
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		assert.deepEqual(runtime.activeToolsets.at(-1), ["ping"]);
+		assert.deepEqual(runtime.activeToolsets.at(-1), ["ping", "session_plan"]);
 		const result = await runtime.tools.get("ping").execute("ping-1", { value: "ok" }, undefined, undefined, runtime.ctx);
 		assert.deepEqual(result, { content: [{ type: "text", text: "pong:ok" }], details: {} });
 	} finally {
@@ -1355,7 +1495,7 @@ test("/agent none restores the toolset captured before activation", async () => 
 		const runtime = boot(root);
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("agent").handler("none", runtime.ctx);
-		assert.deepEqual(runtime.activeToolsets, [["read"], ["read", "bash"]]);
+		assert.deepEqual(runtime.activeToolsets, [["read", "session_plan"], ["read", "bash", "session_plan"]]);
 		assert.deepEqual(runtime.entries.at(-1), { customType: "pi-agents-state", data: { name: null } });
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -1370,7 +1510,7 @@ test("startup shows a concise project summary and capability-rich footer", async
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		assert.ok(runtime.notifications.some((entry) => entry.message.includes("1 project + 0 global agents · alpha active")));
 		assert.match(runtime.statuses.at(-1) ?? "", /agent:alpha/);
-		assert.match(runtime.statuses.at(-1) ?? "", /· 1 tool/);
+		assert.match(runtime.statuses.at(-1) ?? "", /· 2 tools/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
@@ -1413,7 +1553,7 @@ test("session startup restores Agent Studio tool and prompt drafts", async () =>
 			}],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		assert.deepEqual(runtime.activeToolsets.at(-1), ["bash"]);
+		assert.deepEqual(runtime.activeToolsets.at(-1), ["bash", "session_plan"]);
 		const prompt = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
 		assert.match(prompt.systemPrompt, /Restored draft prompt/);
 	} finally {
@@ -1598,7 +1738,8 @@ export default { name: "editable", description, tools, systemPrompt: fileURLToPa
 			const runtime = boot(root, { flag: "editable" });
 			await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 			const applied = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
-			assert.equal(applied.systemPrompt, `base\n\n${revision} prompt`);
+			assert.ok(applied.systemPrompt.startsWith("base\n\n"));
+			assert.ok(applied.systemPrompt.endsWith(`\n\n${revision} prompt`));
 		}
 		const factoryPath = path.join(dir, "factory.mjs");
 		for (const revision of ["one", "two"]) {
@@ -1671,7 +1812,8 @@ test("project source saves preserve global overlays and other projects while app
 			assert.match(await readFile(saved.filePath, "utf8"), new RegExp(`${revision} draft`));
 			assert.equal(await readFile(saved.sourceSystemPromptPath!, "utf8"), `${revision} prompt`);
 			const applied = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
-			assert.equal(applied.systemPrompt, `base\n\n${revision} prompt`);
+			assert.ok(applied.systemPrompt.startsWith("base\n\n"));
+			assert.ok(applied.systemPrompt.endsWith(`\n\n${revision} prompt`));
 			assert.ok(runtime.notifications.some(entry => entry.level === "info" && /saved to.*preserve global overrides/.test(entry.message)));
 			assert.equal(await readFile(globalConfig, "utf8"), globalBefore);
 			assert.equal(await readFile(globalSource, "utf8"), sourceBefore);

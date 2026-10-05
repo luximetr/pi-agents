@@ -31,7 +31,7 @@ for (const name of ["lead", "worker"]) {
   const directory = path.join(root, ".pi-agents", name);
   await mkdir(directory, { recursive: true });
   const definition = name === "lead"
-    ? { name, description: "Live E2E coordinator", default: true, tools: ["bash"], subagents: [{ name: "worker", model: childModel, timeoutSeconds: 120 }], systemPrompt: "Follow the user's exact test recipe. Only use the requested tools. Never poll subagents or invent extra tasks. After background completions, report their tokens concisely without new tool calls." }
+    ? { name, description: "Live E2E coordinator", default: true, tools: ["bash"], subagents: [{ name: "worker", model: childModel, timeoutSeconds: 120 }], systemPrompt: "Follow the user's exact test recipe. Only use the requested tools. Never poll subagents or invent extra tasks. After background completions, follow the requested recipe: report tokens concisely unless the recipe explicitly requests session_plan reconciliation or inspection. Do not invent extra tool calls." }
     : { name, description: "Live E2E worker", tools: ["bash"], systemPrompt: "Follow the task recipe exactly. For command tasks, execute the specified bash command once and respond only with the specified token. For memory/question tasks, do not use tools: remember the secret and ask the requested question. On a follow-up, use the saved conversation and return exactly what was requested." };
   await writeFile(path.join(directory, "agent.ts"), `export default ${JSON.stringify(definition)};\n`);
 }
@@ -43,9 +43,9 @@ class Client {
   events = [];
   pending = new Map();
   counter = 0;
-  constructor(name) {
+  constructor(name, sessionFile) {
     this.name = name;
-    this.child = spawn(wrapper, ["--mode", "rpc", "--no-session", "--agent", "lead", "--model", mainModel], { cwd: root, env: { ...process.env, PI_CODING_AGENT_BIN: wrapper }, stdio: ["pipe", "pipe", "pipe"] });
+    this.child = spawn(wrapper, ["--mode", "rpc", ...(sessionFile ? ["--session", sessionFile] : ["--no-session"]), "--agent", "lead", "--model", mainModel], { cwd: root, env: { ...process.env, PI_CODING_AGENT_BIN: wrapper }, stdio: ["pipe", "pipe", "pipe"] });
     this.child.on("error", error => { this.failure = error; });
     this.child.on("exit", (code, signal) => { this.exit = { code, signal }; });
     this.child.stderr.on("data", chunk => appendFileSync(path.join(root, `${name}.stderr.log`), chunk));
@@ -186,7 +186,84 @@ async function replyPreservesContext() {
   } finally { await client.close(); }
 }
 
-await parallelAndUserPriority();
-await abortAndResume();
-await replyPreservesContext();
-console.log("Live background delegation and reply E2E passed.");
+function planCalls(client, action, since = 0) {
+  const starts = new Set(client.events.filter(row => row.at >= since && row.event.type === "tool_execution_start" && row.event.toolName === "session_plan" && row.event.args?.action === action).map(row => row.event.toolCallId));
+  return client.events.filter(row => row.event.type === "tool_execution_end" && starts.has(row.event.toolCallId));
+}
+function inspectedState(client, since = 0) {
+  for (const row of planCalls(client, "inspect", since).toReversed()) {
+    try {
+      const value = JSON.parse(text(row.event.result));
+      if (Array.isArray(value.tasks) && Array.isArray(value.results)) return value;
+    } catch {}
+  }
+}
+
+async function durableCoordination() {
+  const sessionFile = path.join(root, "coordination-parent.jsonl");
+  let client = new Client("coordination", sessionFile);
+  try {
+    await client.command("prompt", { message: 'Execute this coordination test recipe using session_plan, delegate and bash only. First create one task with title COORDINATION_LOGIN, objective "Verify login coordination", and items [{"id":"implement","text":"Implement fix","status":"in_progress"},{"id":"review","text":"Review and verify","dependsOn":["implement"]}]. Save its returned task ID. Delegate worker in background with that taskId and itemId "implement"; its exact task is "Execute bash `sleep 8; printf COORDINATION_RESULT` once, then reply only COORDINATION_RESULT". Then reply only COORDINATION_STARTED. When the result arrives, leave its handling new and the task active, call session_plan inspect with no IDs once, then reply only WAITING_REVIEW. Do not acknowledge the result or complete any checklist items until I ask.' });
+    await client.until(() => completion(client).some(row => text(row.event.message).includes("COORDINATION_RESULT")), "coordination result delivery");
+    await client.until(() => assistant(client, "WAITING_REVIEW") && inspectedState(client)?.results?.length, "inspection without acknowledgement");
+    let state = inspectedState(client);
+    const task = state.tasks.find(task => task.title === "COORDINATION_LOGIN");
+    assert.ok(task);
+    const result = state.results.find(result => result.taskId === task.id);
+    assert.ok(result, "delegation result must remain linked to its accepted task");
+    assert.equal(result.itemId, "implement");
+    assert.equal(result.handling, "new", "delivery and inspection must not handle the result");
+    assert.equal(task.status, "active");
+    assert.equal(state.focus, undefined, "no focus bookkeeping required");
+    assert.equal(task.items.find(item => item.id === "implement").status, "in_progress");
+
+    let since = Date.now();
+    await client.command("prompt", { message: `Amend the existing task ${task.id} with "Preserve public API" using session_plan update; do not create another task. Inspect the full report for run ${result.runId} with session_plan result, then mark it reviewed with note "Read report; verification remains" using handle_result. Keep unfinished checklist items. Finally call session_plan inspect with no IDs and reply only COORDINATION_REVIEWED.` });
+    await client.until(() => assistant(client, "COORDINATION_REVIEWED") && inspectedState(client, since), "explicit reviewed state");
+    state = inspectedState(client, since);
+    assert.equal(state.results.find(value => value.runId === result.runId).handling, "reviewed");
+    assert.equal(state.tasks.length, 1, "amendment must update existing work");
+    assert.ok(state.tasks[0].amendments.includes("Preserve public API"));
+    assert.equal(state.tasks[0].status, "active");
+
+    since = Date.now();
+    await client.command("prompt", { message: `Set run ${result.runId} handling to deferred with note "Waiting for login verification" using session_plan handle_result. Keep the existing task and checklist incomplete. Call session_plan inspect with no IDs, then reply only COORDINATION_DEFERRED.` });
+    await client.until(() => assistant(client, "COORDINATION_DEFERRED") && inspectedState(client, since), "explicit deferred state");
+    state = inspectedState(client, since);
+    assert.equal(state.results.find(value => value.runId === result.runId).handling, "deferred");
+    assert.equal(state.focus, undefined);
+    await client.close();
+
+    const restartedAt = Date.now();
+    client = new Client("coordination-restored", sessionFile);
+    await client.command("get_state");
+    await client.command("prompt", { message: "Inspect the saved coordination state with session_plan inspect and no IDs, then reply only COORDINATION_RESTORED. Do not change any tasks, handling, or checklists; do not launch any workers." });
+    await client.until(() => assistant(client, "COORDINATION_RESTORED") && inspectedState(client), "coordination restoration after restart");
+    state = inspectedState(client);
+    assert.equal(state.tasks.find(value => value.id === task.id).status, "active");
+    assert.ok(state.tasks.find(value => value.id === task.id).amendments.includes("Preserve public API"));
+    assert.equal(state.focus, undefined);
+    assert.equal(state.results.find(value => value.runId === result.runId).handling, "deferred");
+    assert.equal(audit().filter(row => row.at >= restartedAt && row.run !== "main" && row.event.type === "agent_start").length, 0, "restoration must not restart workers");
+
+    since = Date.now();
+    await client.command("prompt", { message: `Finish this controlled checklist test. Read run ${result.runId} with session_plan result and verify that its report contains COORDINATION_RESULT. Mark that report incorporated with note "Verified the expected fixture token". Mark the existing task ${task.id} item implement completed, then item review completed, using session_plan update_item. Do not update the task status explicitly: the last checklist item should close it automatically. Finally call session_plan inspect with no IDs and reply only COORDINATION_COMPLETED. Do not delegate or run bash.` });
+    await client.until(() => assistant(client, "COORDINATION_COMPLETED") && inspectedState(client, since), "verified checklist completes the task automatically");
+    state = inspectedState(client, since);
+    assert.equal(state.tasks.find(value => value.id === task.id).status, "completed");
+    assert.ok(state.tasks.find(value => value.id === task.id).items.every(item => item.status === "completed"));
+    assert.equal(state.results.find(value => value.runId === result.runId).handling, "incorporated");
+    assert.equal(planCalls(client, "update", since).length, 0, "checklist closure must not need an explicit task-status update");
+    assert.equal(audit().filter(row => row.at >= restartedAt && row.run !== "main" && row.event.type === "agent_start").length, 0, "review and completion must not restart workers");
+    await writeFile(path.join(root, "coordination-completed.json"), JSON.stringify(state, null, 2) + "\n");
+    console.log("PASS: live session_plan links results, preserves checklist progress and unfinished work, applies amendments, restores without restarting workers, and automatically closes the verified checklist");
+  } finally { await client.close(); }
+}
+
+if (!process.argv.includes("--coordination-only")) {
+  await parallelAndUserPriority();
+  await abortAndResume();
+  await replyPreservesContext();
+}
+await durableCoordination();
+console.log("Live background delegation, reply and durable coordination E2E passed.");

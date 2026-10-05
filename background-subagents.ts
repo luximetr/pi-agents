@@ -235,7 +235,11 @@ export class PersistentSubagentBackend {
 }
 function errorText(error: unknown) { return error instanceof Error ? error.message : String(error); }
 
-/** Session-owned completion inbox. Never inject results into an active agent loop. */
+/**
+ * Session-owned notification transport. Never inject results into an active
+ * agent loop. Durable reports and handling acknowledgements live separately in
+ * SessionCoordination; draining this transport never means a result was handled.
+ */
 export class CompletionInbox<T> {
 	private pending: T[] = [];
 	private timer?: ReturnType<typeof setTimeout>;

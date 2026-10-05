@@ -11,6 +11,9 @@ import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
 import messageTiming from "./message-timing.ts";
 import { CompletionInbox, PersistentSubagentBackend, backgroundRunStatus, type BackgroundRunState } from "./background-subagents.ts";
+import { SessionCoordination, type CoordinationResult } from "./session-coordination.ts";
+import { COORDINATION_GUIDE, SESSION_PLAN_TOOL, sessionPlanTool } from "./session-plan-tool.ts";
+import { renderSessionOverview } from "./session-overview.ts";
 import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } from "./subagent-observer.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
@@ -135,6 +138,29 @@ export default function (pi: ExtensionAPI) {
 	let turnSubagentStats: SubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 	let sessionSubagentStats: SubagentStats = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set<string>() };
 	let observerContext: ExtensionContext | undefined;
+	let coordination: SessionCoordination | undefined;
+	let coordinationError: string | undefined;
+	let admittedUserUpdateIds: string[] = [];
+	let renderOverview: (() => void) | undefined;
+	const getCoordination = () => {
+		if (!coordination) throw new Error(`Session coordination unavailable: ${coordinationError ?? "session has not started"}`);
+		return coordination;
+	};
+	const coordinationSnapshot = () => {
+		try {
+			const snapshot = coordination?.snapshot();
+			if (snapshot) coordinationError = undefined;
+			return snapshot;
+		} catch (error) { coordinationError = error instanceof Error ? error.message : String(error); return undefined; }
+	};
+	const coordinationContext = (deliveredOnly = false) => {
+		try { return getCoordination().contextDigest({ deliveredOnly, ...(deliveredOnly ? { admittedUserUpdateIds } : {}) }); }
+		catch (error) {
+			coordinationError = error instanceof Error ? error.message : String(error);
+			return `Session coordination unavailable: ${coordinationError}. Retain unfinished obligations in the current conversation; do not claim they have been saved.`;
+		}
+	};
+	pi.registerTool(sessionPlanTool(getCoordination, () => renderOverview?.()));
 	const createObserver = () => new SubagentObserver(process.env[OBSERVER_ENV], () => {
 		if (observerContext) refreshStatus(observerContext);
 	});
@@ -174,6 +200,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function refreshStatus(ctx: ExtensionContext) {
+		renderOverview?.();
 		const assigned = activeAgent?.mcp ?? [];
 		const statuses = mcpManager.getStatuses(assigned);
 		const connectedMcp = assigned.filter((name) => statuses[name]?.state === "connected");
@@ -353,15 +380,34 @@ export default function (pi: ExtensionAPI) {
 	};
 	const completionMessage = (results: BackgroundResult[]) => ({
 		customType: "pi-agents-completions",
-		content: results.map(result => `Background task ${result.details.status ?? "completed"}\nRun: ${result.runId}\nAgent: ${result.agent}\nTask: ${result.task}\n\n${result.text}`).join("\n\n---\n\n"),
+		content: ["Subagent results awaiting reconciliation. Delivery does not mark them handled or complete checklist items. Inspect full reports with session_plan result (runId); explicitly update handling and resume unfinished user work.",
+			...results.slice(0, 8).map(result => {
+				const saved = coordinationSnapshot()?.results.find(item => item.runId === result.runId);
+				return `Run: ${result.runId} · ${result.agent} · ${result.details.status ?? "completed"}${saved?.taskId ? ` · task ${saved.taskId}${saved.itemId ? ` / ${saved.itemId}` : ""}` : ""}\n${(saved?.summary ?? result.text).slice(0, 600)}`;
+			}), ...(results.length > 8 ? [`${results.length - 8} more reports retained. Use session_plan list/inspect.`] : [])].join("\n\n"),
 		display: true,
 		details: { runs: results.map(result => result.runId), results },
 	});
 	pi.registerMessageRenderer("pi-agents-completions", renderBackgroundCompletions);
 	const createInbox = () => new CompletionInbox<BackgroundResult>(
 		() => !!observerContext?.isIdle() && !observerContext.hasPendingMessages(),
-		results => pi.sendMessage(completionMessage(results), { triggerTurn: true, deliverAs: "followUp" }),
+		results => {
+			const saved = coordinationSnapshot()?.results;
+			const ready = results.filter(result => {
+				const handling = saved?.find(item => item.runId === result.runId)?.handling;
+				return handling !== "incorporated" && handling !== "deferred";
+			});
+			if (ready.length) {
+				pi.sendMessage(completionMessage(ready), { triggerTurn: true, deliverAs: "followUp" });
+				markCompletionsDelivered(ready);
+			}
+		},
 	);
+	function markCompletionsDelivered(results: BackgroundResult[]) {
+		try { coordination?.markDelivered(results.map(result => result.runId)); }
+		catch (error) { observerContext?.ui.notify(`Could not save result delivery: ${error instanceof Error ? error.message : error}`, "warning"); }
+		renderOverview?.();
+	}
 	let inbox = createInbox();
 	pi.on("agent_start", (_event, ctx) => {
 		observerContext = ctx;
@@ -371,7 +417,17 @@ export default function (pi: ExtensionAPI) {
 		if (event.message.role === "assistant") inbox.assistantMessageEnded(event.message.stopReason);
 	});
 	pi.on("agent_settled", () => inbox.settle());
-	pi.on("input", () => { inbox.resume(); });
+	pi.on("input", (event, ctx) => {
+		inbox.resume();
+		if (event.text?.trim() && event.source !== "extension") {
+			try {
+				const id = coordination?.captureUserMessage(event.text);
+				if (id && event.streamingBehavior === "steer") admittedUserUpdateIds.push(id);
+			}
+			catch (error) { ctx.ui.notify(`Could not retain user input: ${error instanceof Error ? error.message : error}`, "warning"); }
+			renderOverview?.();
+		}
+	});
 
 	const mcpManager = new McpManager(pi);
 	/** Custom tool name -> agent name that registered it (for collision warnings). */
@@ -379,7 +435,7 @@ export default function (pi: ExtensionAPI) {
 
 	const executeDelegation: ToolDefinition["execute"] = async (toolCallId, params, signal, onUpdate, ctx) => {
 			const parent = activeAgent;
-			const input = params as { agent?: unknown; task?: unknown; background?: boolean; replyRunId?: string; recoverRunId?: string; workspace?: SubagentWorkspace };
+			const input = params as { agent?: unknown; task?: unknown; taskId?: string; itemId?: string; background?: boolean; replyRunId?: string; recoverRunId?: string; workspace?: SubagentWorkspace };
 			if (taskHistoryError) throw new Error(`Persistent task storage unavailable: ${taskHistoryError}. Fix storage and reload Pi; no temporary fallback was used.`);
 			const backend = taskBackend;
 			if (backend && fs.realpathSync(ctx.cwd) !== taskProjectCwd) throw new Error("Task project changed since session startup. Reopen the original project/session; durable tasks never silently change workspaces.");
@@ -410,6 +466,21 @@ export default function (pi: ExtensionAPI) {
 			const thinkingLevel = pi.getThinkingLevel?.();
 			const selectedModel = previousRun ? previousRun.thread.model : subagent.model ?? (inheritedModel && thinkingLevel ? `${inheritedModel}:${thinkingLevel}` : inheritedModel);
 			const runId = newRunId();
+			const runCoordination = getCoordination();
+			const state = runCoordination.snapshot();
+			const priorLink = previousRunId ? state.runs.find(run => run.runId === previousRunId) : undefined;
+			let continuationItemId = priorLink?.itemId;
+			if (priorLink) {
+				// A fresh, explicitly requested continuation reopens its own obligation.
+				// It does not acknowledge the previous report or complete checklist items.
+				const parentTask = state.tasks.find(task => task.id === priorLink.taskId)!;
+				if (parentTask.status === "completed" || parentTask.status === "superseded") runCoordination.updateTask(parentTask.id, { status: "active", amendment: `Follow-up instruction: ${task}` });
+				const item = parentTask.items.find(item => item.id === priorLink.itemId);
+				if (item?.status === "completed" || item?.status === "superseded") continuationItemId = runCoordination.addItem(parentTask.id, { text: `Follow up: ${task}`, owner: item.owner, dependsOn: [item.id] }).id;
+			}
+			// Unlinked calls get their own obligation instead of guessing a task from stale focus.
+			const taskId = priorLink?.taskId ?? input.taskId ?? runCoordination.createTask({ title: task.split("\n")[0].slice(0, 120), objective: task, owner: parent!.name, items: [{ id: "work", text: task.split("\n")[0].slice(0, 160), status: "in_progress", owner: agentName }] }).id;
+			runCoordination.linkRun(runId, { taskId, itemId: continuationItemId ?? input.itemId ?? (!priorLink && !input.taskId ? "work" : undefined), agent: agentName, task });
 			const thread: TaskThread = previousRun?.thread ?? {
 				id: `thread-${randomUUID()}`, owner: parent!.name, agent: agentName, cwd: ctx.cwd, model: selectedModel,
 				workspace: input.workspace ?? "shared",
@@ -427,8 +498,10 @@ export default function (pi: ExtensionAPI) {
 			const background = input.background === true;
 			const controller = new AbortController();
 			const runStartedAt = Date.now();
+			let fullRunReport: string | undefined;
 			backgroundRuns.set(runId, { ...runWorkspace, agent: agentName, task, controller, thread, background, status: "running", model: selectedModel, startedAt: runStartedAt,
 				deadlineAt: timeoutSeconds === undefined ? undefined : runStartedAt + timeoutSeconds * 1000 });
+			renderOverview?.();
 			if (background) emitBackgroundLifecycle(runId, agentName, "started");
 			const executeRun = async (): Promise<{ content: { type: "text"; text: string }[]; details: DelegateStatsDetails }> => {
 			try {
@@ -548,6 +621,7 @@ export default function (pi: ExtensionAPI) {
 					historyWarning = output.historyWarning;
 					if (output.recovery) historyWarning = [historyWarning, `Continued from checkpoint ${new Date(output.recovery.savedAt).toISOString()}; later work may not be in the saved conversation.`].filter(Boolean).join("\n");
 				} else result = await runSubagent(agentName, task, ctx.cwd, runSignal, runOptions);
+				fullRunReport = result + (historyWarning ? `\n\n${historyWarning}` : "");
 				const truncation = truncateHead(result, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
 				let visibleResult = truncation.content;
 				if (historyWarning) visibleResult += `\n\n${historyWarning}`;
@@ -604,8 +678,19 @@ export default function (pi: ExtensionAPI) {
 				Object.assign(result.details, runWorkspace, { threadId: thread.id, runId });
 				result.content[0].text += `\nWorkspace: ${thread.workspace}${runWorkspace.workspaceCwd ? `\nCwd: ${runWorkspace.workspaceCwd}` : ""}`;
 				if (runWorkspace.worktreePath) result.content[0].text += `\nWorktree: ${runWorkspace.worktreePath}\nBase commit: ${runWorkspace.workspaceBaseCommit}\nChanges are retained; review/apply manually (not merged).`;
+				try {
+					const report = fullRunReport === undefined ? result.content.map(item => item.text).join("\n")
+						: `Result from ${agentName}:\n\n${fullRunReport}\n\nThread ID: ${thread.id}\nRun ID: ${runId}\nWorkspace: ${thread.workspace}${runWorkspace.workspaceCwd ? `\nCwd: ${runWorkspace.workspaceCwd}` : ""}${runWorkspace.worktreePath ? `\nWorktree: ${runWorkspace.worktreePath}\nBase commit: ${runWorkspace.workspaceBaseCommit}\nChanges retained; review/apply manually (not merged).` : ""}`;
+					runCoordination.recordResult({ runId, agent: agentName, task, text: report, executionStatus: result.details.status as CoordinationResult["executionStatus"] });
+					if (!background) runCoordination.markDelivered([runId]);
+				} catch (error) {
+					ctx.ui.notify(`Could not retain result ${runId}: ${error instanceof Error ? error.message : error}. Its report remains in this run's output.`, "warning");
+				}
 				if (generation !== sessionGeneration) return result;
 				const run = backgroundRuns.get(runId)!;
+				try { await refreshPersistedTasks(); }
+				catch { run.recoverable = false; }
+				if (generation !== sessionGeneration) return result;
 				run.status = result.details.status ?? "completed";
 				run.endedAt = Date.now();
 				run.result = result.content.map(item => item.text).join("\n");
@@ -618,6 +703,7 @@ export default function (pi: ExtensionAPI) {
 					emitBackgroundLifecycle(runId, agentName, run.status === "completed" ? "completed" : run.status === "interrupted" ? "aborted" : "failed");
 					inbox.push({ ...runWorkspace, runId, agent: agentName, task, text: run.result, details: result.details });
 				}
+				renderOverview?.();
 				return result;
 			});
 			pendingRuns.add(execution);
@@ -645,6 +731,8 @@ export default function (pi: ExtensionAPI) {
 				agent: { type: "string", description: "Name of an allowed subagent" },
 				task: { type: "string", description: "Self-contained task" },
 				background: { type: "boolean", description: "Run in the background (default false)" },
+				taskId: { type: "string", description: "Originating session_plan task ID; omitted IDs create a separate task with a checklist" },
+				itemId: { type: "string", description: "Originating checklist item ID within taskId" },
 				workspace: { type: "string", enum: ["shared", "worktree"], description: "Workspace for this new thread: shared (default) uses parent cwd; worktree isolates parent HEAD without uncommitted changes. Replies reuse it; changes require manual review/apply." },
 			},
 			required: ["agent", "task"], additionalProperties: false,
@@ -682,6 +770,10 @@ export default function (pi: ExtensionAPI) {
 			savedAt: run.savedAt, historyError: run.historyError });
 		if (action === "list") return reply(taskHistoryError ? `Task history unavailable: ${taskHistoryError}` : JSON.stringify([...Array.from(backgroundRuns, ([id, run]) => status(id, run)), ...historyDiagnostics]));
 		const run = runId ? backgroundRuns.get(runId) : undefined;
+		if (action === "result" && runId) {
+			const saved = coordinationSnapshot()?.results.find(result => result.runId === runId);
+			if (saved) return { ...reply(saved.text), details: { ...(run ? workspaceMetadata(run) : {}), runId, threadId: run?.thread.id, status: saved.executionStatus, taskId: saved.taskId, itemId: saved.itemId, handling: saved.handling } };
+		}
 		if (!run || !runId) return reply(taskHistoryError ? `Task history unavailable: ${taskHistoryError}` : "Unknown run ID. Use list in the original project and root session.");
 		if (action === "status") return reply(JSON.stringify(status(runId, run)));
 		if (action === "reply" || action === "recover") {
@@ -873,8 +965,8 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`Agent "${name}": unknown subagents: ${unknownSubagents.map((subagent) => subagent.name).join(", ")}`, "warning");
 		}
 		const delegationTools = allowedSubagents.length > 0 ? [DELEGATE_TOOL, SUBAGENT_CONTROL_TOOL] : [];
-		const active = [...new Set([...base, ...customToolNames, ...mcpToolNames, ...delegationTools])];
-		// Apply even when empty: an explicit [] allowlist means "no tools".
+		const active = [...new Set([...base, ...customToolNames, ...mcpToolNames, ...delegationTools, SESSION_PLAN_TOOL])];
+		// Session bookkeeping is always available, alongside configured execution tools.
 		pi.setActiveTools(active);
 
 		activeName = agent.name;
@@ -892,7 +984,7 @@ export default function (pi: ExtensionAPI) {
 		// Clearing an agent must also drop its credentialed MCP connections.
 		await mcpManager.disconnectAll();
 		if (originalTools) {
-			pi.setActiveTools(originalTools);
+			pi.setActiveTools([...new Set([...originalTools, SESSION_PLAN_TOOL])]);
 			originalTools = undefined;
 		}
 		activeName = undefined;
@@ -925,7 +1017,7 @@ export default function (pi: ExtensionAPI) {
 			projectRoot,
 			projectAgentsDir,
 			trusted: ctx.isProjectTrusted ? ctx.isProjectTrusted() : true,
-			allTools: pi.getAllTools().map((tool) => ({ name: tool.name, description: tool.description })),
+			allTools: pi.getAllTools().filter(tool => tool.name !== SESSION_PLAN_TOOL).map((tool) => ({ name: tool.name, description: tool.description })),
 			activeTools: pi.getActiveTools(),
 			mcpServers: config.mcpServers ?? {},
 			mcpServerSources: config.mcpServerSources ?? {},
@@ -1033,7 +1125,7 @@ export default function (pi: ExtensionAPI) {
 		const method = await selectMenu(ctx, "Create agent", CREATE_MENU);
 		if (!method) return;
 		const available = {
-			tools: pi.getAllTools().map(tool => tool.name).filter(name => name !== DELEGATE_TOOL && name !== SUBAGENT_CONTROL_TOOL && name !== "powershell" && !name.includes("__")),
+			tools: pi.getAllTools().map(tool => tool.name).filter(name => name !== DELEGATE_TOOL && name !== SUBAGENT_CONTROL_TOOL && name !== SESSION_PLAN_TOOL && name !== "powershell" && !name.includes("__")),
 			mcp: Object.keys(config.mcpServers ?? {}),
 		};
 		let draft: DeclarativeAgentInput;
@@ -1203,18 +1295,35 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	async function inspectSubagents(ctx: ExtensionContext) {
+		await refreshPersistedTasks();
 		await showSubagentInspector(
 			ctx,
 			() => observer.handles(),
 			config.subagents?.staleWarningMinutes ?? DEFAULT_STALE_WARNING_MINUTES,
 			"Main session",
+			{
+				getCoordination: coordinationSnapshot,
+				onHandleResult: (runId, handling, note) => { getCoordination().handleResult(runId, handling, note); renderOverview?.(); },
+				getResultActions: (runId) => {
+					const run = backgroundRuns.get(runId);
+					if (!run || run.status === "running" || run.recoverable === false || run.thread.latestRunId !== runId || activeAgent?.name !== run.thread.owner || !activeAgent.subagents?.some(child => child.name === run.agent) || !agents.some(agent => agent.name === run.agent)) return [];
+					if (run.persisted) return run.recoverable ? ["recover"] : [];
+					return run.status === "completed" ? ["reply"] : run.recoverable ? ["recover"] : [];
+				},
+				onResultAction: async (action, runId, message) => {
+					const result = await controlSubagent(`inbox-${randomUUID()}`, { action, runId, message }, undefined, undefined, ctx);
+					const details = result.details as { runId?: string; status?: string } | undefined;
+					if (!details?.runId || details.status !== "running") throw new Error(result.content.filter(part => part.type === "text").map(part => part.text).join("\n") || "Continuation did not start.");
+					return result;
+				},
+			},
 		);
 	}
 
-	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Explore delegated agent runs", inspectSubagents);
+	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Task checklist, runs and inbox", inspectSubagents);
 
 	pi.registerCommand("subagents", {
-		description: "Explore live and completed delegated agent runs",
+		description: "Session tasks, live delegated runs and result inbox",
 		handler: async (_args, ctx) => inspectSubagents(ctx),
 	});
 
@@ -1272,8 +1381,21 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("before_agent_start", async (event) => {
-		const completions = inbox.take();
+		const queued = inbox.take();
+		const boundaryState = coordinationSnapshot();
+		admittedUserUpdateIds = boundaryState?.userUpdates.map(update => update.id) ?? [];
+		const savedResults = boundaryState?.results ?? [];
+		// Restoration never starts work. The next explicit safe boundary exposes
+		// any saved reports not yet delivered, including crash/interruption gaps.
+		for (const result of savedResults) {
+			if (result.delivered || result.handling === "incorporated" || queued.some(item => item.runId === result.runId)) continue;
+			queued.push({ runId: result.runId, agent: result.agent, task: result.task, text: result.text,
+				details: { agent: result.agent, status: result.executionStatus === "completed" ? "completed" : result.executionStatus === "failed" ? "failed" : result.executionStatus === "timed_out" ? "timed_out" : "interrupted" } });
+		}
+		const completions = queued.filter(result => savedResults.find(item => item.runId === result.runId)?.handling !== "incorporated");
 		const parts: string[] = [];
+		if (coordination) parts.push(COORDINATION_GUIDE);
+		else if (coordinationError) parts.push(`Session coordination storage is unavailable: ${coordinationError}. Report this limitation; do not claim that tasks or results have been retained.`);
 		if (activeAgent?.systemPrompt) parts.push(activeAgent.systemPrompt);
 		const delegateGuide = activeAgent ? delegationPrompt(activeAgent) : undefined;
 		if (delegateGuide) parts.push(delegateGuide);
@@ -1284,10 +1406,20 @@ export default function (pi: ExtensionAPI) {
 			);
 		}
 		if (parts.length === 0 && completions.length === 0) return;
+		if (completions.length) markCompletionsDelivered(completions);
 		return {
 			...(completions.length ? { message: completionMessage(completions) } : {}),
 			systemPrompt: `${event.systemPrompt}\n\n${parts.join("\n\n")}`,
 		};
+	});
+	// Rebuild compact continuity context before each request, including automatic
+	// compaction inside an existing agent loop. Undelivered background reports stay
+	// in the transport until settlement; this hook must not bypass that boundary.
+	pi.on("context", event => {
+		if (!coordination) return;
+		const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === "pi-agents-coordination-context"));
+		return { messages: [...messages, { role: "custom" as const, customType: "pi-agents-coordination-context", display: false,
+			content: coordinationContext(true), timestamp: Date.now() }] };
 	});
 
 	// --- Session lifecycle: discover, restore, persist ---
@@ -1357,9 +1489,36 @@ export default function (pi: ExtensionAPI) {
 		// selecting an agent then immediately running /new cannot lose the choice).
 		persistedName = undefined;
 		if (selected) await applyAgent(selected, ctx, { silent: true });
-		else refreshStatus(ctx);
+		else {
+			pi.setActiveTools([...new Set([...pi.getActiveTools(), SESSION_PLAN_TOOL])]);
+			refreshStatus(ctx);
+		}
 		persistedName = activeName;
 		taskRootSessionId = process.env[ROOT_SESSION_ENV] ?? (ctx.sessionManager as typeof ctx.sessionManager & { getSessionId?: () => string }).getSessionId?.();
+		coordination = undefined;
+		coordinationError = undefined;
+		admittedUserUpdateIds = [];
+		try {
+			coordination = SessionCoordination.open({ projectCwd: ctx.cwd, rootSessionId: taskRootSessionId ?? "",
+				participantId: process.env[RUN_ID_ENV] ? ctx.sessionManager.getSessionId() : "main" });
+		} catch (error) {
+			coordinationError = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Session coordination unavailable: ${coordinationError}`, "warning");
+		}
+		if ((!ctx.mode || ctx.mode === "tui") && typeof ctx.ui.setWidget === "function") {
+			ctx.ui.setWidget("pi-agents-session", (tui, theme) => {
+				renderOverview = () => tui.requestRender();
+				return {
+					invalidate() {},
+					render: width => {
+						const state = coordinationSnapshot();
+						if (coordinationError) return [theme.fg("warning", "Tasks · saved state unavailable".slice(0, Math.max(0, width)))];
+						return renderSessionOverview(state, observer.handles().map(handle => handle.snapshot()), width, Math.max(1, Math.min(5, (tui.terminal.rows ?? 24) - 10))).map((line, index) => theme.fg(index === 0 ? "accent" : "muted", line));
+					},
+					dispose() { renderOverview = undefined; },
+				};
+			}, { placement: "aboveEditor" });
+		}
 		taskHistoryError = undefined;
 		try {
 			taskProjectCwd = fs.realpathSync(ctx.cwd);
@@ -1370,6 +1529,18 @@ export default function (pi: ExtensionAPI) {
 					&& agents.some(agent => agent.name === request.agent),
 			});
 			await refreshPersistedTasks();
+			// A missing live owner is never a reason to restart. Retain an explicit
+			// interruption/report gap for each unfinished durable delegation instead.
+			if (coordination) {
+				const saved = coordination.snapshot();
+				for (const link of saved.runs) {
+					if (saved.results.some(result => result.runId === link.runId)) continue;
+					const run = backgroundRuns.get(link.runId);
+					if (run && !run.persisted && run.status === "running") continue;
+					coordination.recordResult({ ...link, executionStatus: (run?.status === "completed" ? "completed" : "interrupted"),
+						text: `No retained final report for this delegation after reload. Execution history: ${run?.status ?? "unavailable"}. Nothing was restarted. Inspect saved history and current workspace before an explicit recovery with a new instruction.` });
+				}
+			}
 			if (taskBackend && (backgroundRuns.size || historyDiagnostics.length)) ctx.ui.notify(`Saved task history available: ${backgroundRuns.size} tasks, ${historyDiagnostics.length} invalid records. Use /task-history list; nothing was restarted.`, "info");
 		} catch (error) {
 			taskHistoryError = error instanceof Error ? error.message : String(error);
@@ -1409,6 +1580,8 @@ export default function (pi: ExtensionAPI) {
 		}
 		sessionGeneration++;
 		inbox.close();
+		renderOverview = undefined;
+		ctx.ui.setWidget?.("pi-agents-session", undefined);
 		for (const [runId, run] of backgroundRuns) {
 			run.controller.abort();
 			if (run.background && run.status === "running") emitBackgroundLifecycle(runId, run.agent, "aborted");
@@ -1421,6 +1594,9 @@ export default function (pi: ExtensionAPI) {
 		// Wait for child exits/lock release before deleting their private histories.
 		await Promise.allSettled([...pendingRuns]);
 		await taskBackend?.shutdown();
+		coordination = undefined;
+		coordinationError = undefined;
+		admittedUserUpdateIds = [];
 		taskBackend = undefined;
 		taskHistoryError = undefined;
 		taskRootSessionId = undefined;

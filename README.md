@@ -99,6 +99,9 @@ ln -sf ../../subagent-workspace.ts .pi/extensions/pi-agents/subagent-workspace.t
 ln -sf ../../subagent-observer.ts .pi/extensions/pi-agents/subagent-observer.ts
 ln -sf ../../subagent-transcript.ts .pi/extensions/pi-agents/subagent-transcript.ts
 ln -sf ../../subagent-explorer.ts .pi/extensions/pi-agents/subagent-explorer.ts
+ln -sf ../../session-coordination.ts .pi/extensions/pi-agents/session-coordination.ts
+ln -sf ../../session-plan-tool.ts .pi/extensions/pi-agents/session-plan-tool.ts
+ln -sf ../../session-overview.ts .pi/extensions/pi-agents/session-overview.ts
 ```
 
 Project-local extensions load only in **trusted** projects — pi will ask on first interactive start (or run `/trust`).
@@ -132,7 +135,7 @@ If the main checkout was never trusted, the normal pi trust prompt applies in th
 | Open Agent Studio / picker | `f7` (also accepts configured shortcuts) |
 | Edit or create an agent | In `f7`: select an agent and press `F4`, or press `F5` to create a canonical `agent.ts` + `prompt.md` agent |
 | Rotate to next agent | `f8` (cycles: plain pi → dev → doc → … → plain pi; also accepts configured shortcuts) |
-| Explore subagents and descendants (live + completed) | `f9` or `/subagents` |
+| Open Tasks, Runs, and Inbox | `f9` or `/subagents`; `1` / `2` / `3` selects a view |
 | Switch directly | `/agent dev`, `/agent none` |
 | Ask about the extension | `/agent:help <question>` (answered from the bundled guide) |
 | Dashboard / picker | `/agent` or `f7`; type to filter, use `Tab`/`←→` to inspect overview, tools, MCP, and prompt |
@@ -250,7 +253,44 @@ This adds `delegate` and `subagent_control` automatically. The parent sees its a
 
 Children use the configured model or inherit the parent's model and thinking level. Replies retain the thread's selected model; current agent definitions, permissions, and configured deadlines apply again. Prompt-cache hits remain provider-dependent, not guaranteed by persistence. Process memory and open connections are not retained; workers should recheck workspace files before continuing. Delegation remains allowlisted and capped at four nested levels. Set `PI_CODING_AGENT_BIN` if needed.
 
-**Background delegation:** `delegate({ agent: "worker", task: "…", background: true })` returns a run ID immediately instead of waiting. The main agent can continue working or respond to you while multiple children run. Completion/failure results accumulate in a session-owned inbox and are delivered together only after the main agent fully settles (including retries and queued user messages), never as mid-flow steering. When idle, results automatically start a follow-up turn. Escape pauses automatic wake-ups while children continue; your next message includes waiting results. `subagent_control` supports `list`, `status`, `result`, `reply`, `steer`, and `stop` actions; use `runId` for a specific run and `message` for replies or steering. `subagent_control({ action: "status", runId: "…" })` returns live phase, current tool, model, elapsed/idle milliseconds, and any deadline/remaining time without waiting or consuming pending results. `list` returns the same metadata for all session-owned background runs. Status includes `threadId` and `latestRunId` and remains available after completion, failure, timeout, or interruption; before observation starts it reports `starting`. Check status when needed rather than repeatedly polling; completion delivery remains automatic. Progress also remains visible in Agent Explorer. Omitting `background` preserves blocking delegation. Background runs and their inbox live only in the current runtime; `/reload`, session replacement, and exit stop them and clear the inbox. Children share the working directory by default: give parallel workers separate files, or select `workspace: "worktree"` per delegation as described below.
+**Background delegation:** `delegate({ agent: "worker", task: "…", background: true })` returns a run ID immediately instead of waiting. The main agent can continue working or respond to you while multiple children run. Completion/failure results accumulate in a session-owned inbox and are delivered together only after the main agent fully settles (including retries and queued user messages), never as mid-flow steering. When idle, results automatically start a follow-up turn. Escape pauses automatic wake-ups while children continue; your next message includes waiting results. `subagent_control` supports `list`, `status`, `result`, `reply`, `recover`, `steer`, and `stop` actions; use `runId` for a specific run and `message` for replies or steering. `subagent_control({ action: "status", runId: "…" })` returns live phase, current tool, model, elapsed/idle milliseconds, and any deadline/remaining time without waiting or consuming pending results. `list` returns the same metadata for all session-owned background runs. Status includes `threadId` and `latestRunId` and remains available after completion, failure, timeout, or interruption; before observation starts it reports `starting`. Check status when needed rather than repeatedly polling; completion delivery remains automatic. Progress also remains visible in Agent Explorer. Omitting `background` preserves blocking delegation. `/reload`, session replacement, and exit stop live workers; saved coordination and reports remain available when the same session is restored. Restoration never restarts workers automatically. Children share the working directory by default: give parallel workers separate files, or select `workspace: "worktree"` per delegation as described below.
+
+#### Tasks, checklists, and inbox
+
+A compact task panel above the main input shows each task's checklist progress and current activity:
+
+```text
+Tasks · 2 active · 1 running · 1 to review              F9 checklist
+◐ Fix login · 1/4 done · In progress
+  Implement fix · dev-worker · awaiting review
+◐ Compare auth options · 0/2 done · In progress
+  Research options · researcher · running
+```
+
+Progress counts completed checklist items. Worker activity and report arrivals update automatically; reports remain awaiting review until the main agent handles them. The agent maintains the checklist without separate Main or Next fields. The panel adapts to narrow/short terminals, summarizes extra tasks, and collapses when all work and reports are settled.
+
+Press `f9` or run `/subagents` to open three views:
+
+- **Tasks** (`1`) expands all checklists, with `✓` completed, `◐` in progress, `○` pending, and `−` superseded items. It also shows worker activity, dependencies, objectives and amendments. Superseded tasks remain visible.
+- **Runs** (`2`) preserves the recursive run tree, live conversations, steering, and subtree stopping described below.
+- **Inbox** (`3`) shows results with separate execution and handling states. `Enter` inspects the full report; `r` marks reviewed, `i` incorporated, `d` defers with an optional note, and `n` returns a result to new. Eligible results expose `p` reply or `c` recover. Actions recheck the same ownership, latest-run, saved-history, and busy-thread rules as `subagent_control`; descendant observation alone does not grant reply/recovery rights. Inspecting, replying, or closing the view does not acknowledge incorporation.
+
+The `session_plan` tool shares this durable state with the UI. It stays available for coordination even when an agent restricts its work tools. The agent creates a task for each independent accepted objective, records checklists and amendments, and updates item status as work progresses. Incoming user messages are retained for reconciliation; a clarification or status question does not silently replace unfinished objectives. Delegations accept `taskId` and optional `itemId` to link execution and results to the relevant obligation.
+
+```ts
+session_plan({ action: "create", title: "Fix login", objective: "Fix and verify login",
+  items: [{ id: "implement", text: "Implement fix" },
+          { id: "verify", text: "Verify login", dependsOn: ["implement"] }] }) // returns the task ID
+delegate({ agent: "worker", task: "Implement login fix", taskId, itemId: "implement", background: true })
+session_plan({ action: "result", runId }) // read without acknowledging
+session_plan({ action: "handle_result", runId, handling: "reviewed", note: "Verification remains" })
+```
+
+`session_plan list` provides a compact digest; `inspect` returns saved metadata or a particular task/input; full report text requires `result`. `update` appends an amendment or marks a task blocked or superseded; `add_item` and `update_item` maintain the checklist; `reconcile_input` attaches a pending user update to its task. Handling states are `new`, `reviewed`, `incorporated`, and `deferred`. Reviewed and deferred results remain outstanding. Completing the last checklist item automatically closes an active task once all linked reports are incorporated. Adding or reopening an item reopens a completed task. An explicit blocked or superseded task stays that way until updated. Tasks without checklists can be completed explicitly. Completion is rejected while checklist items, linked runs, or result incorporation remain unresolved. Ordinary review and incorporation require no manual approval.
+
+Safe-boundary delivery uses compact result digests and report references. Full reports remain accessible through `session_plan result` or `subagent_control result`. Delivery and reading are independent of explicit handling. Before continuing or producing a final response, the agent is instructed to reconcile results with current requests, update the checklist, and resume unfinished work. These records and checks support continuity; they do not guarantee model attention.
+
+Coordination persists separately from worker execution history under `~/.pi/agent/pi-agents-coordination/` by default, scoped to the canonical project directory, root session, and parent participant. It stores accepted objectives, amendments, pending user inputs, checklists, links, full results, and handling states in private atomic files. Resuming the same session or compacting its transcript restores a compact relevant digest. `/new` starts a separate scope. Stored text can contain private task or report content; deleting worker history does not delete parent coordination records.
 
 #### Per-delegate workspace isolation
 
@@ -296,7 +336,7 @@ Persistence currently requires POSIX owner-only permissions (`0700` directories,
 
 **Concurrency:** one execution per thread. Replies never queue or branch an older run. Use separate delegations for parallel work and explicit replies for continuity. Agent Explorer keeps each execution separately inspectable.
 
-While the parent waits, the delegation card shows the child's selected model and thinking level (including an explicit configured suffix, even after usage reports the bare model). The footer counts active runs across the hierarchy and shows the `f9` hint. Press `f9` (or run `/subagents`) for **Agent Explorer**, a full-terminal overlay with a recursive run tree and live conversation pane. It includes grandchildren at every supported depth, unique run IDs for repeated agent names, optional workspace badges and path/branch/base metadata, configured/actual models, tasks, tool arguments/results, own usage, elapsed/remaining time, and stale warnings. Parents with active children show their delegation status rather than a misleading stale warning. Completed and failed runs stay selectable.
+While the parent waits, the delegation card shows the child's selected model and thinking level (including an explicit configured suffix, even after usage reports the bare model). The footer counts active runs across the hierarchy and shows the `f9` hint. Open `f9` (or `/subagents`) and select **Runs** (`2`) for the recursive run tree and live conversation pane. It includes grandchildren at every supported depth, unique run IDs for repeated agent names, optional workspace badges and path/branch/base metadata, configured/actual models, tasks, tool arguments/results, own usage, elapsed/remaining time, and stale warnings. Parents with active children show their delegation status rather than a misleading stale warning. Completed and failed runs stay selectable.
 
 - `↑↓` / `j k`: select runs in the tree. `←→`: collapse/expand or navigate parent/child.
 - `Enter`: focus the conversation at full width. `→`: dive into its first child; `←` / `Esc`: back. `Tab`: switch tree/conversation focus. Narrow terminals show one pane at a time.
@@ -308,11 +348,17 @@ Observation uses a private local socket on macOS/Linux, independent of the child
 
 Stopping a run clears acknowledged queued steering/follow-ups before RPC abort, including for descendants. In-flight steering acknowledgements are awaited within the existing stop grace period; failed or unresponsive cancellation escalates to process termination. This cannot undo tool effects or instructions already delivered before the stop.
 
-A manual interruption or deadline returns diagnostic context to the parent so it can choose another approach. Delegate tool output stays compact by default; use Pi's tool-expand key to view the complete Markdown result. Model-visible results are capped at Pi's standard 2,000-line/50 KB tool limit; oversized full output is saved to a private temporary file and linked from the result. The agent cannot choose its deadline at call time: configure `timeoutSeconds` on the parent's subagent entry. Omit it to run without a deadline.
+A manual interruption or deadline returns diagnostic context to the parent so it can choose another approach. Delegate tool output stays compact by default; use Pi's tool-expand key to expand the Markdown preview. Delegation previews are capped at Pi's standard 2,000-line/50 KB tool limit; oversized output is also linked from a private temporary file. The full report is retained in durable coordination for explicit `session_plan result`, `subagent_control result`, or Inbox inspection after reload. Completion notifications and handling acknowledgements stay compact. The agent cannot choose its deadline at call time: configure `timeoutSeconds` on the parent's subagent entry. Omit it to run without a deadline.
 
-**Live integration test:** `npm run test:e2e:live` uses your existing Pi credentials with `openai-codex/gpt-6.1-sol:medium` as coordinator and `openai-codex/gpt-6-luna` as worker. It consumes provider tokens and runs in a temporary project with this checkout explicitly loaded in both parent and children. It verifies overlapping child execution, user follow-up acceptance, deferred batched results, and abort/resume behavior. RPC/audit logs remain in the printed temporary directory. Override models with `E2E_MAIN_MODEL` / `E2E_CHILD_MODEL`.
+**Try it interactively before publishing:** `node scripts/try-session-ui.mjs` opens Pi in a temporary demo project and starts two background workers using this checkout in both parent and children. It uses your normal Pi credentials/model and consumes tokens, without installing the checkout into your settings. Press F9 and use `1` Tasks, `2` Runs, or `3` Inbox; the demo leaves reports new for inspection. Ask the main agent to review/incorporate the reports when ready. The printed launcher resumes the same demo session later. Use `--prepare-only` to inspect generated files without starting Pi, or pass `--model provider/model` to choose a model.
+
+**Live integration test:** `npm run test:e2e:live` uses your existing Pi credentials with `openai-codex/gpt-6.1-sol:medium` as coordinator and `openai-codex/gpt-6-luna` as worker. It consumes provider tokens and runs in a temporary project with this checkout explicitly loaded in both parent and children. It verifies overlapping child execution, user follow-up acceptance, deferred batched results, abort/resume, reply context, and durable coordination: checklist progress, linked results, amendments, reviewed/deferred handling, and restart without relaunching workers. Use `node scripts/e2e-background.mjs --coordination-only` for the coordination scenario. RPC/audit logs remain in the printed temporary directory. Override models with `E2E_MAIN_MODEL` / `E2E_CHILD_MODEL`.
 
 **Controlled stop/queue test:** `node scripts/e2e-stop-queue.mjs` uses real Pi RPC and the worker model (same credential/token warning). It demonstrates queued steering consumption with abort alone, then verifies the runner clears steering before abort without executing or persisting the queued instruction. The unsafe baseline only requests a marker file inside its temporary directory; it reports whether that command actually ran. Use `--fixed-only` to skip the unsafe baseline, or `--baseline-only` to inspect current Pi behavior. Logs remain in the printed artifact directory.
+
+**Provider-free host integration test:** `npm run test:e2e:controlled` launches the real Pi RPC host with this extension in a private temporary home and two controlled worker processes. It verifies tool registration, linked reports, checklist progress, automatic task completion, explicit reviewed/deferred handling, rejection of premature task completion, and same-session restoration without worker relaunch. Only the automatic model wake-up is suppressed; completion delivery is recorded. It does not load credentials or call a model. Logs and saved coordination remain in the printed artifact directory.
+
+**Renderer previews:** `node scripts/preview-session-ui.mjs [output-directory]` captures the actual overview, Tasks, Inbox, full-report, and narrow-terminal renderers with deterministic fixture state. It verifies that inspecting a result preserves checklist progress and leaves the result unhandled. It writes text and HTML previews; set `CHROME_BIN` to a Chrome executable to also capture PNGs. These are labeled fixture previews, not live screenshots.
 
 #### Typed tools
 
