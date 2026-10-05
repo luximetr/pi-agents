@@ -13,7 +13,7 @@ if (args.includes("--help")) {
 Creates a temporary, isolated Pi home and demo project, then opens interactive Pi with this checkout loaded.
 Aliases are stored in the sandbox config, so your real ~/.pi/agent/pi-agents/config.json is never touched.
 Credentials are copied from your normal Pi agent directory if present. Uses your own model and consumes tokens.
-Try: /models  ·  F7 → F4 (Studio) → Manage subagents → Set model  ·  /agent:help model aliases
+Try: /models  ·  F7 → F4 (Studio) → Manage subagents → Set model  ·  /pi-agents:help model aliases
 --prepare-only writes the sandbox and prints the launcher without starting Pi.`);
   process.exit(0);
 }
@@ -82,10 +82,10 @@ Aliases: @fast → openai-codex/gpt-6-luna:minimal · @strong → openai-codex/g
 Resume later: ${quote(launch)}
 
 In Pi:
-  /models                       add, rename, retarget, or delete aliases (writes only to the sandbox config)
+  /pi-agents:models             add, rename, retarget, or delete aliases (writes only to the sandbox config)
   F7 → F4 → Manage subagents    pick a model for a child; aliases appear as "@fast → ..."
   F9 → 2 Runs                   each delegation card shows the model the child actually received
-Current demo uses @fast / @strong; switch a target in /models and re-delegate to see it change.
+Current demo uses @fast / @strong; switch a target in /pi-agents:models and re-delegate to see it change.
 
 Uses your own credentials and consumes tokens.`);
 if (prepareOnly) {

@@ -218,20 +218,20 @@ process.stdin.on('end',()=>process.exit(0));
 		assert.doesNotMatch(unknownCard, /worker running/);
 		assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 2, "startup never re-executes tasks");
 		await assert.rejects(control("recover", held.details.runId, " "), /fresh/);
-		await runtime.commands.get("agent").handler("other", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("other", runtime.ctx);
 		await assert.rejects(control("recover", held.details.runId, "continue"), /another parent/);
-		await runtime.commands.get("agent").handler("lead", runtime.ctx);
-		await runtime.commands.get("task-history").handler(`recover ${held.details.runId} inspect current effects before continuing`, runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("lead", runtime.ctx);
+		await runtime.commands.get("pi-agents:task-history").handler(`recover ${held.details.runId} inspect current effects before continuing`, runtime.ctx);
 		await waitFor(async () => (await list()).some((row: any) => row.threadId === held.details.threadId && row.runId !== held.details.runId && row.status === "completed"));
 		const launches = (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line));
 		assert.match(launches[2].task, /was interrupted/);
 		assert.match(launches[2].task, /inspect current effects before continuing/);
 		assert.ok(launches[2].prior.some((entry: any) => entry.message?.content === "HOLD"));
-		await runtime.commands.get("task-history").handler(`delete ${first.details.runId}`, runtime.ctx);
+		await runtime.commands.get("pi-agents:task-history").handler(`delete ${first.details.runId}`, runtime.ctx);
 		assert.equal(await readFile(path.join(worktree, "retained-work"), "utf8"), "keep");
 		rows = await list();
 		assert.ok(!rows.some((row: any) => row.runId === first.details.runId));
-		await runtime.commands.get("task-history").handler("prune 0", runtime.ctx);
+		await runtime.commands.get("pi-agents:task-history").handler("prune 0", runtime.ctx);
 		assert.deepEqual(await list(), []);
 		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
 		runtime = await start("other-session");
@@ -477,9 +477,9 @@ process.stdin.once("data", chunk => {
 		assert.notEqual(starts[0].file, starts[1].file);
 		assert.ok(Math.max(...starts.map(row => row.at)) < Math.min((await status(a.details.runId)).endedAt, (await status(b.details.runId)).endedAt), "same-agent threads overlap");
 		await assert.rejects(control("reply", a.details.runId, " "), /non-empty/);
-		await runtime.commands.get("agent").handler("other", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("other", runtime.ctx);
 		await assert.rejects(control("reply", a.details.runId, "wrong owner"), /Reply denied/);
-		await runtime.commands.get("agent").handler("lead", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("lead", runtime.ctx);
 		runtime.ctx.model = { provider: "test", id: "changed" };
 		const attempts = await Promise.allSettled([
 			control("reply", a.details.runId, "answer"),
@@ -922,7 +922,7 @@ test("dashboard reorder and whole-folder deletion take effect without reload", a
 			customActions: [(component) => component.handleInput("\x1b[17~")],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		const saved = JSON.parse(await readFile(path.join(root, ".pi-agents", "config.json"), "utf8"));
 		assert.deepEqual(saved.agentOrder, ["beta", "alpha"]);
 		assert.equal(saved.custom, "preserved");
@@ -937,7 +937,7 @@ test("dashboard reorder and whole-folder deletion take effect without reload", a
 			assert.equal(selected, "beta", "reordered list is live without restarting the session");
 			return null;
 		};
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		let confirmed = false;
 		runtime.ctx.ui.confirm = async (_title: string, message: string) => {
 			assert.match(message, /ALL its contents/);
@@ -953,15 +953,15 @@ test("dashboard reorder and whole-folder deletion take effect without reload", a
 				component.handleInput("\x1b[3~");
 			});
 		};
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		await readFile(path.join(root, ".pi-agents", "alpha", "agent.ts"));
 		confirmed = true;
 		sendDelete = true;
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		await assert.rejects(readFile(path.join(root, ".pi-agents", "alpha", "agent.ts")), { code: "ENOENT" });
 		await assert.rejects(readFile(path.join(root, ".pi-agents", "alpha", ".env")), { code: "ENOENT" });
 		await readFile(path.join(root, ".pi-agents", "beta", "agent.ts"));
-		await runtime.commands.get("agent").handler("alpha", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("alpha", runtime.ctx);
 		assert.ok(runtime.notifications.some(item => /Unknown agent/.test(item.message)), "deleted agent is unavailable immediately");
 		assert.deepEqual(runtime.activeToolsets.at(-1), ["read", "bash", "session_plan"]);
 		runtime.ctx.ui.custom = originalCustom;
@@ -978,7 +978,7 @@ test("deleting a standalone agent preserves the shared agents directory", async 
 		await writeFile(file, 'export default { name: "standalone", description: "Standalone", default: true };');
 		const runtime = boot(root, { customActions: [component => component.handleInput("\x04")] });
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		await assert.rejects(readFile(file), { code: "ENOENT" });
 		await readFile(path.join(root, ".pi-agents", "beta", "agent.ts"));
 	} finally {
@@ -1037,7 +1037,7 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 				},
 				component => component.handleInput("\x1b"),
 			);
-			await runtime.commands.get("agent").handler("", runtime.ctx);
+			await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		}
 		async function testConnection(expected: RegExp) {
 			const toolsBefore = [...runtime.tools.keys()];
@@ -1062,7 +1062,7 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 				},
 				component => component.handleInput("\x1b"),
 			);
-			await runtime.commands.get("agent").handler("", runtime.ctx);
+			await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 			assert.ok(runtime.notifications.slice(notificationsBefore).some(entry => expected.test(entry.message)));
 			assert.deepEqual([...runtime.tools.keys()], toolsBefore);
 			assert.deepEqual(runtime.activeToolsets.at(-1), activeBefore);
@@ -1095,13 +1095,13 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 		assert.equal(await readFile(configFile, "utf8"), originalConfig);
 		await assert.rejects(readFile(path.join(root, ".pi-agents", ".env")), { code: "ENOENT" });
 		const beforeSwitch = server.requests.length;
-		await runtime.commands.get("agent").handler("beta", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("beta", runtime.ctx);
 		assert.ok(!runtime.activeToolsets.at(-1)?.includes(toolName));
 		const betaRequests = server.requests.slice(beforeSwitch).filter(request => request.method === "initialize");
 		assert.ok(betaRequests.length > 0);
 		assert.ok(betaRequests.every(request => request.authorization !== "Bearer rotated-token"));
 		await assert.rejects(readFile(path.join(root, ".pi-agents", "beta", ".env")), { code: "ENOENT" });
-		await runtime.commands.get("agent").handler("alpha", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("alpha", runtime.ctx);
 		await call();
 		const prompt = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
 		assert.match(prompt.systemPrompt, /Keep this session draft/);
@@ -1114,7 +1114,7 @@ test("Studio credential saves reconnect a real authenticated HTTP MCP without re
 	}
 });
 
-test("/models manages global aliases and Studio delegates the same table", async () => {
+test("/pi-agents:models manages global aliases and Studio delegates the same table", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-agents-models-command-"));
 	const globalDir = path.join(testAgentDir, "pi-agents");
 	const globalConfig = path.join(globalDir, "config.json");
@@ -1131,7 +1131,7 @@ test("/models manages global aliases and Studio delegates the same table", async
 			editorAnswers: ["renamed"],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("models").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:models").handler("", runtime.ctx);
 		const saved = JSON.parse(readFileSync(globalConfig, "utf8"));
 		assert.equal(saved.models.length, 2);
 		assert.equal(saved.models[0].name, "old", "existing aliases are retained");
@@ -1142,7 +1142,7 @@ test("/models manages global aliases and Studio delegates the same table", async
 		// Escaping the manager changes nothing on disk.
 		const cancelling = boot(root, { selectAnswers: [undefined] });
 		await cancelling.handlers.get("session_start")?.({ reason: "startup" }, cancelling.ctx);
-		await cancelling.commands.get("models").handler("", cancelling.ctx);
+		await cancelling.commands.get("pi-agents:models").handler("", cancelling.ctx);
 		assert.deepEqual(JSON.parse(readFileSync(globalConfig, "utf8")).models, saved.models);
 	} finally {
 		if (previousGlobal === undefined) await rm(globalConfig, { force: true });
@@ -1161,7 +1161,7 @@ test("Studio sets a startup default without activating or discarding edits", asy
 			customActions: [(_component, done) => done({ action: "edit", agent: "beta" })],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		assert.equal((await discoverAgents(root)).config.defaultAgent, "beta");
 		assert.equal((runtime.entries.at(-1)?.data as any).name, "alpha");
 		const fresh = boot(root);
@@ -1178,7 +1178,7 @@ test("/new inherits agent, model, reasoning and drafts across extension replacem
 		const old = boot(root, { branchEntries: [{ type: "custom", customType: "pi-agents-studio-state", data: { name: "beta", override: { systemPrompt: "Unsaved prompt" } } }] });
 		old.ctx.model = { provider: "test", id: "chosen" };
 		await old.handlers.get("session_start")?.({ reason: "startup" }, old.ctx);
-		await old.commands.get("agent").handler("beta", old.ctx);
+		await old.commands.get("pi-agents:agent").handler("beta", old.ctx);
 		await old.handlers.get("session_shutdown")?.({ reason: "new" }, old.ctx);
 		const next = boot(root, { flag: "alpha" });
 		const changes: unknown[] = [];
@@ -1347,7 +1347,7 @@ test("Studio adds configured subagents, restores drafts, and saves an empty dele
 			customActions: [component => component.handleInput("\x1bOS")],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		assert.ok(runtime.activeToolsets.at(-1)?.includes("delegate"));
 		const draft = runtime.entries.find(entry => entry.customType === "pi-agents-studio-state")!;
 		assert.deepEqual((draft.data as any).override.subagents, [{ name: "beta", model: "test/model", timeoutSeconds: 30 }]);
@@ -1360,7 +1360,7 @@ test("Studio adds configured subagents, restores drafts, and saves an empty dele
 		});
 		await restored.handlers.get("session_start")?.({ reason: "startup" }, restored.ctx);
 		assert.ok(restored.activeToolsets.at(-1)?.includes("delegate"));
-		await restored.commands.get("agent").handler("", restored.ctx);
+		await restored.commands.get("pi-agents:agent").handler("", restored.ctx);
 		assert.ok(!restored.activeToolsets.at(-1)?.includes("delegate"));
 		assert.match(await readFile(path.join(root, ".pi-agents", "alpha", "agent.ts"), "utf8"), /subagents: \[\]/);
 		const savedConfig = JSON.parse(await readFile(path.join(root, ".pi-agents", "config.json"), "utf8"));
@@ -1381,7 +1381,7 @@ test("Studio routes renamed labels by ID and persists description and color over
 			customActions: [component => component.handleInput("\x1bOS"), component => component.handleInput("\x1b")],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		const discovered = await discoverAgents(root);
 		assert.equal(discovered.agents.find(agent => agent.name === "alpha")?.description, "Refined responsibility");
 		assert.equal(discovered.agents.find(agent => agent.name === "alpha")?.color, "#abcdef");
@@ -1419,7 +1419,7 @@ test("Studio creates a reviewed AI draft with color using the selected model and
 		});
 		const requests = enableStudioAI(runtime, JSON.stringify(generated));
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		const dir = path.join(root, ".pi-agents", "planner");
 		const saved = (await discoverAgents(root)).agents.find(agent => agent.name === "planner");
 		assert.equal(saved?.description, "Reviewed product planner");
@@ -1461,7 +1461,7 @@ test("Studio AI prompt help reviews a draft without exposing credentials or chan
 		});
 		const requests = enableStudioAI(runtime, "Proposed: test first.");
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		const prompt = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
 		assert.match(prompt.systemPrompt, /Reviewed: write tests first/);
 		assert.ok(!JSON.stringify(requests[0].context).includes("private-agent-secret"));
@@ -1501,7 +1501,7 @@ for (const outcome of ["save", "undo", "cancel", "cancel-request", "failure"] as
 			const requests = enableStudioAI(runtime, "Suggested responsibility");
 			if (outcome === "failure") runtime.ctx.modelRegistry.getProvider = () => ({ streamSimple: () => ({ result: async () => { throw new Error("private provider error"); } }) });
 			await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-			await runtime.commands.get("agent").handler("", runtime.ctx);
+			await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 			const override = (runtime.entries.find(entry => entry.customType === "pi-agents-studio-state")?.data as any).override;
 			assert.equal(override.description, outcome === "save" ? "Suggested responsibility" : outcome === "cancel" ? "alpha" : "alpha manual edit");
 			assert.equal(override.systemPrompt, "Do not change this prompt");
@@ -1525,7 +1525,7 @@ test("cancelling AI draft review does not create an agent", async () => {
 		});
 		enableStudioAI(runtime, JSON.stringify({ name: "dev", description: "Developer", systemPrompt: "Test changes" }));
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		const dir = path.join(root, ".pi-agents", "dev");
 		await assert.rejects(readFile(path.join(dir, "agent.ts")), { code: "ENOENT" });
 		await assert.rejects(readFile(path.join(dir, "prompt.md")), { code: "ENOENT" });
@@ -1635,7 +1635,7 @@ test("/agent none restores the toolset captured before activation", async () => 
 		await makeAgent(root, "alpha", "default: true");
 		const runtime = boot(root);
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("none", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("none", runtime.ctx);
 		assert.deepEqual(runtime.activeToolsets, [["read", "session_plan"], ["read", "bash", "session_plan"]]);
 		assert.deepEqual(runtime.entries.at(-1), { customType: "pi-agents-state", data: { name: null } });
 	} finally {
@@ -1672,7 +1672,7 @@ test("Agent Studio applies a live session prompt draft without rewriting agent.t
 			],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		const prompt = await runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, runtime.ctx);
 		assert.match(prompt.systemPrompt, /experimental browser verifier/);
 		assert.ok(runtime.entries.some((entry) => entry.customType === "pi-agents-studio-state"));
@@ -1715,7 +1715,7 @@ test("Agent Studio creates an agent from the empty dashboard", async () => {
 			],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		const dir = path.join(root, ".pi-agents", "new-agent");
 		const created = (await discoverAgents(root)).agents.find(agent => agent.name === "new-agent");
 		assert.equal(created?.description, "Experiments with project tools");
@@ -1775,7 +1775,7 @@ test("manual and reviewed AI creation reject hidden/reserved names early without
 					if (method === "Create manually") runtime.ctx.ui.editor = async () => { assert.fail("invalid name must be rejected before description/prompt editing"); };
 					else enableStudioAI(runtime, generated);
 					await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-					await runtime.commands.get("agent").handler("", runtime.ctx);
+					await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 					assert.ok(runtime.notifications.some(entry => entry.level === "warning" && /excluded from discovery/.test(entry.message)));
 					assert.ok(!runtime.notifications.some(entry => /Created agent/.test(entry.message)));
 					assert.equal(existsSync(path.join(root, ".pi-agents")), false);
@@ -1945,7 +1945,7 @@ test("project source saves preserve global overlays and other projects while app
 				customActions: [component => component.handleInput("\x1bOS")],
 			});
 			await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-			await runtime.commands.get("agent").handler("", runtime.ctx);
+			await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 			const saved = (await discoverAgents(a)).agents.find(agent => agent.name === "alpha")!;
 			assert.equal(saved.description, `${revision} draft`);
 			assert.equal(saved.systemPrompt, `${revision} prompt`);
@@ -2072,7 +2072,7 @@ test("Studio migrates JSON-backed agent edits to agent.ts and removes saved over
 			customActions: [component => component.handleInput("\x1bOS")],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 
 		const filePath = path.join(dir, "agent.ts");
 		const source = await readFile(filePath, "utf8");
@@ -2104,7 +2104,7 @@ test("dynamic TypeScript definitions keep explicit config override saves", async
 			customActions: [component => component.handleInput("\x1bOS")],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		assert.match(await readFile(filePath, "utf8"), /description: "source"/);
 		const config = JSON.parse(await readFile(path.join(root, ".pi-agents", "config.json"), "utf8"));
 		assert.equal(config.agentOverrides.dynamic.description, "overridden");
@@ -2185,7 +2185,7 @@ test("Agent Studio selectors show highlighted tool and MCP details in a right pa
 			],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		assert.match(toolDetails, /Read file contents from disk\./);
 		assert.match(toolDetails, /Execute a shell command\./);
 		assert.match(toolDetails, /Choices \(1\/2\)/);
@@ -2228,7 +2228,7 @@ test("Agent Studio edits and persists an HTTP MCP endpoint URL", async () => {
 			],
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		assert.match(editedDetails, /https:\/\/designhub\.example\.com\/custom-mcp/);
 		assert.match(editedDetails, /agent-local draft/);
 		const saved = (await discoverAgents(root)).agents.find(agent => agent.name === "alpha");
@@ -2255,7 +2255,7 @@ test("agent picker renders an inspectable dashboard with metadata, MCP, tools, a
 		}));
 		const runtime = boot(root);
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
-		await runtime.commands.get("agent").handler("", runtime.ctx);
+		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
 		const dashboard = runtime.getCustomComponent();
 		assert.ok(dashboard);
 		const initialHeight = dashboard.render(120).length;

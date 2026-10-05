@@ -146,12 +146,14 @@ If the main checkout was never trusted, the normal pi trust prompt applies in th
 | Open Agent Studio / picker | `f7` (also accepts configured shortcuts) |
 | Edit or create an agent | In `f7`: select an agent and press `F4`, or press `F5` to create a canonical `agent.ts` + `prompt.md` agent |
 | Rotate to next agent | `f8` (cycles: plain pi → dev → doc → … → plain pi; also accepts configured shortcuts) |
-| Open Tasks, Runs, and Inbox | `f9` or `/subagents`; `1` / `2` / `3` selects a view |
-| Switch directly | `/agent dev`, `/agent none` |
-| Ask about the extension | `/agent:help <question>` (answered from the bundled guide) |
-| Dashboard / picker | `/agent` or `f7`; type to filter, use `Tab`/`←→` to inspect overview, tools, MCP, and prompt |
+| Open Tasks, Runs, and Inbox | `f9` or `/pi-agents:subagents`; `1` / `2` / `3` selects a view |
+| Switch directly | `/pi-agents:agent dev`, `/pi-agents:agent none` |
+| Ask about the extension | `/pi-agents:help <question>` (answered from the bundled guide) |
+| Dashboard / picker | `/pi-agents:agent` or `f7`; type to filter, use `Tab`/`←→` to inspect overview, tools, MCP, and prompt |
 | Start with agent | `pi --agent dev` |
 | Active agent indicator | footer status line: `agent:dev · 7 tools · MCP:playwright`, tinted with the agent's color |
+
+Every slash command this extension adds is namespaced `/pi-agents:<action>` (`agent`, `subagents`, `models`, `task-history`, `help`), matching Pi's own `namespace:name` convention for resources such as `/skill:name`. Namespaced names cannot be shadowed by built-ins or other packages, and Pi's fuzzy command search means typing `/models` still finds `/pi-agents:models`. The `--agent` CLI flag and the `f7`/`f8`/`f9` shortcuts are unchanged.
 
 The interactive agent's model and reasoning level are selected in pi itself (`/model`, thinking UI). A parent agent can select a fixed model and timeout for each delegated subagent as described below.
 
@@ -178,7 +180,7 @@ The interactive agent's model and reasoning level are selected in pi itself (`/m
 
 Use **Manage subagents** to add existing agents, remove assignments, or set each child's optional model and timeout. **Set model** opens a picker listing your global model aliases (`@fast → openai-codex/gpt-6-luna:minimal`), **Default (inherit parent's model)**, and **Custom…** for a hand-typed model ID. Choosing an alias stores its stable id, so renaming the alias later updates every delegation without editing agent files. Every delegation starts an isolated, replyable task thread. Existing model/timeout settings are prefilled when edited; **Default** restores inheritance of the parent's currently selected model, and a blank timeout restores no deadline. **Done** keeps changes in the Studio draft; Escape discards changes made in the subagent menu. Then apply or save the draft. Create new child agents from the dashboard first.
 
-Use **Manage model aliases** (or `/models`) to maintain the global alias table: add, rename, change the target model, or delete aliases. The table lives only in `~/.pi/agent/pi-agents/config.json`, so every project shares it. These aliases belong to pi-agents alone: they are not Pi models, never appear in `/model`, and are unrelated to Pi's own `models.json`, `enabledModels`, or virtual models. A `models` entry in a project `.pi-agents/config.json` is ignored and reported at startup.
+Use **Manage model aliases** (or `/pi-agents:models`) to maintain the global alias table: add, rename, change the target model, or delete aliases. The table lives only in `~/.pi/agent/pi-agents/config.json`, so every project shares it. These aliases belong to pi-agents alone: they are not Pi models, never appear in `/model`, and are unrelated to Pi's own `models.json`, `enabledModels`, or virtual models. A `models` entry in a project `.pi-agents/config.json` is ignored and reported at startup.
 
 ```json
 "models": [
@@ -193,7 +195,7 @@ Then reference an alias from any agent:
 subagents: [{ name: "dev-worker", model: "@fast" }]
 ```
 
-- Names accept kebab, snake, and camel case (letters, numbers, dot, underscore, hyphen) and must be unique; spaces are rejected. Use `/models` to manage them.
+- Names accept kebab, snake, and camel case (letters, numbers, dot, underscore, hyphen) and must be unique; spaces are rejected. Use `/pi-agents:models` to manage them.
 - The stored `model` is passed through exactly as written, so a thinking suffix like `:high` stays part of the value. Put the suffix on the alias target, not on the reference: `@fast` resolves, `@fast:high` does not (and says so).
 - Studio writes the stable id (`@id:m_a1b2c3d4e5f6`) into agent files; hand-typed `@fast` keeps working and is canonicalized on the next Studio save. Renaming an alias therefore needs no file edits.
 - Deleting a referenced alias asks for confirmation first. Unresolved references show `@name (missing)`, warn at delegation time, and fall back to the parent's model — a delegation never fails because of an alias.
@@ -302,7 +304,7 @@ Tasks · 2 active · 1 running · 1 to review              F9 checklist
 
 Progress counts completed checklist items. Worker activity and report arrivals update automatically; reports remain awaiting review until the main agent handles them. The agent maintains the checklist without separate Main or Next fields. The panel adapts to narrow/short terminals, summarizes extra tasks, and collapses when all work and reports are settled.
 
-Press `f9` or run `/subagents` to open three views:
+Press `f9` or run `/pi-agents:subagents` to open three views:
 
 - **Tasks** (`1`) expands all checklists, with `✓` completed, `◐` in progress, `○` pending, and `−` superseded items. It also shows worker activity, dependencies, objectives and amendments. Superseded tasks remain visible.
 - **Runs** (`2`) preserves the recursive run tree, live conversations, steering, and subtree stopping described below.
@@ -359,17 +361,17 @@ The base diff includes committed plus staged/unstaged **tracked** changes, but n
 
 Task history is always enabled: private Pi JSONL conversations and minimal metadata persist across reload/restart under Pi's agent directory (`~/.pi/agent/pi-agents-task-history/` by default). Storage is scoped to the **same root session ID and original canonical working directory**. Resume that Pi session in that directory; `/new` does not adopt another session's tasks. Reload, session replacement, and normal exit stop children but retain finalized histories. Live thread/run handles remain runtime-scoped; nested workers' own child-thread handles are not reconstructed when their parent worker restarts. Missing or invalid history is rejected on reply rather than silently starting fresh.
 
-- `/task-history list` or `subagent_control({ action: "list" })` discovers saved latest-task metadata without launching anything. Previously running, unowned executions appear interrupted; unresolved ownership is reported, not treated as a live handle.
-- `/task-history recover <runId> <new instruction>` or `subagent_control({ action: "recover", runId, message: "Inspect existing effects before continuing." })` explicitly continues the last safe checkpoint. Current parent/child permissions, latest-run ownership, conversation integrity and original workspace/worktree association are checked again. The saved model is retained; credentials/configuration/callbacks are not restored from metadata. A missing or invalid checkpoint never becomes a fresh task.
+- `/pi-agents:task-history list` or `subagent_control({ action: "list" })` discovers saved latest-task metadata without launching anything. Previously running, unowned executions appear interrupted; unresolved ownership is reported, not treated as a live handle.
+- `/pi-agents:task-history recover <runId> <new instruction>` or `subagent_control({ action: "recover", runId, message: "Inspect existing effects before continuing." })` explicitly continues the last safe checkpoint. Current parent/child permissions, latest-run ownership, conversation integrity and original workspace/worktree association are checked again. The saved model is retained; credentials/configuration/callbacks are not restored from metadata. A missing or invalid checkpoint never becomes a fresh task.
 - Checkpoints are validated snapshots, not every streamed token. Incomplete writes and unresolved tool calls retain the previous safe snapshot. **Later work may already have affected files or external services:** inspect state before continuing. Saved status cards disclose that result previews were not retained separately; older runs without retained metadata show unavailable, not running. Explorer's live transcript remains runtime-only.
-- `/task-history delete <runId>` and `/task-history prune <days>` explicitly remove history (confirmation required). Select the owning parent before deleting a task. Pruning targets terminal records older than the cutoff; there is no automatic retention timer. `subagent_control` also exposes `delete`. These operations never remove workspaces/worktrees, parent-session messages or backups.
+- `/pi-agents:task-history delete <runId>` and `/pi-agents:task-history prune <days>` explicitly remove history (confirmation required). Select the owning parent before deleting a task. Pruning targets terminal records older than the cutoff; there is no automatic retention timer. `subagent_control` also exposes `delete`. These operations never remove workspaces/worktrees, parent-session messages or backups.
 - Normal shutdown waits for child exit and finalization. **After a hard crash, execution/participant/metadata locks are never stolen automatically.** Recovery/deletion may remain blocked even with a valid checkpoint. An operator must verify all old children/writers have exited and inspect the reported lock before manual cleanup; PID absence alone is insufficient.
 
 Persistence currently requires POSIX owner-only permissions (`0700` directories, `0600` files). JSONL may contain sensitive prompts, tool output and secrets, which are retained by default until you manually delete or prune history. There is no automatic retention or cleanup policy. Metadata is allowlisted, updates/checkpoints are atomic, and checksums detect corruption—not malicious same-user resealing. This is not a security sandbox. Only latest-thread metadata is indexed; nested tasks retain their own originating working-directory scope.
 
 **Concurrency:** one execution per thread. Replies never queue or branch an older run. Use separate delegations for parallel work and explicit replies for continuity. Agent Explorer keeps each execution separately inspectable.
 
-While the parent waits, the delegation card shows the child's selected model and thinking level (including an explicit configured suffix, even after usage reports the bare model). The footer counts active runs across the hierarchy and shows the `f9` hint. Open `f9` (or `/subagents`) and select **Runs** (`2`) for the recursive run tree and live conversation pane. It includes grandchildren at every supported depth, unique run IDs for repeated agent names, optional workspace badges and path/branch/base metadata, configured/actual models, tasks, tool arguments/results, own usage, elapsed/remaining time, and stale warnings. Parents with active children show their delegation status rather than a misleading stale warning. Completed and failed runs stay selectable.
+While the parent waits, the delegation card shows the child's selected model and thinking level (including an explicit configured suffix, even after usage reports the bare model). The footer counts active runs across the hierarchy and shows the `f9` hint. Open `f9` (or `/pi-agents:subagents`) and select **Runs** (`2`) for the recursive run tree and live conversation pane. It includes grandchildren at every supported depth, unique run IDs for repeated agent names, optional workspace badges and path/branch/base metadata, configured/actual models, tasks, tool arguments/results, own usage, elapsed/remaining time, and stale warnings. Parents with active children show their delegation status rather than a misleading stale warning. Completed and failed runs stay selectable.
 
 - `↑↓` / `j k`: select runs in the tree. `←→`: collapse/expand or navigate parent/child.
 - `Enter`: focus the conversation at full width. `→`: dive into its first child; `←` / `Esc`: back. `Tab`: switch tree/conversation focus. Narrow terminals show one pane at a time.
@@ -385,7 +387,7 @@ A manual interruption or deadline returns diagnostic context to the parent so it
 
 **Try it interactively before publishing:** `node scripts/try-session-ui.mjs` opens Pi in a temporary demo project and starts two background workers using this checkout in both parent and children. It uses your normal Pi credentials/model and consumes tokens, without installing the checkout into your settings. Press F9 and use `1` Tasks, `2` Runs, or `3` Inbox; the demo leaves reports new for inspection. Ask the main agent to review/incorporate the reports when ready. The printed launcher resumes the same demo session later. Use `--prepare-only` to inspect generated files without starting Pi, or pass `--model provider/model` to choose a model.
 
-**Try model aliases without touching your settings:** `npm run try:aliases` (or `node scripts/try-model-aliases.mjs`) builds a temporary, isolated Pi home and demo project, loads this checkout through `--extension`, and seeds `@fast` / `@strong` in the *sandbox* `pi-agents/config.json`. Your real `~/.pi/agent` config and settings stay untouched; `auth.json` is copied so your own model credentials work, and tokens are consumed. Use `/models` to edit aliases, `F7 → F4 → Manage subagents → Set model` to pick one, and `F9 → 2 Runs` to confirm the model each child actually received. `--prepare-only` writes the sandbox without starting Pi.
+**Try model aliases without touching your settings:** `npm run try:aliases` (or `node scripts/try-model-aliases.mjs`) builds a temporary, isolated Pi home and demo project, loads this checkout through `--extension`, and seeds `@fast` / `@strong` in the *sandbox* `pi-agents/config.json`. Your real `~/.pi/agent` config and settings stay untouched; `auth.json` is copied so your own model credentials work, and tokens are consumed. Use `/pi-agents:models` to edit aliases, `F7 → F4 → Manage subagents → Set model` to pick one, and `F9 → 2 Runs` to confirm the model each child actually received. `--prepare-only` writes the sandbox without starting Pi.
 
 **Live integration test:** `npm run test:e2e:live` uses your existing Pi credentials with `openai-codex/gpt-6.1-sol:medium` as coordinator and `openai-codex/gpt-6-luna` as worker. It consumes provider tokens and runs in a temporary project with this checkout explicitly loaded in both parent and children. It verifies overlapping child execution, user follow-up acceptance, deferred batched results, abort/resume, reply context, and durable coordination: checklist progress, linked results, amendments, reviewed/deferred handling, and restart without relaunching workers. Use `node scripts/e2e-background.mjs --coordination-only` for the coordination scenario. RPC/audit logs remain in the printed temporary directory. Override models with `E2E_MAIN_MODEL` / `E2E_CHILD_MODEL`.
 
@@ -484,7 +486,7 @@ export default {
 }
 ```
 
-`defaultAgent` is optional. If it is unset, the last agent selection is remembered for the next `/new` session; otherwise the first agent marked `default: true` (or, when none is marked, the first discovered agent) is selected. Use `/agent none` to clear the current agent and restore plain pi for that session. Subagent deadlines are configured only on the parent's individual `subagents` entries; omitting `timeoutSeconds` means no deadline. `staleWarningMinutes` only changes the inspector warning, and `gracefulStopSeconds` controls stop escalation. Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends (e.g. `alt` keys on terminals that can't report `Ctrl+Shift`, see troubleshooting):
+`defaultAgent` is optional. If it is unset, the last agent selection is remembered for the next `/new` session; otherwise the first agent marked `default: true` (or, when none is marked, the first discovered agent) is selected. Use `/pi-agents:agent none` to clear the current agent and restore plain pi for that session. Subagent deadlines are configured only on the parent's individual `subagents` entries; omitting `timeoutSeconds` means no deadline. `staleWarningMinutes` only changes the inspector warning, and `gracefulStopSeconds` controls stop escalation. Keybinding overrides apply from the project config. Each action takes a single key **or an array of keys** — add a fallback that your terminal definitely sends (e.g. `alt` keys on terminals that can't report `Ctrl+Shift`, see troubleshooting):
 
 ```json
 {
@@ -565,14 +567,14 @@ Details:
 - Text/image results are passed through to the LLM; `structuredContent` is appended as JSON; errors surface as tool failures.
 - The picker shows `mcp:playwright` in the agent description line.
 
-## On-demand guide (`/agent:help`)
+## On-demand guide (`/pi-agents:help`)
 
 The extension bundles `guide.md` (next to `index.ts`) covering how to use the extension: switching agents, creating agents, adding tools, and configuring MCP servers.
 
-`/agent:help <question>` is the only entry point — it injects the guide into the next turn's system prompt (one-shot, no per-turn token cost) and submits your question:
+`/pi-agents:help <question>` is the only entry point — it injects the guide into the next turn's system prompt (one-shot, no per-turn token cost) and submits your question:
 
 ```
-/agent:help how do I add an MCP server?
+/pi-agents:help how do I add an MCP server?
 ```
 
 Works in plain pi or under any agent. The guide is not exposed as a tool and is never auto-added to any agent's toolset — it costs nothing unless you call the command.
@@ -590,7 +592,7 @@ The built-in shortcuts are `f7` (picker), `f8` (rotate), and `f9` (subagent insp
   ```
 
   On macOS, `alt+letter` requires the terminal to send `Option` as `Esc`: iTerm2 → Profile → Keys → **Left Option Key Sends: Esc+** (Terminal.app: *Use Option as Meta key*). This setting is independent of the key-reporting checkbox, so it won't affect herdr/tmux.
-- **Works regardless of terminal:** `/agent` (picker), `/agent dev` (direct), and `pi --agent dev` (startup). Commands don't depend on key encoding.
+- **Works regardless of terminal:** `/pi-agents:agent` (picker), `/pi-agents:agent dev` (direct), and `pi --agent dev` (startup). Commands don't depend on key encoding.
 
 ## How it works
 

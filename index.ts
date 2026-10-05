@@ -132,7 +132,7 @@ export default function (pi: ExtensionAPI) {
 	let activeName: string | undefined;
 	let activeAgent: DiscoveredAgent | undefined;
 	let sessionCwd = process.cwd();
-	/** Set by /agent:help; injects the bundled guide into the next turn only (one-shot). */
+	/** Set by /pi-agents:help; injects the bundled guide into the next turn only (one-shot). */
 	let helpPending = false;
 	/** Toolset before the first agent was applied; used to restore plain pi. */
 	let originalTools: string[] | undefined;
@@ -367,7 +367,7 @@ export default function (pi: ExtensionAPI) {
 				...workspaceMetadata(thread), status: record.status, startedAt: record.createdAt, endedAt: record.updatedAt,
 				recoverable: row.recoverable, savedAt: record.checkpoint?.at, historyError: row.error,
 				viewResult: {
-					content: [{ type: "text", text: `Saved task ${record.status}. Result preview was not retained separately. ${row.error ?? (record.checkpoint ? `Safe checkpoint: ${new Date(record.checkpoint.at).toISOString()}. Later work may already have changed the workspace.` : "No safe checkpoint exists.")} Use /task-history list or explicit recover with a new instruction.` }],
+					content: [{ type: "text", text: `Saved task ${record.status}. Result preview was not retained separately. ${row.error ?? (record.checkpoint ? `Safe checkpoint: ${new Date(record.checkpoint.at).toISOString()}. Later work may already have changed the workspace.` : "No safe checkpoint exists.")} Use /pi-agents:task-history list or explicit recover with a new instruction.` }],
 					details: { agent: record.agent, model: record.model, status: record.status, restored: true, ...workspaceMetadata(thread) },
 				} });
 		}
@@ -760,7 +760,7 @@ export default function (pi: ExtensionAPI) {
 			if (!run && details?.runId && details.status === "running" && !options.isPartial) {
 				// Old acknowledgement without matching durable metadata is NOT evidence
 				// of a live child, nor proof it completed. Do not fabricate a result.
-				return renderDelegateResult({ content: [{ type: "text", text: "No live owner or retained terminal metadata for this run. It may have completed or been interrupted. Use /task-history list; nothing was restarted." }], details: { ...details, status: "unavailable" } }, options, theme);
+				return renderDelegateResult({ content: [{ type: "text", text: "No live owner or retained terminal metadata for this run. It may have completed or been interrupted. Use /pi-agents:task-history list; nothing was restarted." }], details: { ...details, status: "unavailable" } }, options, theme);
 			}
 			return renderDelegateResult(run?.viewResult ?? result, options, theme);
 		},
@@ -825,22 +825,22 @@ export default function (pi: ExtensionAPI) {
 		execute: controlSubagent,
 	});
 
-	pi.registerCommand("task-history", {
-		description: "Saved tasks: list | status <runId> | recover <runId> <new instruction> | delete <runId> | prune <days>",
+	pi.registerCommand("pi-agents:task-history", {
+		description: "Saved tasks: /pi-agents:task-history list | status <runId> | recover <runId> <new instruction> | delete <runId> | prune <days>",
 		handler: async (args, ctx) => {
 			try {
 				if (!taskBackend) throw new Error(taskHistoryError ?? "Task history storage is unavailable. Fix storage and reload Pi.");
 				const [action = "list", runId, ...words] = args.trim().split(/\s+/).filter(Boolean);
 				if (action === "prune") {
 					const days = Number(runId);
-					if (!Number.isFinite(days) || days < 0 || !runId || words.length) throw new Error("Usage: /task-history prune <non-negative days>");
+					if (!Number.isFinite(days) || days < 0 || !runId || words.length) throw new Error("Usage: /pi-agents:task-history prune <non-negative days>");
 					if (!await ctx.ui.confirm("Delete saved task conversations?", `Remove terminal histories older than ${days} days in this root session/project. Worktrees remain.`)) return;
 					const deleted = await taskBackend.prune(Math.max(0, Math.floor(Date.now() - days * 86400000)));
 					for (const [id, run] of backgroundRuns) if (deleted.includes(run.thread.id)) backgroundRuns.delete(id);
 					ctx.ui.notify(`Deleted ${deleted.length} task histories; workspaces retained.`, "info");
 					return;
 				}
-				if (!["list", "status", "recover", "delete"].includes(action)) throw new Error("Usage: /task-history list | status <runId> | recover <runId> <new instruction> | delete <runId> | prune <days>");
+				if (!["list", "status", "recover", "delete"].includes(action)) throw new Error("Usage: /pi-agents:task-history list | status <runId> | recover <runId> <new instruction> | delete <runId> | prune <days>");
 				if (action === "delete" && !await ctx.ui.confirm("Delete task conversation?", `Delete history for ${runId}? Workspace/worktree and parent-session messages remain.`)) return;
 				const result = await controlSubagent(`history-${randomUUID()}`, { action, runId, message: words.join(" ") }, undefined, undefined, ctx);
 				ctx.ui.notify(result.content.filter(item => item.type === "text").map(item => item.text).join("\n"), "info");
@@ -1345,18 +1345,18 @@ export default function (pi: ExtensionAPI) {
 
 	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Task checklist, runs and inbox", inspectSubagents);
 
-	pi.registerCommand("subagents", {
-		description: "Session tasks, live delegated runs and result inbox",
+	pi.registerCommand("pi-agents:subagents", {
+		description: "Session tasks, live delegated runs and result inbox: /pi-agents:subagents",
 		handler: async (_args, ctx) => inspectSubagents(ctx),
 	});
 
-	pi.registerCommand("models", {
-		description: "Manage global model aliases for subagent delegations: /models",
+	pi.registerCommand("pi-agents:models", {
+		description: "Manage global model aliases for subagent delegations: /pi-agents:models",
 		handler: async (_args, ctx) => { await manageModelAliases(ctx); },
 	});
 
-	pi.registerCommand("agent", {
-		description: "Select an agent: /agent <name>, /agent for picker, /agent none to clear",
+	pi.registerCommand("pi-agents:agent", {
+		description: "Select an agent: /pi-agents:agent <name>, bare command opens the picker, none clears",
 		getArgumentCompletions: (prefix: string) => {
 			const items = ["(none)", ...agents.map((a) => a.name)];
 			return items.filter((i) => i.startsWith(prefix)).map((value) => ({ value, label: value }));
@@ -1370,12 +1370,12 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("agent:help", {
-		description: "Ask a question about pi-agents, answered from the bundled guide: /agent:help <question>",
+	pi.registerCommand("pi-agents:help", {
+		description: "Ask a question about pi-agents, answered from the bundled guide: /pi-agents:help <question>",
 		handler: async (args, ctx) => {
 			const question = args?.trim();
 			if (!question) {
-				ctx.ui.notify('Usage: /agent:help <question> — e.g. "/agent:help how do I add an MCP server?"', "info");
+				ctx.ui.notify('Usage: /pi-agents:help <question> — e.g. "/pi-agents:help how do I add an MCP server?"', "info");
 				return;
 			}
 			if (!GUIDE) {
@@ -1569,7 +1569,7 @@ export default function (pi: ExtensionAPI) {
 						text: `No retained final report for this delegation after reload. Execution history: ${run?.status ?? "unavailable"}. Nothing was restarted. Inspect saved history and current workspace before an explicit recovery with a new instruction.` });
 				}
 			}
-			if (taskBackend && (backgroundRuns.size || historyDiagnostics.length)) ctx.ui.notify(`Saved task history available: ${backgroundRuns.size} tasks, ${historyDiagnostics.length} invalid records. Use /task-history list; nothing was restarted.`, "info");
+			if (taskBackend && (backgroundRuns.size || historyDiagnostics.length)) ctx.ui.notify(`Saved task history available: ${backgroundRuns.size} tasks, ${historyDiagnostics.length} invalid records. Use /pi-agents:task-history list; nothing was restarted.`, "info");
 		} catch (error) {
 			taskHistoryError = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`Persistent task history unavailable: ${taskHistoryError}. Delegation is blocked rather than silently using temporary history.`, "warning");
