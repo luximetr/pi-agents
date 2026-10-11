@@ -14,6 +14,7 @@ import { CompletionInbox, PersistentSubagentBackend, backgroundRunStatus, type B
 import { SessionCoordination, type CoordinationResult } from "./session-coordination.ts";
 import { COORDINATION_GUIDE, SESSION_PLAN_TOOL, sessionPlanTool } from "./session-plan-tool.ts";
 import { renderSessionOverview } from "./session-overview.ts";
+import { showSubagentChat } from "./subagent-chat.ts";
 import { MAIN_ENTRY, nextBarEntry, renderAgentBar, stepBarEntry } from "./agent-bar.ts";
 import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } from "./subagent-observer.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
@@ -1333,6 +1334,30 @@ export default function (pi: ExtensionAPI) {
 
 	let barSelected = MAIN_ENTRY;
 	let barFocused = false;
+	/** Full-screen chat view of one subagent; Tab/⇧Tab switch between agents, Esc returns to main. */
+	async function openAgentChat(ctx: ExtensionContext, runId: string) {
+		inspectorOpen = true;
+		barSelected = runId;
+		try {
+			await showSubagentChat(ctx, {
+				getHandles: () => observer.handles(),
+				initialId: runId,
+				onSelect: id => { barSelected = id; renderBar?.(); },
+				send: async (id, text) => {
+					const handle = observer.handles().find(candidate => candidate.id === id);
+					const snapshot = handle?.snapshot();
+					if (handle && snapshot && (snapshot.status === "running" || snapshot.status === "stopping")) {
+						return { notice: handle.steer(text) ? "Steering sent." : "Could not steer — the run may have just finished." };
+					}
+					await refreshPersistedTasks();
+					const result = await controlSubagent(`chat-${randomUUID()}`, { action: "reply", runId: id, message: text }, undefined, undefined, ctx);
+					const details = result.details as { runId?: string; status?: string } | undefined;
+					if (!details?.runId || details.status !== "running") throw new Error(result.content.filter(part => part.type === "text").map(part => part.text).join("\n") || "Reply could not start.");
+					return { notice: "Reply started in a new run.", selectId: details.runId };
+				},
+			});
+		} finally { inspectorOpen = false; barFocused = false; barSelected = MAIN_ENTRY; renderBar?.(); }
+	}
 	let inspectorOpen = false;
 	let unsubscribeBarInput: (() => void) | undefined;
 	async function inspectSubagents(ctx: ExtensionContext, initialRunId?: string) {
@@ -1372,7 +1397,7 @@ export default function (pi: ExtensionAPI) {
 		barSelected = nextBarEntry(observer.handles().map(handle => handle.snapshot()), barSelected);
 		barFocused = false;
 		renderBar?.();
-		if (barSelected !== MAIN_ENTRY) await inspectSubagents(ctx, barSelected);
+		if (barSelected !== MAIN_ENTRY) await openAgentChat(ctx, barSelected);
 	});
 
 	pi.registerCommand("pi-agents:subagents", {
@@ -1605,7 +1630,7 @@ export default function (pi: ExtensionAPI) {
 					else barSelected = stepBarEntry(runs, barSelected, -1);
 				} else if (matchesKey(data, Key.enter)) {
 					if (barSelected === MAIN_ENTRY) barFocused = false;
-					else void inspectSubagents(ctx, barSelected).catch(() => undefined);
+					else void openAgentChat(ctx, barSelected).catch(() => undefined);
 				} else if (matchesKey(data, Key.escape)) { barFocused = false; barSelected = MAIN_ENTRY; }
 				else { barFocused = false; renderBar?.(); return undefined; }
 				renderBar?.();
