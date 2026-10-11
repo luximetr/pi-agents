@@ -1,9 +1,9 @@
 export default {
 	"name": "test-pm-agent",
 	"description": "Project manager",
-	"tools": ["read","write","edit","bash","grep","find","ls"],
+	"tools": ["read","bash","edit","write","grep","find","ls","session_plan"],
 	"mcp": [],
 	"systemPromptFile": "./prompt.md",
 	color: "#ff9f0a",
-	subagents: [{ name: "test-dev-agent", model: "openai-codex/gpt-6-luna:max" }],
+	subagents: ["test-dev-agent"],
 };
