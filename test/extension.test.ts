@@ -1,3 +1,4 @@
+import "./isolate-env.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -2178,9 +2179,9 @@ test("Agent Studio selectors show highlighted tool and MCP details in a right pa
 		});
 		await runtime.handlers.get("session_start")?.({ reason: "startup" }, runtime.ctx);
 		await runtime.commands.get("pi-agents:agent").handler("", runtime.ctx);
-		assert.match(toolDetails, /Read file contents from disk\./);
-		assert.match(toolDetails, /Execute a shell command\./);
-		assert.match(toolDetails, /Choices \(1\/3\)/);
+		assert.match(toolDetails, /Read the contents of a file/);
+		assert.match(toolDetails, /Execute a bash command/);
+		assert.match(toolDetails, /Choices \(1\/8\)/);
 		assert.doesNotMatch(toolDetails, /powershell/i);
 		assert.match(mcpDetails, /designhub/);
 		assert.match(mcpDetails, /taskhub/);

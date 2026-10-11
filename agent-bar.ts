@@ -99,3 +99,18 @@ export function renderAgentBar(runs: readonly SubagentSnapshot[], selected: stri
 	lines.push(truncateToWidth(style.dim(`  ${hint}${more > 0 ? ` · +${more} more` : ""}`), width));
 	return lines;
 }
+
+/** Only direct subagents of this session's main agent belong in the bar; nested delegations stay in Agent Explorer. */
+export function isTopLevelRun(run: Pick<SubagentSnapshot, "parentRunId">): boolean { return !run.parentRunId; }
+
+/**
+ * True only while the main prompt editor owns the keyboard: no overlay, and the
+ * focused component is an editor (settings, selectors, Studio and extension
+ * editors are not). Pi versions that cannot report focus count as focused.
+ */
+export function isMainEditorFocused(tui: { getFocusedComponent?(): unknown; hasOverlay?(): boolean } | undefined): boolean {
+	if (typeof tui?.getFocusedComponent !== "function") return true;
+	if (tui.hasOverlay?.()) return false;
+	const focused = tui.getFocusedComponent() as { getText?: unknown; setText?: unknown } | null;
+	return !!focused && typeof focused.getText === "function" && typeof focused.setText === "function";
+}

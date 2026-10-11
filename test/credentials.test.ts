@@ -1,3 +1,4 @@
+import "./isolate-env.ts";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";

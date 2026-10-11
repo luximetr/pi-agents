@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { compactToolRenderers } from "./tool-render.ts";
 import { jsonSchemaToTypeBox } from "./mcp.ts";
 import type { SessionCoordination } from "./session-coordination.ts";
 
@@ -75,6 +76,7 @@ export function sessionPlanTool(getStore: () => SessionCoordination, changed: ()
 			changed();
 			return { content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value ?? { ok: true }) }], details: {} };
 		},
+		...compactToolRenderers(SESSION_PLAN_TOOL),
 	};
 	// Opt-in: newer Pi versions read `defaultActive` and keep the tool inactive on
 	// registration. Older versions ignore the unknown property; the active set is

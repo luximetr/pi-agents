@@ -1,6 +1,7 @@
+import "./isolate-env.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MAIN_ENTRY, barRuns, nextBarEntry, renderAgentBar, shortModel, stepBarEntry, taskTitle } from "../agent-bar.ts";
+import { isMainEditorFocused, isTopLevelRun, MAIN_ENTRY, barRuns, nextBarEntry, renderAgentBar, shortModel, stepBarEntry, taskTitle } from "../agent-bar.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 const run = (id: string, over: Record<string, unknown> = {}): any => ({ id, agent: "explorer", task: "t", startedAt: 0, lastActivityAt: 0, status: "running", phase: "", partialText: "", recentEvents: [], model: "anthropic/claude-haiku-4-5:low", ...over });
@@ -76,4 +77,20 @@ test("newly spawned agents appear on top", () => {
 	assert.match(lines[0]!, /main/);
 	assert.match(lines[1]!, /explorer/);
 	assert.deepEqual(barRuns([older, newer]).map(entry => entry.id), ["new", "old"]);
+});
+
+test("bar lists only direct subagents of the main agent", () => {
+	assert.equal(isTopLevelRun({}), true);
+	assert.equal(isTopLevelRun({ parentRunId: "run-1" }), false);
+});
+
+test("bar keys work only while the main editor has focus", () => {
+	const editor = { getText: () => "", setText: () => {} };
+	const menu = { render: () => [] };
+	assert.equal(isMainEditorFocused({ getFocusedComponent: () => editor, hasOverlay: () => false }), true);
+	assert.equal(isMainEditorFocused({ getFocusedComponent: () => menu, hasOverlay: () => false }), false, "settings/selectors/Studio");
+	assert.equal(isMainEditorFocused({ getFocusedComponent: () => editor, hasOverlay: () => true }), false, "overlay open");
+	assert.equal(isMainEditorFocused({ getFocusedComponent: () => null, hasOverlay: () => false }), false);
+	assert.equal(isMainEditorFocused({}), true, "older Pi cannot report focus");
+	assert.equal(isMainEditorFocused(undefined), true);
 });

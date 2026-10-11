@@ -125,12 +125,11 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 					confirm = undefined;
 					if (data.toLowerCase() === "y") {
 						notice = pending.action === "stop" ? options.stop(pending.key) : options.remove(pending.key);
-						if (pending.action === "remove") {
-							const rest = barRuns(snapshots());
-							if (!rest.length) { close(); return; }
-							if (!rest.some(item => threadKey(item) === selectedId)) select(threadKey(rest[0]!));
-							barSelected = selectedId;
-						}
+						// Stopped and removed conversations both leave the list.
+						const rest = barRuns(snapshots());
+						if (!rest.length) { close(); return; }
+						if (!rest.some(item => threadKey(item) === selectedId)) select(threadKey(rest[0]!));
+						barSelected = selectedId;
 					}
 					tui.requestRender();
 					return;

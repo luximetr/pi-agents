@@ -1,3 +1,4 @@
+import "./isolate-env.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";

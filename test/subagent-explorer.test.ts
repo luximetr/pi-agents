@@ -1,3 +1,4 @@
+import "./isolate-env.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";

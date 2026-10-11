@@ -15,7 +15,7 @@ import { SessionCoordination, type CoordinationResult } from "./session-coordina
 import { COORDINATION_GUIDE, SESSION_PLAN_TOOL, sessionPlanTool } from "./session-plan-tool.ts";
 import { renderSessionOverview } from "./session-overview.ts";
 import { showSubagentChat } from "./subagent-chat.ts";
-import { MAIN_ENTRY, barRuns, nextBarEntry, renderAgentBar, stepBarEntry, threadKey, threadRuns } from "./agent-bar.ts";
+import { MAIN_ENTRY, isMainEditorFocused, isTopLevelRun, barRuns, nextBarEntry, renderAgentBar, stepBarEntry, threadKey, threadRuns } from "./agent-bar.ts";
 import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } from "./subagent-observer.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
@@ -33,6 +33,8 @@ import {
 	renderBackgroundCompletions,
 	type DelegateViewDetails,
 } from "./ui.ts";
+import { compactToolRenderers } from "./tool-render.ts";
+import { registerCompactBuiltins } from "./builtin-tools.ts";
 import {
 	displaySubagentModel,
 	formatArgs,
@@ -181,6 +183,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`Session state unavailable: ${coordinationError}`, "warning");
 		}
 	};
+	registerCompactBuiltins(pi);
 	pi.registerTool(sessionPlanTool(getCoordination, () => renderOverview?.()));
 	const createObserver = () => new SubagentObserver(process.env[OBSERVER_ENV], () => {
 		if (observerContext) refreshStatus(observerContext);
@@ -476,6 +479,7 @@ export default function (pi: ExtensionAPI) {
 				if (previousRun.status === "running") throw new Error("Thread is busy; use steer on the active run.");
 				if (!input.recoverRunId && previousRun.status !== "completed") throw new Error("Only completed runs can receive replies. Use explicit recover with a new instruction or start a fresh delegation.");
 			}
+			if (previousRun) dismissedThreads.delete(previousRun.thread.id);
 			if (previousRun && input.workspace !== undefined && input.workspace !== previousRun.thread.workspace) throw new Error("Cannot change workspace mode for an existing thread.");
 			const inheritedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 			const thinkingLevel = pi.getThinkingLevel?.();
@@ -815,6 +819,7 @@ export default function (pi: ExtensionAPI) {
 		const handle = observer.handles().find(handle => handle.id === runId);
 		if (action === "stop") {
 			observer.stopTree(runId, "user");
+			dismissedThreads.add(run.thread.id);
 			run.controller.abort();
 			return reply(`Stop requested for ${runId}.`);
 		}
@@ -827,7 +832,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: SUBAGENT_CONTROL_TOOL,
 		label: "Subagent control",
-		description: "List session-owned live and saved tasks, inspect status/results, steer/stop active runs, or reply to completed runs. Task history is retained by default; recover explicitly continues a saved completed/interrupted/failed task using a fresh message and the last safe checkpoint; later workspace effects may already exist. Nothing restarts automatically. Delete removes saved conversation, never workspace/worktrees. Busy threads require steer; stale run IDs are rejected.",
+		description: "List session-owned live and saved tasks, inspect status/results, steer/stop active runs (a stopped run leaves the agent list but can be continued with recover), or reply to completed runs. Task history is retained by default; recover explicitly continues a saved completed/interrupted/failed task using a fresh message and the last safe checkpoint; later workspace effects may already exist. Nothing restarts automatically. Delete removes saved conversation, never workspace/worktrees. Busy threads require steer; stale run IDs are rejected.",
 		parameters: jsonSchemaToTypeBox({
 			type: "object",
 			properties: {
@@ -838,6 +843,7 @@ export default function (pi: ExtensionAPI) {
 			required: ["action"], additionalProperties: false,
 		}),
 		execute: controlSubagent,
+		...compactToolRenderers("subagent_control"),
 	});
 
 	pi.registerCommand("pi-agents:task-history", {
@@ -922,6 +928,7 @@ export default function (pi: ExtensionAPI) {
 					if (typeof result === "string") return { content: [{ type: "text", text: result }], details: {} };
 					return result;
 				},
+				...compactToolRenderers(name),
 			});
 			customToolOwners.set(name, agent.name);
 			names.push(name);
@@ -1349,7 +1356,14 @@ export default function (pi: ExtensionAPI) {
 	let barConfirm: { action: "stop" | "remove"; key: string } | undefined;
 	/** Conversations removed from the list; their saved history is untouched. */
 	const dismissedThreads = new Set<string>();
-	const barHandles = () => observer.handles().filter(handle => !dismissedThreads.has(threadKey(handle.snapshot())));
+	/** Only direct subagents of this session's main agent; nested delegations stay in Agent Explorer. */
+	const barHandles = () => observer.handles().filter(handle => {
+		const snapshot = handle.snapshot();
+		return isTopLevelRun(snapshot) && !dismissedThreads.has(threadKey(snapshot));
+	});
+	/** Set by the bar widget: the TUI whose focus tells us whether the main editor owns the keyboard. */
+	let barTui: { getFocusedComponent?(): unknown; hasOverlay?(): boolean } | undefined;
+	const editorHasFocus = () => isMainEditorFocused(barTui);
 	const barSnapshots = () => barHandles().map(handle => handle.snapshot());
 	/** Stop the conversation's active run (and its sub-delegations). The entry stays listed. */
 	function stopConversation(key: string): string {
@@ -1357,7 +1371,8 @@ export default function (pi: ExtensionAPI) {
 		const handle = active && observer.handles().find(candidate => candidate.id === active.id);
 		if (!active || !handle) return "Already finished — nothing to stop.";
 		handle.stop("user");
-		return "Stop requested; the conversation stays in the list.";
+		dismissedThreads.add(key);
+		return "Stop requested; the agent leaves the list (history: /pi-agents:task-history). Replying or recovering brings it back.";
 	}
 	/** Hide a stopped/finished conversation. Active ones must be stopped first. */
 	function removeConversation(key: string): string {
@@ -1637,6 +1652,7 @@ export default function (pi: ExtensionAPI) {
 		if ((!ctx.mode || ctx.mode === "tui") && typeof ctx.ui.setWidget === "function") {
 			ctx.ui.setWidget("pi-agents-bar", (tui, theme) => {
 				renderBar = () => tui.requestRender();
+				barTui = tui as typeof barTui;
 				const timer = setInterval(() => tui.requestRender(), 1000);
 				timer.unref();
 				return {
@@ -1644,14 +1660,19 @@ export default function (pi: ExtensionAPI) {
 					render: width => renderAgentBar(barSnapshots(), barSelected, width, Date.now(), {
 						selected: t => theme.bold(theme.fg("accent", t)), dim: t => theme.fg("dim", t), ok: t => theme.fg("success", t),
 						fail: t => theme.fg("error", t), busy: t => theme.fg("warning", t),
-					}, barFocused, 6, barConfirm ? `${barConfirm.action === "stop" ? "Stop" : "Remove"} ${barSnapshots().find(run => threadKey(run) === barConfirm!.key)?.agent ?? "agent"}? y confirm · n/esc cancel` : undefined),
-					dispose() { clearInterval(timer); renderBar = undefined; },
+					}, barFocused && editorHasFocus(), 6, barConfirm ? `${barConfirm.action === "stop" ? "Stop" : "Remove"} ${barSnapshots().find(run => threadKey(run) === barConfirm!.key)?.agent ?? "agent"}? y confirm · n/esc cancel` : undefined),
+					dispose() { clearInterval(timer); renderBar = undefined; barTui = undefined; },
 				};
 			}, { placement: "belowEditor" });
 			// Arrow navigation: ↓ on an empty editor focuses the bar; the editor keeps arrows otherwise.
 			unsubscribeBarInput?.();
 			unsubscribeBarInput = ctx.ui.onTerminalInput?.(data => {
 				if (inspectorOpen || modalDepth > 0) return undefined;
+				// Menus, settings, selectors and other editors own the keyboard: the bar stays inert.
+				if (!editorHasFocus()) {
+					if (barFocused || barConfirm) { barFocused = false; barConfirm = undefined; renderBar?.(); }
+					return undefined;
+				}
 				// Kitty-protocol terminals also report key release; only presses navigate.
 				if (isKeyRelease(data)) return barFocused ? { consume: true } : undefined;
 				const runs = barSnapshots();
