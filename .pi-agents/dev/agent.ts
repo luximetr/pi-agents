@@ -2,7 +2,7 @@ export default {
 	name: "dev",
 	description: "Implementation agent: focused changes, tests, tight scope.",
 	color: "#30d158",
-	tools: ["read","write","edit","bash","grep","find","ls"],
+	tools: ["read","bash","edit","write","grep","find","ls","session_plan"],
 	subagents: ["dev-worker"],
 	systemPromptFile: "./prompt.md",
 	mcp: ["taskhub"],
