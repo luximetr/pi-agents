@@ -2,7 +2,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Input, Key, Markdown, isKeyRelease, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { MAIN_ENTRY, barRuns, shortModel } from "./agent-bar.ts";
+import { MAIN_ENTRY, renderAgentBar, shortModel, stepBarEntry } from "./agent-bar.ts";
 import { isActiveRun } from "./subagent-observer.ts";
 import type { RunningSubagentHandle, SubagentSnapshot } from "./subagents.ts";
 
@@ -38,21 +38,22 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 		let pageSize = 10;
 		let disposed = false;
 		let busy = false;
+		/** Bar focus: ↑/↓ move through agents and switch the view live. */
+		let barFocused = false;
+		let barSelected = options.initialId;
 		const input = new Input();
 		input.focused = true;
 		const timer = setInterval(() => tui.requestRender(), 250);
 		timer.unref();
 		const close = () => { disposed = true; clearInterval(timer); done(undefined); };
-		const ids = () => [MAIN_ENTRY, ...barRuns(options.getHandles().map(handle => handle.snapshot())).map(run => run.id)];
+		const snapshots = () => options.getHandles().map(handle => handle.snapshot());
 		const select = (id: string) => {
-			if (id === MAIN_ENTRY) { close(); return; }
+			barSelected = id;
+			if (id === MAIN_ENTRY) return;
 			selectedId = id; notice = ""; top = 0; follow = true; input.setValue("");
 			options.onSelect?.(id);
 		};
-		const cycle = (delta: number) => {
-			const list = ids();
-			select(list[(Math.max(0, list.indexOf(selectedId)) + delta + list.length) % list.length]!);
-		};
+		const step = (delta: number) => select(stepBarEntry(snapshots(), barSelected, delta));
 		const markdown = new Map<string, { text: string; width: number; lines: string[] }>();
 		const renderMarkdown = (id: string, text: string, width: number) => {
 			const cached = markdown.get(id);
@@ -71,16 +72,10 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 				const runs = options.getHandles().map(handle => handle.snapshot());
 				const run = runs.find(candidate => candidate.id === selectedId);
 
-				// Tab strip: main + every subagent, current one highlighted.
-				const strip = [MAIN_ENTRY, ...barRuns(runs).map(candidate => candidate.id)].map(id => {
-					const candidate = runs.find(item => item.id === id);
-					const label = candidate ? `${candidate.status === "failed" ? "✗" : isActiveRun(candidate) ? "◌" : "✓"} ${candidate.agent}` : "● main";
-					return id === selectedId ? theme.bold(theme.fg("accent", `[${label}]`)) : theme.fg("dim", ` ${label} `);
-				}).join(" ");
-				const header = [truncateToWidth(strip, width)];
-				if (run) header.push(truncateToWidth(theme.fg("muted", `${shortModel(run.model) || "default model"} · ${elapsed(run, now)} · ${isActiveRun(run) ? safe(run.phase || "running") : run.status}${run.currentTool ? ` · ${safe(run.currentTool)}` : ""}`), width));
-				else header.push(theme.fg("warning", "This run is no longer available."));
-				header.push(theme.fg("border", "─".repeat(width)));
+				const status = notice || (follow ? (run && isActiveRun(run) ? "LIVE" : "END") : "scroll paused");
+				const header = [truncateToWidth(run
+					? `${theme.fg(run.status === "failed" ? "error" : isActiveRun(run) ? "warning" : "success", run.status === "failed" ? "✗" : isActiveRun(run) ? "◌" : "✓")} ${theme.bold(theme.fg("accent", safe(run.agent)))} ${theme.fg("muted", `· ${shortModel(run.model) || "default model"} · ${elapsed(run, now)} · ${isActiveRun(run) ? safe(run.phase || "running") : run.status}${run.currentTool ? ` · ${safe(run.currentTool)}` : ""}`)} ${theme.fg("dim", `· ${status}`)}`
+					: theme.fg("warning", "This run is no longer available."), width), theme.fg("border", "─".repeat(width))];
 
 				const body: string[] = [];
 				if (run?.transcriptTruncated) body.push(theme.fg("warning", "[Older history omitted by retention limit]"), "");
@@ -98,29 +93,49 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 				}
 				if (run && !run.transcript?.length) body.push(theme.fg("dim", safe(run.partialText || run.recentEvents.join("\n") || "Waiting for activity…")));
 
-				const footerRows = 3;
-				pageSize = Math.max(1, rows - header.length - footerRows);
+				const bar = renderAgentBar(runs, barSelected, width, now, {
+					selected: t => theme.bold(theme.fg("accent", t)), dim: t => theme.fg("dim", t), ok: t => theme.fg("success", t),
+					fail: t => theme.fg("error", t), busy: t => theme.fg("warning", t),
+				}, barFocused, 5, barFocused ? "↑↓ switch · enter back to chat (main: leave) · esc chat" : "↓ agents · ⇥ next · ↑↓/PgUp/PgDn scroll · ⌃O tools · esc main");
+				pageSize = Math.max(1, rows - header.length - 2 - bar.length);
 				maxTop = Math.max(0, body.length - pageSize);
 				top = follow ? maxTop : Math.min(top, maxTop);
 				const view = body.slice(top, top + pageSize);
 				while (view.length < pageSize) view.push("");
 
 				const prompt = run && isActiveRun(run) ? "steer" : "reply";
-				const inputLine = `${theme.fg("accent", `${prompt} ›`)} ${input.render(Math.max(1, width - prompt.length - 3))[0] ?? ""}`;
-				const status = notice || `${follow ? (run && isActiveRun(run) ? "LIVE" : "END") : "scroll paused"} · ${expandTools ? "tools expanded" : "tools compact"}`;
-				const keys = width < 80 ? "Tab next · Esc main" : "Tab/⇧Tab switch · ↑↓/PgUp/PgDn scroll · ⌃O tools · Esc back to main";
-				return [...header, ...view, theme.fg("border", "─".repeat(width)), inputLine, theme.fg("dim", `${status} · ${keys}`)].map(line => truncateToWidth(line, width));
+				const inputLine = `${theme.fg(barFocused ? "dim" : "accent", `${prompt} ›`)} ${input.render(Math.max(1, width - prompt.length - 3))[0] ?? ""}`;
+				return [...header, ...view, theme.fg("border", "─".repeat(width)), inputLine, ...bar].map(line => truncateToWidth(line, width));
 			},
 			handleInput(data: string) {
-				if (disposed || isKeyRelease(data)) return;
+				if (disposed) return;
+				if (isKeyRelease(data)) return;
+				const runs = snapshots();
+				if (barFocused) {
+					if (matchesKey(data, Key.down)) step(1);
+					else if (matchesKey(data, Key.up)) step(-1);
+					else if (matchesKey(data, Key.enter)) { if (barSelected === MAIN_ENTRY) { close(); return; } barFocused = false; }
+					else if (matchesKey(data, Key.escape)) { barFocused = false; barSelected = selectedId; }
+					else { barFocused = false; barSelected = selectedId; }
+					tui.requestRender();
+					return;
+				}
 				if (matchesKey(data, Key.escape)) { close(); return; }
-				if (matchesKey(data, "f10") || matchesKey(data, Key.tab)) cycle(1);
-				else if (matchesKey(data, Key.shift("tab"))) cycle(-1);
+				const go = (delta: number) => {
+					const next = stepBarEntry(runs, selectedId, delta);
+					if (next === selectedId || next === MAIN_ENTRY) { close(); return; }
+					select(next);
+				};
+				if (matchesKey(data, "f10") || matchesKey(data, Key.tab)) go(1);
+				else if (matchesKey(data, Key.shift("tab"))) go(-1);
 				else if (matchesKey(data, Key.ctrl("o"))) expandTools = !expandTools;
 				else if (matchesKey(data, Key.pageUp)) { follow = false; top = Math.max(0, top - pageSize); }
 				else if (matchesKey(data, Key.pageDown)) { top = Math.min(maxTop, top + pageSize); follow = top >= maxTop; }
 				else if (matchesKey(data, Key.up)) { follow = false; top = Math.max(0, top - 1); }
-				else if (matchesKey(data, Key.down)) { top = Math.min(maxTop, top + 1); follow = top >= maxTop; }
+				else if (matchesKey(data, Key.down)) {
+					if (follow && input.getValue().length === 0) { barFocused = true; barSelected = selectedId; }
+					else { top = Math.min(maxTop, top + 1); follow = top >= maxTop; }
+				}
 				else if (matchesKey(data, Key.enter)) {
 					const text = input.getValue().trim();
 					if (text && !busy) {

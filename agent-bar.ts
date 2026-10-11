@@ -45,7 +45,7 @@ const plain: BarStyle = { selected: t => t, dim: t => t, ok: t => t, fail: t => 
  *   ▸ ● main
  *     ◌ explorer · haiku-4-5 · 12s
  */
-export function renderAgentBar(runs: readonly SubagentSnapshot[], selected: string, width: number, now = Date.now(), style: BarStyle = plain, focused = false, maxRows = 6): string[] {
+export function renderAgentBar(runs: readonly SubagentSnapshot[], selected: string, width: number, now = Date.now(), style: BarStyle = plain, focused = false, maxRows = 6, hintText?: string): string[] {
 	width = Math.max(0, Math.floor(width));
 	if (!width || !runs.length) return [];
 	const rows: Array<{ id: string; text: string; color: (t: string) => string }> = [{ id: MAIN_ENTRY, text: "● main", color: style.dim }];
@@ -70,7 +70,7 @@ export function renderAgentBar(runs: readonly SubagentSnapshot[], selected: stri
 		return truncateToWidth(on ? style.selected(text) : row.color(text), width);
 	});
 	const more = rows.length - visible.length;
-	const hint = focused ? "↑↓ move · enter open · esc back" : "↓ agents · F10 next";
+	const hint = hintText ?? (focused ? "↑↓ move · enter open · esc back" : "↓ agents · F10 next");
 	lines.push(truncateToWidth(style.dim(`  ${hint}${more > 0 ? ` · +${more} more` : ""}`), width));
 	return lines;
 }

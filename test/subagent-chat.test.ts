@@ -32,7 +32,9 @@ function open(runs: any[], initialId: string, sent: string[] = []) {
 test("chat view shows the selected agent's conversation in one screen", () => {
 	const view = open([snap("a"), snap("b", { status: "finished", endedAt: 5000 })], "a");
 	const text = view.text();
-	assert.match(text, /\[◌ agent-a\]/);
+	assert.match(text, /▸ ◌ agent-a/);
+	assert.match(text, /● main/);
+	assert.match(text, /✓ agent-b/);
 	assert.match(text, /> task for a/);
 	assert.match(text, /✓ read/);
 	assert.doesNotMatch(text, /FILE-BODY/, "tool output stays collapsed");
@@ -66,4 +68,21 @@ test("Enter sends the typed text for the viewed run", async () => {
 	assert.match(view.text(), /sent/);
 	view.component.handleInput("\x1b");
 	await view.promise;
+});
+
+test("Down at the end of the chat focuses the bar; arrows switch chats live; Enter on main leaves", async () => {
+	const view = open([snap("a"), snap("b", { status: "finished", endedAt: 5000 })], "a");
+	view.component.handleInput("\x1b[B"); // Down on empty input → focus bar
+	assert.match(view.text(), /↑↓ switch/);
+	view.component.handleInput("\x1b[B"); // → agent-b, view switches immediately
+	assert.deepEqual(view.selected, ["b"]);
+	assert.match(view.text(), /task for b/);
+	assert.match(view.text(), /▸ ✓ agent-b/);
+	view.component.handleInput("\x1b[A"); // back to a
+	view.component.handleInput("\x1b[A"); // main row highlighted, view unchanged
+	assert.match(view.text(), /▸ {0,2}● main/);
+	assert.match(view.text(), /task for a/);
+	view.component.handleInput("\r"); // Enter on main → leave
+	await view.promise;
+	assert.ok(view.closed());
 });
