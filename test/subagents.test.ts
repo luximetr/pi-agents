@@ -650,9 +650,13 @@ test("delegate renderer keeps routine results compact", () => {
 	}, { expanded: false }, theme);
 	const rendered = component.render(120).join("\n");
 	assert.match(rendered, /✓ worker completed · openai-codex\/gpt-5.3-codex-spark:high/);
-	assert.match(rendered, /line 6/);
-	assert.doesNotMatch(rendered, /line 7/);
-	assert.match(rendered, /4 more lines/);
+	assert.equal(rendered.trim().split("\n").length, 1, "collapsed result is one line");
+	assert.doesNotMatch(rendered, /line 1/);
+	const expanded = renderDelegateResult({
+		content: [{ type: "text", text: `Result from worker:\n\n${output}` }],
+		details: { agent: "worker", status: "completed" },
+	}, { expanded: true }, theme).render(120).join("\n");
+	assert.match(expanded, /line 10/);
 	assert.doesNotMatch(rendered, /Worktree/);
 });
 
@@ -800,12 +804,12 @@ test("delegation inherits the currently selected parent model unless configured 
 		const delegate = registered.find(tool => tool.name === "delegate")!;
 		async function argsFor(agent: string, expectedModel?: string): Promise<string[]> {
 			const updates: any[] = [];
-			const result = await delegate.execute(`model-${agent}`, { agent, task: "report args" }, undefined, (update: any) => updates.push(update), ctx);
+			const result = await delegate.execute(`model-${agent}`, { agent, task: "report args", background: false }, undefined, (update: any) => updates.push(update), ctx);
 			assert.equal(result.details.status, "completed");
 			if (expectedModel) {
 				assert.equal(result.details.model, expectedModel);
 				assert.ok(updates.some(update => update.details.model === expectedModel && update.details.status === "running"));
-				assert.match(delegate.renderCall({ agent, task: "report args" }, ctx.ui.theme).render(120).join("\n"), new RegExp(expectedModel));
+				assert.match(delegate.renderCall({ agent, task: "report args", background: false }, ctx.ui.theme).render(120).join("\n"), new RegExp(expectedModel));
 			}
 			const args = JSON.parse(String(result.content[0].text).split("\n\n")[1]);
 			assert.equal(args[2], "--session");
@@ -862,7 +866,7 @@ test("end to end: configured subagent timeout returns control to the parent dele
 		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
 		const delegate = registered.find((tool) => tool.name === "delegate")!;
 		assert.equal("timeoutSeconds" in delegate.parameters.properties, false);
-		const result = await delegate.execute("timeout-call", { agent: "worker", task: "hang" }, undefined, undefined, ctx);
+		const result = await delegate.execute("timeout-call", { agent: "worker", task: "hang", background: false }, undefined, undefined, ctx);
 		assert.equal(result.details.status, "timed_out");
 		assert.match(String(result.content[0].text), /timed out/);
 		assert.match(String(result.content[0].text), /Current operation: bash/);
@@ -902,7 +906,7 @@ test("end to end: delegate truncates oversized child output and preserves the fu
 		const { handlers, registered, ctx } = bootExtension(root);
 		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
 		const delegate = registered.find((tool) => tool.name === "delegate")!;
-		const result = await delegate.execute("large-output", { agent: "worker", task: "produce a report" }, undefined, undefined, ctx);
+		const result = await delegate.execute("large-output", { agent: "worker", task: "produce a report", background: false }, undefined, undefined, ctx);
 		fullOutputPath = result.details.fullOutputPath;
 		assert.equal(result.details.outputTruncated, true);
 		assert.match(String(result.content[0].text), /Output truncated/);
@@ -1054,7 +1058,7 @@ test("end to end: model aliases resolve at delegate time, warn on missing, and p
 		ctx.model = { provider: "test", id: "parent" };
 		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
 		const delegate = registered.find(tool => tool.name === "delegate")!;
-		const run = async (agent: string) => (await delegate.execute(`alias-${agent}`, { agent, task: "report model" }, undefined, undefined, ctx)).content[0].text.split("\n\n")[1];
+		const run = async (agent: string) => (await delegate.execute(`alias-${agent}`, { agent, task: "report model", background: false }, undefined, undefined, ctx)).content[0].text.split("\n\n")[1];
 		assert.equal(await run("aliased"), "test/fast-model:max");
 		// Id references survive renames: the stored name changed, the id still resolves.
 		assert.equal(await run("byId"), "test/id-model:high");

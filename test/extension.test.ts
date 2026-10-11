@@ -195,7 +195,7 @@ process.stdin.on('end',()=>process.exit(0));
 `);
 		await chmod(executable, 0o755);
 		runtime = await start("stable-session");
-		const first = await runtime.tools.get("delegate").execute("delegate", { agent: "worker", task: "original", workspace: "worktree" }, undefined, undefined, runtime.ctx);
+		const first = await runtime.tools.get("delegate").execute("delegate", { agent: "worker", task: "original", workspace: "worktree", background: false }, undefined, undefined, runtime.ctx);
 		assert.equal(first.details.status, "completed");
 		const worktree = first.details.workspaceCwd;
 		const held = await runtime.tools.get("delegate").execute("hold", { agent: "worker", task: "HOLD", background: true }, undefined, undefined, runtime.ctx);
@@ -206,11 +206,11 @@ process.stdin.on('end',()=>process.exit(0));
 		assert.equal(rows.find((row: any) => row.runId === first.details.runId).status, "completed");
 		assert.equal(rows.find((row: any) => row.runId === held.details.runId).status, "interrupted");
 		assert.equal(rows.find((row: any) => row.runId === held.details.runId).recoverable, true);
-		const restoredCard = runtime.tools.get("delegate").renderResult(held, { expanded: false }, runtime.ctx.ui.theme).render(100).join("\n");
+		const restoredCard = runtime.tools.get("delegate").renderResult(held, { expanded: true }, runtime.ctx.ui.theme).render(100).join("\n");
 		assert.match(restoredCard, /worker interrupted/);
 		assert.match(restoredCard, /Result preview was not retained/);
 		assert.doesNotMatch(restoredCard, /worker running|Started background subagent/);
-		const completedCard = runtime.tools.get("delegate").renderResult({ ...first, details: { ...first.details, status: "running" } }, { expanded: false }, runtime.ctx.ui.theme).render(100).join("\n");
+		const completedCard = runtime.tools.get("delegate").renderResult({ ...first, details: { ...first.details, status: "running" } }, { expanded: true }, runtime.ctx.ui.theme).render(100).join("\n");
 		assert.match(completedCard, /worker completed/);
 		assert.match(completedCard, /Result preview was not retained/);
 		const unknownCard = runtime.tools.get("delegate").renderResult({ ...held, details: { ...held.details, runId: "not-retained" } }, { expanded: false }, runtime.ctx.ui.theme).render(100).join("\n");
@@ -395,7 +395,7 @@ process.stdin.once("data", () => {
 					const text = stripVTControlCharacters(render(expanded).render(300).join("\n"));
 					assert.doesNotMatch(text, /\[Output truncated:|UNRENDERED_PRIVATE_TAIL|report-line-2999/);
 					assert.equal(text.split(result.details.fullOutputPath).length - 1, 1, "one full-output link, without loading its contents");
-					assert.equal(text.split("report-line-0-").length - 1, 1);
+					assert.equal(text.split("report-line-0-").length - 1, expanded ? 1 : 0);
 					if (expanded) {
 						for (const value of [`Thread ID: ${result.details.threadId}`, `Run ID: ${result.details.runId}`, "Workspace: worktree", `Cwd: ${result.details.workspaceCwd}`, `Worktree: ${result.details.worktreePath}`, `Base commit: ${result.details.workspaceBaseCommit}`, "Changes are retained; review/apply manually (not merged)."])
 							assert.ok(text.includes(value), `expanded result must include ${value}`);
@@ -790,7 +790,7 @@ test("background control exposes live and terminal status without consuming comp
 			let redraws = 0;
 			let card = "";
 			const renderCard = () => {
-				card = runtime.tools.get("delegate").renderResult(result, { expanded: false }, runtime.ctx.ui.theme, {
+				card = runtime.tools.get("delegate").renderResult(result, { expanded: true }, runtime.ctx.ui.theme, {
 					invalidate: () => { redraws++; renderCard(); },
 				}).render(100).join("\n");
 			};
@@ -843,7 +843,7 @@ test("background control exposes live and terminal status without consuming comp
 			const rendered = renderCompletion(deliveries[0], { expanded }, runtime.ctx.ui.theme).render(100).join("\n");
 			assert.match(rendered, /Background task results/);
 			for (const status of ["completed", "failed", "stopped"]) assert.match(rendered, new RegExp(`worker ${status}`));
-			assert.match(rendered, /worker-result/);
+			if (expanded) assert.match(rendered, /worker-result/);
 			assert.doesNotMatch(rendered, /\[pi-agents-completions\]/);
 		}
 		for (const details of [{ runs: ["old"] }, { results: [{ runId: "old", workspaceCwd: "/project" }] }]) {

@@ -176,6 +176,8 @@ export interface PiAgentsConfig {
 		select?: string | string[];
 		rotate?: string | string[];
 		inspect?: string | string[];
+		/** Cycle the agent bar below the editor (default f10). */
+		switch?: string | string[];
 	};
 	/** Runtime limits and inspector diagnostics for delegated subagents. */
 	subagents?: {
@@ -620,6 +622,7 @@ function loadConfigFrom(dir: string): PiAgentsConfig {
 						select: normalizeKeys(keybindings.select),
 						rotate: normalizeKeys(keybindings.rotate),
 						inspect: normalizeKeys(keybindings.inspect),
+						switch: normalizeKeys(keybindings.switch),
 				  }
 				: undefined,
 			subagents: subagents
@@ -746,6 +749,7 @@ export function loadConfig(cwd: string, opts?: DiscoverOptions): PiAgentsConfig 
 			select: projectConfig.keybindings?.select ?? globalConfig.keybindings?.select,
 			rotate: projectConfig.keybindings?.rotate ?? globalConfig.keybindings?.rotate,
 			inspect: projectConfig.keybindings?.inspect ?? globalConfig.keybindings?.inspect,
+			switch: projectConfig.keybindings?.switch ?? globalConfig.keybindings?.switch,
 		},
 		subagents: {
 			staleWarningMinutes: projectConfig.subagents?.staleWarningMinutes ?? globalConfig.subagents?.staleWarningMinutes,

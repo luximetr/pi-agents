@@ -131,15 +131,16 @@ function expandHint(): string {
 	catch { return "Ctrl+O to expand"; }
 }
 
-/** Compact, scannable header for a delegation tool call. */
+/** One-line delegation call: agent, model and a short task title. */
 export function renderDelegateCall(args: { agent?: unknown; task?: unknown; model?: unknown }, theme: Theme): Text {
 	const agent = typeof args.agent === "string" && args.agent.trim() ? args.agent.trim() : "…";
-	const task = typeof args.task === "string" && args.task.trim() ? args.task.trim() : "Waiting for task";
+	const task = typeof args.task === "string" && args.task.trim() ? args.task.trim().split("\n")[0]!.replace(/\s+/g, " ") : "";
 	const model = typeof args.model === "string" && args.model.trim() ? args.model.trim() : "default model";
+	const title = task.length > 70 ? `${task.slice(0, 69)}…` : task;
 	return new Text(
 		`${theme.fg("toolTitle", theme.bold("delegate"))} ${theme.fg("muted", "→")} ${theme.fg("accent", agent)}`
-		+ ` ${theme.fg("dim", `· ${model}`)}`
-		+ `\n${theme.fg("dim", task)}`,
+		+ theme.fg("dim", ` · ${model}`)
+		+ (title ? theme.fg("muted", ` · ${title}`) : ""),
 		0,
 		0,
 	);
@@ -162,6 +163,8 @@ export function renderDelegateResult(
 			: theme.fg("error", "✗");
 	const statusColor = status === "completed" ? "success" : status === "running" ? "warning" : "error";
 	const container = new Container();
+	// Collapsed + running: the one-line call is enough; progress lives in the agent bar.
+	if (!options.expanded && status === "running") return container;
 	container.addChild(new Text(
 		`${icon} ${theme.fg("toolTitle", theme.bold(agent))} ${theme.fg(statusColor, status === "interrupted" ? (details.restored ? "interrupted" : "stopped") : status.replace("_", " "))}`
 		+ theme.fg("muted", ` · ${details.model ?? "default model"}`)
@@ -185,7 +188,7 @@ export function renderDelegateResult(
 		}
 	}
 
-	if (body.trim()) {
+	if (body.trim() && options.expanded) {
 		container.addChild(new Spacer(1));
 		if (options.expanded && status !== "running") {
 			container.addChild(new Markdown(body.trim(), 0, 0, getMarkdownTheme()));
@@ -197,7 +200,7 @@ export function renderDelegateResult(
 			}
 		}
 	}
-	if (details.statsLine) container.addChild(new Text(theme.fg("dim", details.statsLine), 0, 0));
+	if (details.statsLine && options.expanded) container.addChild(new Text(theme.fg("dim", details.statsLine), 0, 0));
 	if (details.fullOutputPath) {
 		container.addChild(new Text(
 			theme.fg("warning", "Output truncated · full result: ") + theme.fg("accent", details.fullOutputPath),

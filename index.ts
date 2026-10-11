@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { KeyId } from "@earendil-works/pi-tui";
+import { Key, isKeyRelease, matchesKey, type KeyId } from "@earendil-works/pi-tui";
 import { applyAgentOverride, discoverAgents, findMainCheckoutRoot, findProjectAgentsDir, findProjectRoot, getGlobalAgentsDir, loadConfig, normalizeSubagents, parseAgentColor, parseEnvFile, readTrustDecision, removeAgentOverride, saveAgentOrder, saveAgentOverride, saveAgentSource, saveDefaultAgent, saveDeclarativeAgent, saveModelAliases, validateAgentName, type AgentOverride, type DeclarativeAgentInput, type DiscoveredAgent, type PiAgentsConfig } from "./agents.ts";
 import { McpManager, jsonSchemaToTypeBox } from "./mcp.ts";
 import { storeSessionHandoff, takeSessionHandoff } from "./session-handoff.ts";
@@ -14,6 +14,7 @@ import { CompletionInbox, PersistentSubagentBackend, backgroundRunStatus, type B
 import { SessionCoordination, type CoordinationResult } from "./session-coordination.ts";
 import { COORDINATION_GUIDE, SESSION_PLAN_TOOL, sessionPlanTool } from "./session-plan-tool.ts";
 import { renderSessionOverview } from "./session-overview.ts";
+import { MAIN_ENTRY, nextBarEntry, renderAgentBar, stepBarEntry } from "./agent-bar.ts";
 import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } from "./subagent-observer.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
@@ -50,6 +51,7 @@ const STUDIO_STATE_ENTRY = "pi-agents-studio-state";
 const DEFAULT_SELECT_SHORTCUT = "f7";
 const DEFAULT_ROTATE_SHORTCUT = "f8";
 const DEFAULT_INSPECT_SHORTCUT = "f9";
+const DEFAULT_SWITCH_SHORTCUT = "f10";
 const DEFAULT_STALE_WARNING_MINUTES = 5;
 const DEFAULT_GRACEFUL_STOP_SECONDS = 5;
 const DELEGATE_TOOL = "delegate";
@@ -143,6 +145,7 @@ export default function (pi: ExtensionAPI) {
 	let coordination: SessionCoordination | undefined;
 	let coordinationError: string | undefined;
 	let renderOverview: (() => void) | undefined;
+	let renderBar: (() => void) | undefined;
 	const getCoordination = () => {
 		if (!coordination) throw new Error(`Session state unavailable: ${coordinationError ?? "session has not started"}`);
 		return coordination;
@@ -509,7 +512,7 @@ export default function (pi: ExtensionAPI) {
 			const generation = sessionGeneration;
 			const runObserver = observer;
 			const runTurnStats = turnSubagentStats;
-			const background = input.background === true;
+			const background = input.background !== false;
 			const controller = new AbortController();
 			const runStartedAt = Date.now();
 			let fullRunReport: string | undefined;
@@ -734,7 +737,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: DELEGATE_TOOL,
 		label: "Delegate",
-		description: `Start a fresh, isolated task thread with an allowed subagent. workspace: shared (default) uses parent cwd; worktree creates a retained Git worktree from parent HEAD without uncommitted changes, with no automatic merge. Replies reuse the same workspace. Independent tasks, including tasks for the same agent, run in parallel. Use background: true to return runId and threadId immediately; completion arrives after the main agent settles. Use subagent_control reply on a completed run to continue its conversation, or steer while running. Results are capped at ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; oversized output is saved to a file.`,
+		description: `Start a fresh, isolated task thread with an allowed subagent. workspace: shared (default) uses parent cwd; worktree creates a retained Git worktree from parent HEAD without uncommitted changes, with no automatic merge. Replies reuse the same workspace. Independent tasks, including tasks for the same agent, run in parallel. Runs in the background by default: returns runId and threadId immediately and completion arrives after the main agent settles. Pass background: false to block on the result. Use subagent_control reply on a completed run to continue its conversation, or steer while running. Results are capped at ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; oversized output is saved to a file.`,
 		promptSnippet: "delegate: start a fresh task with an allowed specialist",
 		promptGuidelines: [
 			"Each delegate call starts a fresh conversation. Include relevant paths, constraints, and expected output.",
@@ -746,7 +749,7 @@ export default function (pi: ExtensionAPI) {
 			properties: {
 				agent: { type: "string", description: "Name of an allowed subagent" },
 				task: { type: "string", description: "Self-contained task" },
-				background: { type: "boolean", description: "Run in the background (default false)" },
+				background: { type: "boolean", description: "Run in the background (default true). Pass false only when you must block on the result." },
 				taskId: { type: "string", description: "Task ID from session_plan to link this run (optional)" },
 				itemId: { type: "string", description: "Item ID inside that task (optional)" },
 				workspace: { type: "string", enum: ["shared", "worktree"], description: "Workspace for this new thread: shared (default) uses parent cwd; worktree isolates parent HEAD without uncommitted changes. Replies reuse it; changes require manual review/apply." },
@@ -1328,8 +1331,16 @@ export default function (pi: ExtensionAPI) {
 		await rotateAgent(ctx);
 	});
 
-	async function inspectSubagents(ctx: ExtensionContext) {
+	let barSelected = MAIN_ENTRY;
+	let barFocused = false;
+	let inspectorOpen = false;
+	let unsubscribeBarInput: (() => void) | undefined;
+	async function inspectSubagents(ctx: ExtensionContext, initialRunId?: string) {
 		await refreshPersistedTasks();
+		inspectorOpen = true;
+		try { await inspectSubagentsView(ctx, initialRunId); } finally { inspectorOpen = false; barFocused = false; renderBar?.(); }
+	}
+	async function inspectSubagentsView(ctx: ExtensionContext, initialRunId?: string) {
 		await showSubagentInspector(
 			ctx,
 			() => observer.handles(),
@@ -1351,10 +1362,18 @@ export default function (pi: ExtensionAPI) {
 					return result;
 				},
 			} : undefined,
+			initialRunId,
 		);
 	}
 
-	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Tasks, runs and inbox", inspectSubagents);
+	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Tasks, runs and inbox", ctx => inspectSubagents(ctx));
+	// Cycle the agent bar (main → running/finished subagents); a subagent opens its live session view.
+	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.switch, DEFAULT_SWITCH_SHORTCUT), "Switch agent view", async ctx => {
+		barSelected = nextBarEntry(observer.handles().map(handle => handle.snapshot()), barSelected);
+		barFocused = false;
+		renderBar?.();
+		if (barSelected !== MAIN_ENTRY) await inspectSubagents(ctx, barSelected);
+	});
 
 	pi.registerCommand("pi-agents:subagents", {
 		description: "Session tasks, live delegated runs and result inbox: /pi-agents:subagents",
@@ -1415,7 +1434,7 @@ export default function (pi: ExtensionAPI) {
 			"You may delegate focused work to these allowed subagents:",
 			...lines,
 			"Use a self-contained task with relevant paths and expected output. Issue independent delegate calls together to run them in parallel.",
-			"Each delegate call starts a fresh replyable task thread; same-agent tasks can run in parallel. Use background: true to keep working while subagents run. Results arrive after your current flow finishes; do not repeatedly poll. Use subagent_control reply with the latest completed runId to answer a question or continue that conversation; replies start a new background run. Use steer while running, or list, status, stop, and result to manage runs. Recheck relevant files when continuing work because the workspace may have changed. Parallel workers share the working directory: assign separate files or worktrees to avoid conflicting edits.",
+			"Each delegate call starts a fresh replyable task thread; same-agent tasks can run in parallel. Delegations run in the background by default so you can keep working. Results arrive after your current flow finishes; do not repeatedly poll. Use subagent_control reply with the latest completed runId to answer a question or continue that conversation; replies start a new background run. Use steer while running, or list, status, stop, and result to manage runs. Recheck relevant files when continuing work because the workspace may have changed. Parallel workers share the working directory: assign separate files or worktrees to avoid conflicting edits.",
 		].join("\n");
 	}
 
@@ -1551,6 +1570,48 @@ export default function (pi: ExtensionAPI) {
 				};
 			}, { placement: "aboveEditor" });
 		}
+		if ((!ctx.mode || ctx.mode === "tui") && typeof ctx.ui.setWidget === "function") {
+			ctx.ui.setWidget("pi-agents-bar", (tui, theme) => {
+				renderBar = () => tui.requestRender();
+				const timer = setInterval(() => tui.requestRender(), 1000);
+				timer.unref();
+				return {
+					invalidate() {},
+					render: width => renderAgentBar(observer.handles().map(handle => handle.snapshot()), barSelected, width, Date.now(), {
+						selected: t => theme.bold(theme.fg("accent", t)), dim: t => theme.fg("dim", t), ok: t => theme.fg("success", t),
+						fail: t => theme.fg("error", t), busy: t => theme.fg("warning", t),
+					}, barFocused),
+					dispose() { clearInterval(timer); renderBar = undefined; },
+				};
+			}, { placement: "belowEditor" });
+			// Arrow navigation: ↓ on an empty editor focuses the bar; the editor keeps arrows otherwise.
+			unsubscribeBarInput?.();
+			unsubscribeBarInput = ctx.ui.onTerminalInput?.(data => {
+				if (inspectorOpen) return undefined;
+				// Kitty-protocol terminals also report key release; only presses navigate.
+				if (isKeyRelease(data)) return barFocused ? { consume: true } : undefined;
+				const runs = observer.handles().map(handle => handle.snapshot());
+				if (!runs.length) { barFocused = false; return undefined; }
+				if (!barFocused) {
+					if (!matchesKey(data, Key.down) || ctx.ui.getEditorText().length > 0) return undefined;
+					barFocused = true;
+					barSelected = stepBarEntry(runs, barSelected, 0);
+					renderBar?.();
+					return { consume: true };
+				}
+				if (matchesKey(data, Key.down)) barSelected = stepBarEntry(runs, barSelected, 1);
+				else if (matchesKey(data, Key.up)) {
+					if (barSelected === MAIN_ENTRY) barFocused = false;
+					else barSelected = stepBarEntry(runs, barSelected, -1);
+				} else if (matchesKey(data, Key.enter)) {
+					if (barSelected === MAIN_ENTRY) barFocused = false;
+					else void inspectSubagents(ctx, barSelected).catch(() => undefined);
+				} else if (matchesKey(data, Key.escape)) { barFocused = false; barSelected = MAIN_ENTRY; }
+				else { barFocused = false; renderBar?.(); return undefined; }
+				renderBar?.();
+				return { consume: true };
+			});
+		}
 		taskHistoryError = undefined;
 		try {
 			taskProjectCwd = fs.realpathSync(ctx.cwd);
@@ -1615,6 +1676,11 @@ export default function (pi: ExtensionAPI) {
 		inbox.close();
 		renderOverview = undefined;
 		ctx.ui.setWidget?.("pi-agents-session", undefined);
+		ctx.ui.setWidget?.("pi-agents-bar", undefined);
+		unsubscribeBarInput?.();
+		unsubscribeBarInput = undefined;
+		barFocused = false;
+		barSelected = MAIN_ENTRY;
 		for (const [runId, run] of backgroundRuns) {
 			run.controller.abort();
 			if (run.background && run.status === "running") emitBackgroundLifecycle(runId, run.agent, "aborted");

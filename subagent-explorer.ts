@@ -110,6 +110,7 @@ export function showSubagentInspector(
 	staleWarningMinutes: number,
 	rootLabel = "Main session",
 	options?: SessionInspectorOptions,
+	initialRunId?: string,
 ): Promise<void> {
 	if (ctx.mode && ctx.mode !== "tui") {
 		ctx.ui.notify("Agent Explorer requires Pi's terminal UI.", "info");
@@ -121,8 +122,9 @@ export function showSubagentInspector(
 		return Promise.resolve();
 	}
 	return ctx.ui.custom<void>((tui, theme, _kb, done) => {
-		let selectedId = (initial.find(handle => isActiveRun(handle.snapshot())) ?? initial[0])?.id ?? "";
-		let tab: "session" | "runs" | "inbox" = options ? "session" : "runs";
+		const requested = initialRunId && initial.some(handle => handle.id === initialRunId) ? initialRunId : undefined;
+		let selectedId = requested ?? (initial.find(handle => isActiveRun(handle.snapshot())) ?? initial[0])?.id ?? "";
+		let tab: "session" | "runs" | "inbox" = options && !requested ? "session" : "runs";
 		let sessionTop = 0;
 		let sessionMax = 0;
 		let selectedResultId = "";
