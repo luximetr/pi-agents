@@ -2,6 +2,7 @@
 name: "dev-worker"
 description: "Developer worker"
 color: blue
+model: haiku
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
