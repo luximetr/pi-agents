@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MAIN_ENTRY, barRuns, nextBarEntry, renderAgentBar, shortModel, stepBarEntry } from "../agent-bar.ts";
+import { MAIN_ENTRY, barRuns, nextBarEntry, renderAgentBar, shortModel, stepBarEntry, taskTitle } from "../agent-bar.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 const run = (id: string, over: Record<string, unknown> = {}): any => ({ id, agent: "explorer", task: "t", startedAt: 0, lastActivityAt: 0, status: "running", phase: "", partialText: "", recentEvents: [], model: "anthropic/claude-haiku-4-5:low", ...over });
@@ -56,4 +56,15 @@ test("runs of one thread are a single entry that goes back to working after a re
 	assert.match(lines[1]!, /^▸ ◌ explorer · haiku-4-5 · 12s/);
 	assert.equal(nextBarEntry([first, reply], MAIN_ENTRY), "t1");
 	assert.equal(barRuns([first])[0]!.status, "finished");
+});
+
+test("rows end with the conversation's task title", () => {
+	const first = run("r1", { threadId: "t1", status: "finished", startedAt: 0, endedAt: 5000, task: "## Explore the auth flow\nlook at src/" });
+	const reply = run("r2", { threadId: "t1", startedAt: 8000, task: "and the tests?" });
+	const lines = renderAgentBar([first, reply], MAIN_ENTRY, 100, 12000);
+	assert.match(lines[1]!, /· 12s · Explore the auth flow$/);
+	assert.equal(taskTitle("\x1b[31m  - fix **bug**\n"), "fix **bug**");
+	assert.equal(taskTitle(undefined), "");
+	const narrow = renderAgentBar([first], MAIN_ENTRY, 40, 12000)[1]!;
+	assert.ok(visibleWidth(narrow) <= 40);
 });

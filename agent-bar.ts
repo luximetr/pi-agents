@@ -1,8 +1,15 @@
+import { stripVTControlCharacters } from "node:util";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isActiveRun } from "./subagent-observer.ts";
 import type { SubagentSnapshot } from "./subagents.ts";
 
 export const MAIN_ENTRY = "main";
+
+/** One-line task title: first non-empty line, markdown markers and control characters removed. */
+export function taskTitle(task: string | undefined): string {
+	const line = stripVTControlCharacters(task ?? "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "").split("\n").map(part => part.trim()).find(Boolean) ?? "";
+	return line.replace(/^[#>*\-\s]+/, "").replace(/\s+/g, " ").trim();
+}
 
 /** `provider/model:level` → `model`; the bar only needs a recognizable short name. */
 export function shortModel(model?: string): string {
@@ -32,7 +39,8 @@ export function barRuns(runs: readonly SubagentSnapshot[]): SubagentSnapshot[] {
 	const keys = [...new Set(runs.map(threadKey))];
 	const entries = keys.map(key => {
 		const all = threadRuns(runs, key);
-		return { ...all[all.length - 1]!, startedAt: all[0]!.startedAt };
+		// A conversation keeps the title of its first task, even after replies.
+		return { ...all[all.length - 1]!, startedAt: all[0]!.startedAt, task: all[0]!.task };
 	});
 	const active = entries.filter(isActiveRun).sort((a, b) => a.startedAt - b.startedAt);
 	const done = entries.filter(run => !isActiveRun(run)).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
@@ -71,7 +79,7 @@ export function renderAgentBar(runs: readonly SubagentSnapshot[], selected: stri
 		const model = shortModel(run.model);
 		rows.push({
 			id: threadKey(run),
-			text: [`${mark} ${run.agent}`, model, stopped ? "stopped" : "", elapsed(run, now)].filter(Boolean).join(" · "),
+			text: [`${mark} ${run.agent}`, model, stopped ? "stopped" : "", elapsed(run, now), taskTitle(run.task)].filter(Boolean).join(" · "),
 			color: stopped ? style.dim : run.status === "failed" ? style.fail : run.status === "finished" ? style.ok : style.busy,
 		});
 	}
