@@ -2,16 +2,17 @@ import { stripVTControlCharacters } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Input, Key, Markdown, isKeyRelease, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { MAIN_ENTRY, renderAgentBar, shortModel, stepBarEntry } from "./agent-bar.ts";
+import { MAIN_ENTRY, renderAgentBar, shortModel, stepBarEntry, threadRuns } from "./agent-bar.ts";
 import { isActiveRun } from "./subagent-observer.ts";
 import type { RunningSubagentHandle, SubagentSnapshot } from "./subagents.ts";
+import type { TranscriptEntry } from "./subagent-transcript.ts";
 
 export interface SubagentChatOptions {
 	getHandles: () => RunningSubagentHandle[];
-	/** Run to show first. */
+	/** Conversation (thread key) to show first. */
 	initialId: string;
-	/** Steers a running child or replies to a finished one. May return a run to follow (e.g. a reply's new run). */
-	send: (runId: string, text: string) => Promise<{ notice: string; selectId?: string }>;
+	/** Steers the conversation's running run or replies to its latest finished run. A reply continues the same conversation. */
+	send: (latestRunId: string, text: string) => Promise<{ notice: string }>;
 	/** Called whenever the viewed entry changes so the bar can mirror it. */
 	onSelect?: (id: string) => void;
 }
@@ -69,7 +70,10 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 				const rows = Math.max(8, tui.terminal.rows ?? 24);
 				const now = Date.now();
 				const runs = options.getHandles().map(handle => handle.snapshot());
-				const run = runs.find(candidate => candidate.id === selectedId);
+				const all = threadRuns(runs, selectedId);
+				const latest = all[all.length - 1];
+				const run = latest && { ...latest, startedAt: all[0]!.startedAt };
+				const transcript: TranscriptEntry[] = all.flatMap(item => (item.transcript ?? []).map(entry => ({ ...entry, id: `${item.id}:${entry.id}` })));
 
 				const status = notice || (follow ? (run && isActiveRun(run) ? "LIVE" : "END") : "scroll paused");
 				const header = [truncateToWidth(run
@@ -77,8 +81,8 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 					: theme.fg("warning", "This run is no longer available."), width), theme.fg("border", "─".repeat(width))];
 
 				const body: string[] = [];
-				if (run?.transcriptTruncated) body.push(theme.fg("warning", "[Older history omitted by retention limit]"), "");
-				for (const entry of run?.transcript ?? []) {
+				if (all.some(item => item.transcriptTruncated)) body.push(theme.fg("warning", "[Older history omitted by retention limit]"), "");
+				for (const entry of transcript) {
 					if (entry.kind === "user") {
 						body.push(...wrapTextWithAnsi(theme.fg("accent", `> ${safe(entry.text).trim()}`), width), "");
 					} else if (entry.kind === "assistant") {
@@ -90,7 +94,7 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 						if (expandTools && entry.output) body.push(...wrapTextWithAnsi(theme.fg("toolOutput", safe(entry.output)), width - 4).map(line => `    ${line}`));
 					} else body.push(theme.fg("dim", safe(entry.text)));
 				}
-				if (run && !run.transcript?.length) body.push(theme.fg("dim", safe(run.partialText || run.recentEvents.join("\n") || "Waiting for activity…")));
+				if (run && !transcript.length) body.push(theme.fg("dim", safe(run.partialText || run.recentEvents.join("\n") || "Waiting for activity…")));
 
 				const bar = renderAgentBar(runs, barSelected, width, now, {
 					selected: t => theme.bold(theme.fg("accent", t)), dim: t => theme.fg("dim", t), ok: t => theme.fg("success", t),
@@ -145,9 +149,10 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 					if (text && !busy) {
 						busy = true;
 						input.setValue("");
-						options.send(selectedId, text).then(result => {
+						const latestRun = threadRuns(snapshots(), selectedId).at(-1);
+						if (!latestRun) { notice = "This conversation is no longer available."; busy = false; return; }
+						options.send(latestRun.id, text).then(result => {
 							notice = result.notice;
-							if (result.selectId) select(result.selectId);
 						}, error => { notice = error instanceof Error ? error.message : String(error); }).finally(() => { busy = false; tui.requestRender(); });
 					}
 				} else input.handleInput(data);

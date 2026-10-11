@@ -94,3 +94,21 @@ test("Down focuses the bar; arrows only highlight; Enter confirms the switch; Es
 	await view.promise;
 	assert.ok(view.closed());
 });
+
+test("a reply continues the same conversation: one thread, merged history, send targets the latest run", async () => {
+	const sent: string[] = [];
+	const first = snap("r1", { threadId: "t1", status: "finished", startedAt: 0, endedAt: 5000 });
+	const reply = snap("r2", { threadId: "t1", startedAt: 8000, transcript: [{ id: "e1", kind: "user", text: "follow-up question" }, { id: "e2", kind: "assistant", text: "follow-up answer" }] });
+	const view = open([first, reply], "t1", sent);
+	const text = view.text();
+	assert.match(text, /task for r1/);
+	assert.match(text, /follow-up answer/);
+	assert.equal(text.split("agent-r2").length - 1, 2, "one header + one bar row; no second item");
+	assert.match(text, /steer ›/);
+	for (const ch of "more") view.component.handleInput(ch);
+	view.component.handleInput("\r");
+	await new Promise(resolve => setTimeout(resolve, 5));
+	assert.deepEqual(sent, ["r2:more"]);
+	view.component.handleInput("\x1b");
+	await view.promise;
+});

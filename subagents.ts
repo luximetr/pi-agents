@@ -46,6 +46,8 @@ export type SubagentStopReason = "user" | "timeout" | "parent" | "session";
 
 export interface SubagentSnapshot extends Partial<SubagentWorkspaceInfo> {
 	id: string;
+	/** Replies continue a thread: every run of one conversation shares this id. */
+	threadId?: string;
 	parentRunId?: string;
 	agent: string;
 	task: string;
@@ -343,6 +345,7 @@ function runSubagentProcess(
 		const state: SubagentSnapshot = {
 			...timing?.workspaceInfo,
 			id,
+			threadId: options.threadId,
 			parentRunId: options.parentRunId,
 			agent: agentName,
 			task,
@@ -726,7 +729,7 @@ export async function runSubagent(
 	const id = options.id ?? `subagent-${nextSubagentId++}`;
 	const delegationDepth = Number(process.env.PI_AGENTS_SUBAGENT_DEPTH ?? "0");
 	const state: SubagentSnapshot = {
-		id, parentRunId: options.parentRunId, agent: agentName, task,
+		id, threadId: options.threadId, parentRunId: options.parentRunId, agent: agentName, task,
 		workspace: options.workspace,
 		model: options.model?.trim() || undefined,
 		startedAt, lastActivityAt: startedAt, deadlineAt,

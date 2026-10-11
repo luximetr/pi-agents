@@ -16,22 +16,38 @@ function elapsed(run: SubagentSnapshot, now: number): string {
 	return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
 }
 
-/** Running runs first (oldest first), then finished ones (newest first). */
+/** Bar and chat entries are conversations: every run of one thread shares a key. */
+export function threadKey(run: SubagentSnapshot): string { return run.threadId ?? run.id; }
+
+/** All runs of one conversation, oldest first. */
+export function threadRuns(runs: readonly SubagentSnapshot[], key: string): SubagentSnapshot[] {
+	return runs.filter(run => threadKey(run) === key).sort((a, b) => a.startedAt - b.startedAt);
+}
+
+/**
+ * One entry per conversation: its latest run (state), starting at the conversation's first run.
+ * Working conversations first (oldest first), then finished ones (most recently ended first).
+ */
 export function barRuns(runs: readonly SubagentSnapshot[]): SubagentSnapshot[] {
-	const active = runs.filter(isActiveRun).sort((a, b) => a.startedAt - b.startedAt);
-	const done = runs.filter(run => !isActiveRun(run)).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
+	const keys = [...new Set(runs.map(threadKey))];
+	const entries = keys.map(key => {
+		const all = threadRuns(runs, key);
+		return { ...all[all.length - 1]!, startedAt: all[0]!.startedAt };
+	});
+	const active = entries.filter(isActiveRun).sort((a, b) => a.startedAt - b.startedAt);
+	const done = entries.filter(run => !isActiveRun(run)).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
 	return [...active, ...done];
 }
 
-/** Next entry id after `current`, cycling main → runs → main. */
+/** Next entry key after `current`, cycling main → conversations → main. */
 export function nextBarEntry(runs: readonly SubagentSnapshot[], current: string): string {
-	const ids = [MAIN_ENTRY, ...barRuns(runs).map(run => run.id)];
+	const ids = [MAIN_ENTRY, ...barRuns(runs).map(threadKey)];
 	return ids[(Math.max(0, ids.indexOf(current)) + 1) % ids.length]!;
 }
 
 /** Move the selection by `delta` within main + runs, clamped (no wrap). */
 export function stepBarEntry(runs: readonly SubagentSnapshot[], current: string, delta: number): string {
-	const ids = [MAIN_ENTRY, ...barRuns(runs).map(run => run.id)];
+	const ids = [MAIN_ENTRY, ...barRuns(runs).map(threadKey)];
 	const index = Math.max(0, ids.indexOf(current));
 	return ids[Math.max(0, Math.min(ids.length - 1, index + delta))]!;
 }
@@ -53,7 +69,7 @@ export function renderAgentBar(runs: readonly SubagentSnapshot[], selected: stri
 		const mark = run.status === "failed" ? "✗" : run.status === "finished" ? "✓" : "◌";
 		const model = shortModel(run.model);
 		rows.push({
-			id: run.id,
+			id: threadKey(run),
 			text: [`${mark} ${run.agent}`, model, elapsed(run, now)].filter(Boolean).join(" · "),
 			color: run.status === "failed" ? style.fail : run.status === "finished" ? style.ok : style.busy,
 		});

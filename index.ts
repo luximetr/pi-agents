@@ -1353,7 +1353,7 @@ export default function (pi: ExtensionAPI) {
 					const result = await controlSubagent(`chat-${randomUUID()}`, { action: "reply", runId: id, message: text }, undefined, undefined, ctx);
 					const details = result.details as { runId?: string; status?: string } | undefined;
 					if (!details?.runId || details.status !== "running") throw new Error(result.content.filter(part => part.type === "text").map(part => part.text).join("\n") || "Reply could not start.");
-					return { notice: "Reply started in a new run.", selectId: details.runId };
+					return { notice: "Reply sent — the agent is back to work." };
 				},
 			});
 		} finally { inspectorOpen = false; barFocused = false; barSelected = MAIN_ENTRY; renderBar?.(); }

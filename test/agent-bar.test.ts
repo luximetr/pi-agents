@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MAIN_ENTRY, nextBarEntry, renderAgentBar, shortModel, stepBarEntry } from "../agent-bar.ts";
+import { MAIN_ENTRY, barRuns, nextBarEntry, renderAgentBar, shortModel, stepBarEntry } from "../agent-bar.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 const run = (id: string, over: Record<string, unknown> = {}): any => ({ id, agent: "explorer", task: "t", startedAt: 0, lastActivityAt: 0, status: "running", phase: "", partialText: "", recentEvents: [], model: "anthropic/claude-haiku-4-5:low", ...over });
@@ -43,4 +43,17 @@ test("nextBarEntry cycles main → active runs → finished → main", () => {
 	assert.equal(nextBarEntry(runs, MAIN_ENTRY), "live");
 	assert.equal(nextBarEntry(runs, "live"), "done");
 	assert.equal(nextBarEntry(runs, "done"), MAIN_ENTRY);
+});
+
+test("runs of one thread are a single entry that goes back to working after a reply", () => {
+	const first = run("r1", { threadId: "t1", status: "finished", startedAt: 0, endedAt: 5000 });
+	const reply = run("r2", { threadId: "t1", startedAt: 8000 });
+	const other = run("r3", { startedAt: 9000 });
+	assert.deepEqual(barRuns([first, reply, other]).map(entry => entry.id), ["r2", "r3"]);
+	assert.equal(barRuns([first, reply])[0]!.startedAt, 0, "elapsed spans the whole conversation");
+	const lines = renderAgentBar([first, reply], "t1", 100, 12000);
+	assert.equal(lines.length, 3, "main + one conversation + hint");
+	assert.match(lines[1]!, /^▸ ◌ explorer · haiku-4-5 · 12s/);
+	assert.equal(nextBarEntry([first, reply], MAIN_ENTRY), "t1");
+	assert.equal(barRuns([first])[0]!.status, "finished");
 });
