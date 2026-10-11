@@ -49,7 +49,7 @@ test("runs of one thread are a single entry that goes back to working after a re
 	const first = run("r1", { threadId: "t1", status: "finished", startedAt: 0, endedAt: 5000 });
 	const reply = run("r2", { threadId: "t1", startedAt: 8000 });
 	const other = run("r3", { startedAt: 9000 });
-	assert.deepEqual(barRuns([first, reply, other]).map(entry => entry.id), ["r2", "r3"]);
+	assert.deepEqual(barRuns([first, reply, other]).map(entry => entry.id), ["r3", "r2"]);
 	assert.equal(barRuns([first, reply])[0]!.startedAt, 0, "elapsed spans the whole conversation");
 	const lines = renderAgentBar([first, reply], "t1", 100, 12000);
 	assert.equal(lines.length, 3, "main + one conversation + hint");
@@ -67,4 +67,13 @@ test("rows end with the conversation's task title", () => {
 	assert.equal(taskTitle(undefined), "");
 	const narrow = renderAgentBar([first], MAIN_ENTRY, 40, 12000)[1]!;
 	assert.ok(visibleWidth(narrow) <= 40);
+});
+
+test("newly spawned agents appear on top", () => {
+	const older = run("old", { startedAt: 1000 });
+	const newer = run("new", { startedAt: 5000 });
+	const lines = renderAgentBar([older, newer], MAIN_ENTRY, 100, 9000);
+	assert.match(lines[0]!, /main/);
+	assert.match(lines[1]!, /explorer/);
+	assert.deepEqual(barRuns([older, newer]).map(entry => entry.id), ["new", "old"]);
 });

@@ -33,7 +33,7 @@ export function threadRuns(runs: readonly SubagentSnapshot[], key: string): Suba
 
 /**
  * One entry per conversation: its latest run (state), starting at the conversation's first run.
- * Working conversations first (oldest first), then finished ones (most recently ended first).
+ * Working conversations first (newest on top), then finished ones (most recently ended first).
  */
 export function barRuns(runs: readonly SubagentSnapshot[]): SubagentSnapshot[] {
 	const keys = [...new Set(runs.map(threadKey))];
@@ -42,7 +42,7 @@ export function barRuns(runs: readonly SubagentSnapshot[]): SubagentSnapshot[] {
 		// A conversation keeps the title of its first task, even after replies.
 		return { ...all[all.length - 1]!, startedAt: all[0]!.startedAt, task: all[0]!.task };
 	});
-	const active = entries.filter(isActiveRun).sort((a, b) => a.startedAt - b.startedAt);
+	const active = entries.filter(isActiveRun).sort((a, b) => b.startedAt - a.startedAt);
 	const done = entries.filter(run => !isActiveRun(run)).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
 	return [...active, ...done];
 }
