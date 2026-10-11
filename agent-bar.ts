@@ -66,12 +66,13 @@ export function renderAgentBar(runs: readonly SubagentSnapshot[], selected: stri
 	if (!width || !runs.length) return [];
 	const rows: Array<{ id: string; text: string; color: (t: string) => string }> = [{ id: MAIN_ENTRY, text: "● main", color: style.dim }];
 	for (const run of barRuns(runs)) {
-		const mark = run.status === "failed" ? "✗" : run.status === "finished" ? "✓" : "◌";
+		const stopped = !isActiveRun(run) && !!run.stopReason;
+		const mark = stopped ? "■" : run.status === "failed" ? "✗" : run.status === "finished" ? "✓" : "◌";
 		const model = shortModel(run.model);
 		rows.push({
 			id: threadKey(run),
-			text: [`${mark} ${run.agent}`, model, elapsed(run, now)].filter(Boolean).join(" · "),
-			color: run.status === "failed" ? style.fail : run.status === "finished" ? style.ok : style.busy,
+			text: [`${mark} ${run.agent}`, model, stopped ? "stopped" : "", elapsed(run, now)].filter(Boolean).join(" · "),
+			color: stopped ? style.dim : run.status === "failed" ? style.fail : run.status === "finished" ? style.ok : style.busy,
 		});
 	}
 	// Keep the selected row visible when the list is longer than the budget.
@@ -86,7 +87,7 @@ export function renderAgentBar(runs: readonly SubagentSnapshot[], selected: stri
 		return truncateToWidth(on ? style.selected(text) : row.color(text), width);
 	});
 	const more = rows.length - visible.length;
-	const hint = hintText ?? (focused ? "↑↓ move · enter open · esc back" : "↓ agents · F10 next");
+	const hint = hintText ?? (focused ? "↑↓ move · enter open · x stop · d remove · esc back" : "↓ agents · F10 next");
 	lines.push(truncateToWidth(style.dim(`  ${hint}${more > 0 ? ` · +${more} more` : ""}`), width));
 	return lines;
 }

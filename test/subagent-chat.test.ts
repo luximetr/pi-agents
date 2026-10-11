@@ -16,17 +16,18 @@ const snap = (id: string, over: Record<string, unknown> = {}): any => ({
 
 function open(runs: any[], initialId: string, sent: string[] = []) {
 	const selected: string[] = [];
+	const stops: string[] = []; const removes: string[] = [];
 	let component: any; let closed = false;
 	const ctx: any = { ui: { custom: (factory: any) => new Promise<void>(resolve => {
 		component = factory({ terminal: { rows: 20 }, requestRender() {} }, theme, undefined, () => { closed = true; resolve(); });
 	}) } };
 	const promise = showSubagentChat(ctx, {
 		getHandles: () => runs.map(run => ({ id: run.id, snapshot: () => run }) as any),
-		initialId, onSelect: id => selected.push(id),
+		initialId, onSelect: id => selected.push(id), stop: key => { stops.push(key); return "stopped"; }, remove: key => { removes.push(key); runs.splice(runs.findIndex(run => (run.threadId ?? run.id) === key), 1); return "removed"; },
 		send: async (id, text) => { sent.push(`${id}:${text}`); return { notice: "sent" }; },
 	});
 	const text = () => stripVTControlCharacters(component.render(80).join("\n"));
-	return { component, text, promise, selected, closed: () => closed };
+	return { component, text, promise, selected, stops, removes, closed: () => closed };
 }
 
 test("chat view shows the selected agent's conversation in one screen", () => {
@@ -109,6 +110,33 @@ test("a reply continues the same conversation: one thread, merged history, send 
 	view.component.handleInput("\r");
 	await new Promise(resolve => setTimeout(resolve, 5));
 	assert.deepEqual(sent, ["r2:more"]);
+	view.component.handleInput("\x1b");
+	await view.promise;
+});
+
+test("stop and remove need confirmation; remove only for stopped agents", async () => {
+	const live = snap("a");
+	const stopped = snap("b", { status: "failed", stopReason: "user", endedAt: 5000 });
+	const view = open([live, stopped], "a");
+	view.component.handleInput("\x18"); // ctrl+x on the running chat
+	assert.match(view.text(), /Stop agent-a\? y confirm/);
+	view.component.handleInput("n");
+	assert.deepEqual(view.stops, []);
+	view.component.handleInput("\x18");
+	view.component.handleInput("y");
+	assert.deepEqual(view.stops, ["a"]);
+	view.component.handleInput("\x1b[B"); // focus bar
+	view.component.handleInput("d"); // running → refused
+	assert.match(view.text(), /Stop the agent before removing it/);
+	assert.deepEqual(view.removes, []);
+	view.component.handleInput("\x1b[B"); // highlight stopped agent-b
+	assert.match(view.text(), /▸ ■ agent-b · haiku-4-5 · stopped/);
+	view.component.handleInput("d");
+	assert.match(view.text(), /Remove agent-b\? y confirm/);
+	view.component.handleInput("y");
+	assert.deepEqual(view.removes, ["b"]);
+	assert.doesNotMatch(view.text(), /agent-b/);
+	view.component.handleInput("\x1b");
 	view.component.handleInput("\x1b");
 	await view.promise;
 });

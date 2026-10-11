@@ -15,7 +15,7 @@ import { SessionCoordination, type CoordinationResult } from "./session-coordina
 import { COORDINATION_GUIDE, SESSION_PLAN_TOOL, sessionPlanTool } from "./session-plan-tool.ts";
 import { renderSessionOverview } from "./session-overview.ts";
 import { showSubagentChat } from "./subagent-chat.ts";
-import { MAIN_ENTRY, nextBarEntry, renderAgentBar, stepBarEntry } from "./agent-bar.ts";
+import { MAIN_ENTRY, barRuns, nextBarEntry, renderAgentBar, stepBarEntry, threadKey, threadRuns } from "./agent-bar.ts";
 import { SubagentObserver, OBSERVER_ENV, RUN_ID_ENV, isActiveRun, newRunId } from "./subagent-observer.ts";
 import { assistAgentDraft } from "./studio-assistance.ts";
 import { editAgentField } from "./studio-field-editor.ts";
@@ -1334,14 +1334,38 @@ export default function (pi: ExtensionAPI) {
 
 	let barSelected = MAIN_ENTRY;
 	let barFocused = false;
+	/** Pending stop/remove awaiting y/n in the bar. */
+	let barConfirm: { action: "stop" | "remove"; key: string } | undefined;
+	/** Conversations removed from the list; their saved history is untouched. */
+	const dismissedThreads = new Set<string>();
+	const barHandles = () => observer.handles().filter(handle => !dismissedThreads.has(threadKey(handle.snapshot())));
+	const barSnapshots = () => barHandles().map(handle => handle.snapshot());
+	/** Stop the conversation's active run (and its sub-delegations). The entry stays listed. */
+	function stopConversation(key: string): string {
+		const active = threadRuns(barSnapshots(), key).filter(isActiveRun).at(-1);
+		const handle = active && observer.handles().find(candidate => candidate.id === active.id);
+		if (!active || !handle) return "Already finished — nothing to stop.";
+		handle.stop("user");
+		return "Stop requested; the conversation stays in the list.";
+	}
+	/** Hide a stopped/finished conversation. Active ones must be stopped first. */
+	function removeConversation(key: string): string {
+		const runs = threadRuns(barSnapshots(), key);
+		if (!runs.length) return "Already removed.";
+		if (runs.some(isActiveRun)) return "Stop the agent before removing it.";
+		dismissedThreads.add(key);
+		return "Removed from the list; saved history is kept (/pi-agents:task-history).";
+	}
 	/** Full-screen chat view of one subagent; Tab/⇧Tab switch between agents, Esc returns to main. */
 	async function openAgentChat(ctx: ExtensionContext, runId: string) {
 		inspectorOpen = true;
 		barSelected = runId;
 		try {
 			await showSubagentChat(ctx, {
-				getHandles: () => observer.handles(),
+				getHandles: barHandles,
 				initialId: runId,
+				stop: stopConversation,
+				remove: removeConversation,
 				onSelect: id => { barSelected = id; renderBar?.(); },
 				send: async (id, text) => {
 					const handle = observer.handles().find(candidate => candidate.id === id);
@@ -1350,7 +1374,8 @@ export default function (pi: ExtensionAPI) {
 						return { notice: handle.steer(text) ? "Steering sent." : "Could not steer — the run may have just finished." };
 					}
 					await refreshPersistedTasks();
-					const result = await controlSubagent(`chat-${randomUUID()}`, { action: "reply", runId: id, message: text }, undefined, undefined, ctx);
+					// Completed runs take a reply; stopped/failed ones continue via explicit recovery.
+					const result = await controlSubagent(`chat-${randomUUID()}`, { action: snapshot?.status === "failed" ? "recover" : "reply", runId: id, message: text }, undefined, undefined, ctx);
 					const details = result.details as { runId?: string; status?: string } | undefined;
 					if (!details?.runId || details.status !== "running") throw new Error(result.content.filter(part => part.type === "text").map(part => part.text).join("\n") || "Reply could not start.");
 					return { notice: "Reply sent — the agent is back to work." };
@@ -1394,7 +1419,7 @@ export default function (pi: ExtensionAPI) {
 	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Tasks, runs and inbox", ctx => inspectSubagents(ctx));
 	// Cycle the agent bar (main → running/finished subagents); a subagent opens its live session view.
 	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.switch, DEFAULT_SWITCH_SHORTCUT), "Switch agent view", async ctx => {
-		barSelected = nextBarEntry(observer.handles().map(handle => handle.snapshot()), barSelected);
+		barSelected = nextBarEntry(barSnapshots(), barSelected);
 		barFocused = false;
 		renderBar?.();
 		if (barSelected !== MAIN_ENTRY) await openAgentChat(ctx, barSelected);
@@ -1602,10 +1627,10 @@ export default function (pi: ExtensionAPI) {
 				timer.unref();
 				return {
 					invalidate() {},
-					render: width => renderAgentBar(observer.handles().map(handle => handle.snapshot()), barSelected, width, Date.now(), {
+					render: width => renderAgentBar(barSnapshots(), barSelected, width, Date.now(), {
 						selected: t => theme.bold(theme.fg("accent", t)), dim: t => theme.fg("dim", t), ok: t => theme.fg("success", t),
 						fail: t => theme.fg("error", t), busy: t => theme.fg("warning", t),
-					}, barFocused),
+					}, barFocused, 6, barConfirm ? `${barConfirm.action === "stop" ? "Stop" : "Remove"} ${barSnapshots().find(run => threadKey(run) === barConfirm!.key)?.agent ?? "agent"}? y confirm · n/esc cancel` : undefined),
 					dispose() { clearInterval(timer); renderBar = undefined; },
 				};
 			}, { placement: "belowEditor" });
@@ -1615,8 +1640,19 @@ export default function (pi: ExtensionAPI) {
 				if (inspectorOpen) return undefined;
 				// Kitty-protocol terminals also report key release; only presses navigate.
 				if (isKeyRelease(data)) return barFocused ? { consume: true } : undefined;
-				const runs = observer.handles().map(handle => handle.snapshot());
-				if (!runs.length) { barFocused = false; return undefined; }
+				const runs = barSnapshots();
+				if (!runs.length) { barFocused = false; barConfirm = undefined; return undefined; }
+				if (barConfirm) {
+					const pending = barConfirm;
+					barConfirm = undefined;
+					if (data.toLowerCase() === "y") {
+						const notice = pending.action === "stop" ? stopConversation(pending.key) : removeConversation(pending.key);
+						ctx.ui.notify(notice, "info");
+						if (!barSnapshots().some(run => threadKey(run) === barSelected)) barSelected = MAIN_ENTRY;
+					}
+					renderBar?.();
+					return { consume: true };
+				}
 				if (!barFocused) {
 					if (!matchesKey(data, Key.down) || ctx.ui.getEditorText().length > 0) return undefined;
 					barFocused = true;
@@ -1624,7 +1660,12 @@ export default function (pi: ExtensionAPI) {
 					renderBar?.();
 					return { consume: true };
 				}
-				if (matchesKey(data, Key.down)) barSelected = stepBarEntry(runs, barSelected, 1);
+				if ((data === "x" || data === "d") && barSelected !== MAIN_ENTRY) {
+					const entry = threadRuns(runs, barSelected).at(-1);
+					if (entry && data === "x" && !isActiveRun(entry)) ctx.ui.notify("Already finished — nothing to stop.", "info");
+					else if (entry && data === "d" && isActiveRun(entry)) ctx.ui.notify("Stop the agent before removing it.", "info");
+					else if (entry) barConfirm = { action: data === "x" ? "stop" : "remove", key: barSelected };
+				} else if (matchesKey(data, Key.down)) barSelected = stepBarEntry(runs, barSelected, 1);
 				else if (matchesKey(data, Key.up)) {
 					if (barSelected === MAIN_ENTRY) barFocused = false;
 					else barSelected = stepBarEntry(runs, barSelected, -1);
@@ -1705,6 +1746,8 @@ export default function (pi: ExtensionAPI) {
 		unsubscribeBarInput?.();
 		unsubscribeBarInput = undefined;
 		barFocused = false;
+		barConfirm = undefined;
+		dismissedThreads.clear();
 		barSelected = MAIN_ENTRY;
 		for (const [runId, run] of backgroundRuns) {
 			run.controller.abort();

@@ -2,7 +2,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Input, Key, Markdown, isKeyRelease, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { MAIN_ENTRY, renderAgentBar, shortModel, stepBarEntry, threadRuns } from "./agent-bar.ts";
+import { MAIN_ENTRY, barRuns, renderAgentBar, shortModel, stepBarEntry, threadKey, threadRuns } from "./agent-bar.ts";
 import { isActiveRun } from "./subagent-observer.ts";
 import type { RunningSubagentHandle, SubagentSnapshot } from "./subagents.ts";
 import type { TranscriptEntry } from "./subagent-transcript.ts";
@@ -13,6 +13,10 @@ export interface SubagentChatOptions {
 	initialId: string;
 	/** Steers the conversation's running run or replies to its latest finished run. A reply continues the same conversation. */
 	send: (latestRunId: string, text: string) => Promise<{ notice: string }>;
+	/** Stops the conversation's active run (history stays). Returns a notice. */
+	stop: (key: string) => string;
+	/** Removes a stopped/finished conversation from the list. Returns a notice. */
+	remove: (key: string) => string;
 	/** Called whenever the viewed entry changes so the bar can mirror it. */
 	onSelect?: (id: string) => void;
 }
@@ -42,6 +46,8 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 		/** Bar focus: ↑/↓ move through agents and switch the view live. */
 		let barFocused = false;
 		let barSelected = options.initialId;
+		/** Pending destructive action awaiting y/n. */
+		let confirm: { action: "stop" | "remove"; key: string } | undefined;
 		const input = new Input();
 		input.focused = true;
 		const timer = setInterval(() => tui.requestRender(), 250);
@@ -77,7 +83,7 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 
 				const status = notice || (follow ? (run && isActiveRun(run) ? "LIVE" : "END") : "scroll paused");
 				const header = [truncateToWidth(run
-					? `${theme.fg(run.status === "failed" ? "error" : isActiveRun(run) ? "warning" : "success", run.status === "failed" ? "✗" : isActiveRun(run) ? "◌" : "✓")} ${theme.bold(theme.fg("accent", safe(run.agent)))} ${theme.fg("muted", `· ${shortModel(run.model) || "default model"} · ${elapsed(run, now)} · ${isActiveRun(run) ? safe(run.phase || "running") : run.status}${run.currentTool ? ` · ${safe(run.currentTool)}` : ""}`)} ${theme.fg("dim", `· ${status}`)}`
+					? `${theme.fg(run.status === "failed" ? "error" : isActiveRun(run) ? "warning" : "success", run.status === "failed" ? "✗" : isActiveRun(run) ? "◌" : "✓")} ${theme.bold(theme.fg("accent", safe(run.agent)))} ${notice ? theme.fg("warning", `· ${notice}`) : `${theme.fg("muted", `· ${shortModel(run.model) || "default model"} · ${elapsed(run, now)} · ${isActiveRun(run) ? safe(run.phase || "running") : run.status}${run.currentTool ? ` · ${safe(run.currentTool)}` : ""}`)} ${theme.fg("dim", `· ${status}`)}`}`
 					: theme.fg("warning", "This run is no longer available."), width), theme.fg("border", "─".repeat(width))];
 
 				const body: string[] = [];
@@ -99,7 +105,7 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 				const bar = renderAgentBar(runs, barSelected, width, now, {
 					selected: t => theme.bold(theme.fg("accent", t)), dim: t => theme.fg("dim", t), ok: t => theme.fg("success", t),
 					fail: t => theme.fg("error", t), busy: t => theme.fg("warning", t),
-				}, barFocused, 5, barFocused ? "↑↓ choose · enter switch (main: leave) · esc cancel" : "↓ agents · ⇥ next · ↑↓/PgUp/PgDn scroll · ⌃O tools · esc main");
+				}, barFocused, 5, confirm ? `${confirm.action === "stop" ? "Stop" : "Remove"} ${safe(runs.find(item => threadRuns([item], confirm!.key).length)?.agent ?? "agent")}? y confirm · n/esc cancel` : barFocused ? "↑↓ choose · enter switch (main: leave) · x stop · d remove · esc cancel" : "↓ agents · ⇥ next · ↑↓/PgUp/PgDn scroll · ⌃O tools · esc main");
 				pageSize = Math.max(1, rows - header.length - 2 - bar.length);
 				maxTop = Math.max(0, body.length - pageSize);
 				top = follow ? maxTop : Math.min(top, maxTop);
@@ -114,7 +120,31 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 				if (disposed) return;
 				if (isKeyRelease(data)) return;
 				const runs = snapshots();
+				if (confirm) {
+					const pending = confirm;
+					confirm = undefined;
+					if (data.toLowerCase() === "y") {
+						notice = pending.action === "stop" ? options.stop(pending.key) : options.remove(pending.key);
+						if (pending.action === "remove") {
+							const rest = barRuns(snapshots());
+							if (!rest.length) { close(); return; }
+							if (!rest.some(item => threadKey(item) === selectedId)) select(threadKey(rest[0]!));
+							barSelected = selectedId;
+						}
+					}
+					tui.requestRender();
+					return;
+				}
+				const ask = (action: "stop" | "remove", key: string) => {
+					const all = threadRuns(runs, key);
+					const latestRun = all[all.length - 1];
+					if (!latestRun) return;
+					if (action === "stop" && !isActiveRun(latestRun)) { notice = "Already finished — nothing to stop."; return; }
+					if (action === "remove" && isActiveRun(latestRun)) { notice = "Stop the agent before removing it."; return; }
+					confirm = { action, key };
+				};
 				if (barFocused) {
+					if (data === "x" || data === "d") { if (barSelected !== MAIN_ENTRY) ask(data === "x" ? "stop" : "remove", barSelected); tui.requestRender(); return; }
 					// Arrows only move the highlight; Enter confirms the switch.
 					if (matchesKey(data, Key.down)) barSelected = stepBarEntry(runs, barSelected, 1);
 					else if (matchesKey(data, Key.up)) barSelected = stepBarEntry(runs, barSelected, -1);
@@ -129,6 +159,7 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 					return;
 				}
 				if (matchesKey(data, Key.escape)) { close(); return; }
+				if (matchesKey(data, Key.ctrl("x"))) { ask("stop", selectedId); tui.requestRender(); return; }
 				const go = (delta: number) => {
 					const next = stepBarEntry(runs, selectedId, delta);
 					if (next === selectedId || next === MAIN_ENTRY) { close(); return; }
