@@ -53,7 +53,6 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 			selectedId = id; notice = ""; top = 0; follow = true; input.setValue("");
 			options.onSelect?.(id);
 		};
-		const step = (delta: number) => select(stepBarEntry(snapshots(), barSelected, delta));
 		const markdown = new Map<string, { text: string; width: number; lines: string[] }>();
 		const renderMarkdown = (id: string, text: string, width: number) => {
 			const cached = markdown.get(id);
@@ -96,7 +95,7 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 				const bar = renderAgentBar(runs, barSelected, width, now, {
 					selected: t => theme.bold(theme.fg("accent", t)), dim: t => theme.fg("dim", t), ok: t => theme.fg("success", t),
 					fail: t => theme.fg("error", t), busy: t => theme.fg("warning", t),
-				}, barFocused, 5, barFocused ? "↑↓ switch · enter back to chat (main: leave) · esc chat" : "↓ agents · ⇥ next · ↑↓/PgUp/PgDn scroll · ⌃O tools · esc main");
+				}, barFocused, 5, barFocused ? "↑↓ choose · enter switch (main: leave) · esc cancel" : "↓ agents · ⇥ next · ↑↓/PgUp/PgDn scroll · ⌃O tools · esc main");
 				pageSize = Math.max(1, rows - header.length - 2 - bar.length);
 				maxTop = Math.max(0, body.length - pageSize);
 				top = follow ? maxTop : Math.min(top, maxTop);
@@ -112,9 +111,14 @@ export function showSubagentChat(ctx: ExtensionContext, options: SubagentChatOpt
 				if (isKeyRelease(data)) return;
 				const runs = snapshots();
 				if (barFocused) {
-					if (matchesKey(data, Key.down)) step(1);
-					else if (matchesKey(data, Key.up)) step(-1);
-					else if (matchesKey(data, Key.enter)) { if (barSelected === MAIN_ENTRY) { close(); return; } barFocused = false; }
+					// Arrows only move the highlight; Enter confirms the switch.
+					if (matchesKey(data, Key.down)) barSelected = stepBarEntry(runs, barSelected, 1);
+					else if (matchesKey(data, Key.up)) barSelected = stepBarEntry(runs, barSelected, -1);
+					else if (matchesKey(data, Key.enter)) {
+						if (barSelected === MAIN_ENTRY) { close(); return; }
+						barFocused = false;
+						if (barSelected !== selectedId) select(barSelected);
+					}
 					else if (matchesKey(data, Key.escape)) { barFocused = false; barSelected = selectedId; }
 					else { barFocused = false; barSelected = selectedId; }
 					tui.requestRender();
