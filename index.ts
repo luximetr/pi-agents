@@ -1257,7 +1257,18 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** Show the dashboard; Studio actions return to it after closing. */
-	async function showPicker(ctx: ExtensionContext) {
+	/** Agent Studio and its dialogs own the keyboard: the agent bar and subagent controls stay inert meanwhile. */
+	let modalDepth = 0;
+	async function withModal<T>(run: () => Promise<T>): Promise<T> {
+		modalDepth++;
+		barFocused = false;
+		barConfirm = undefined;
+		renderBar?.();
+		try { return await run(); }
+		finally { modalDepth--; renderBar?.(); }
+	}
+	function showPicker(ctx: ExtensionContext) { return withModal(() => showPickerBody(ctx)); }
+	async function showPickerBody(ctx: ExtensionContext) {
 		while (true) {
 			const result = await showAgentSelector(ctx, agents, activeName, selectorOptions(ctx));
 			if (result === null) return;
@@ -1358,6 +1369,7 @@ export default function (pi: ExtensionAPI) {
 	}
 	/** Full-screen chat view of one subagent; Tab/⇧Tab switch between agents, Esc returns to main. */
 	async function openAgentChat(ctx: ExtensionContext, runId: string) {
+		if (modalDepth > 0) return;
 		inspectorOpen = true;
 		barSelected = runId;
 		try {
@@ -1386,6 +1398,7 @@ export default function (pi: ExtensionAPI) {
 	let inspectorOpen = false;
 	let unsubscribeBarInput: (() => void) | undefined;
 	async function inspectSubagents(ctx: ExtensionContext, initialRunId?: string) {
+		if (modalDepth > 0) return;
 		await refreshPersistedTasks();
 		inspectorOpen = true;
 		try { await inspectSubagentsView(ctx, initialRunId); } finally { inspectorOpen = false; barFocused = false; renderBar?.(); }
@@ -1419,6 +1432,7 @@ export default function (pi: ExtensionAPI) {
 	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.inspect, DEFAULT_INSPECT_SHORTCUT), "Tasks, runs and inbox", ctx => inspectSubagents(ctx));
 	// Cycle the agent bar (main → running/finished subagents); a subagent opens its live session view.
 	registerConfiguredShortcuts(normalizeShortcutKeys(config.keybindings?.switch, DEFAULT_SWITCH_SHORTCUT), "Switch agent view", async ctx => {
+		if (modalDepth > 0) return;
 		barSelected = nextBarEntry(barSnapshots(), barSelected);
 		barFocused = false;
 		renderBar?.();
@@ -1432,7 +1446,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("pi-agents:models", {
 		description: "Manage global model aliases for subagent delegations: /pi-agents:models",
-		handler: async (_args, ctx) => { await manageModelAliases(ctx); },
+		handler: async (_args, ctx) => { await withModal(() => manageModelAliases(ctx)); },
 	});
 
 	pi.registerCommand("pi-agents:agent", {
@@ -1637,7 +1651,7 @@ export default function (pi: ExtensionAPI) {
 			// Arrow navigation: ↓ on an empty editor focuses the bar; the editor keeps arrows otherwise.
 			unsubscribeBarInput?.();
 			unsubscribeBarInput = ctx.ui.onTerminalInput?.(data => {
-				if (inspectorOpen) return undefined;
+				if (inspectorOpen || modalDepth > 0) return undefined;
 				// Kitty-protocol terminals also report key release; only presses navigate.
 				if (isKeyRelease(data)) return barFocused ? { consume: true } : undefined;
 				const runs = barSnapshots();
