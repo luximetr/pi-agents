@@ -30,6 +30,8 @@ function resultText(result: { content?: Array<{ type: string; text?: string }> }
  */
 export function compactToolRenderers(title: string, summarize: (args: unknown) => string = summarizeArgs) {
 	return {
+		/** "self": no padded, coloured shell box around the call line (Pi's default for read/bash/etc.). */
+		renderShell: "self" as const,
 		renderCall(args: unknown, theme: Theme) {
 			const summary = summarize(args);
 			return new Text(theme.fg("toolTitle", theme.bold(title)) + (summary ? theme.fg("muted", ` ${summary}`) : ""), 0, 0);
