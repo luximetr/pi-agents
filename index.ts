@@ -399,8 +399,8 @@ export default function (pi: ExtensionAPI) {
 	let sessionGeneration = 0;
 	// Orca observes this shared lifecycle channel to keep the pane working
 	// after the main agent settles. Use run IDs, not child process IDs.
-	const emitBackgroundLifecycle = (runId: string, agent: string, status: "started" | "completed" | "failed" | "aborted") => {
-		pi.events?.emit("task:subagent:lifecycle", { runId, agent, status });
+	const emitBackgroundLifecycle = (runId: string, agent: string, status: "started" | "completed" | "failed" | "aborted", description?: string) => {
+		pi.events?.emit("task:subagent:lifecycle", { runId, agent, status, ...(description ? { description } : {}) });
 	};
 	const completionMessage = (results: BackgroundResult[]) => ({
 		customType: "pi-agents-completions",
@@ -524,7 +524,7 @@ export default function (pi: ExtensionAPI) {
 			backgroundRuns.set(runId, { ...runWorkspace, agent: agentName, task, controller, thread, background, status: "running", model: selectedModel, startedAt: runStartedAt,
 				deadlineAt: timeoutSeconds === undefined ? undefined : runStartedAt + timeoutSeconds * 1000 });
 			renderOverview?.();
-			if (background) emitBackgroundLifecycle(runId, agentName, "started");
+			emitBackgroundLifecycle(runId, agentName, "started", task.slice(0, 120));
 			const executeRun = async (): Promise<{ content: { type: "text"; text: string }[]; details: DelegateStatsDetails }> => {
 			try {
 				observerContext = ctx;
@@ -723,8 +723,8 @@ export default function (pi: ExtensionAPI) {
 				const invalidate = run.invalidate;
 				run.invalidate = undefined;
 				try { invalidate?.(); } catch { /* Rendering must not suppress completion delivery. */ }
+				emitBackgroundLifecycle(runId, agentName, run.status === "completed" ? "completed" : run.status === "interrupted" ? "aborted" : "failed");
 				if (background) {
-					emitBackgroundLifecycle(runId, agentName, run.status === "completed" ? "completed" : run.status === "interrupted" ? "aborted" : "failed");
 					inbox.push({ ...runWorkspace, runId, agent: agentName, task, text: run.result, details: result.details });
 				}
 				renderOverview?.();
@@ -1786,7 +1786,7 @@ export default function (pi: ExtensionAPI) {
 		barSelected = MAIN_ENTRY;
 		for (const [runId, run] of backgroundRuns) {
 			run.controller.abort();
-			if (run.background && run.status === "running") emitBackgroundLifecycle(runId, run.agent, "aborted");
+			if (run.status === "running") emitBackgroundLifecycle(runId, run.agent, "aborted");
 		}
 		backgroundRuns.clear();
 		inbox = createInbox();

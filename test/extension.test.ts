@@ -198,6 +198,7 @@ process.stdin.on('end',()=>process.exit(0));
 		runtime = await start("stable-session");
 		const first = await runtime.tools.get("delegate").execute("delegate", { agent: "worker", task: "original", workspace: "worktree", background: false }, undefined, undefined, runtime.ctx);
 		assert.equal(first.details.status, "completed");
+		assert.deepEqual(runtime.lifecycleEvents.filter(event => event.data.runId === first.details.runId).map(event => event.data.status), ["started", "completed"], "foreground runs are visible to Orca too");
 		const worktree = first.details.workspaceCwd;
 		const held = await runtime.tools.get("delegate").execute("hold", { agent: "worker", task: "HOLD", background: true }, undefined, undefined, runtime.ctx);
 		await waitFor(async () => (await list()).some((row: any) => row.runId === held.details.runId && row.savedAt));
@@ -798,7 +799,7 @@ test("background control exposes live and terminal status without consuming comp
 			renderCard();
 			assert.match(card, /worker running/);
 			assert.deepEqual(runtime.lifecycleEvents.at(-1), {
-				channel: "task:subagent:lifecycle", data: { runId, agent: "worker", status: "started" },
+				channel: "task:subagent:lifecycle", data: { runId, agent: "worker", description: task, status: "started" },
 			});
 			const initial = await readStatus(runId);
 			assert.equal(initial.status, "running");
@@ -823,7 +824,7 @@ test("background control exposes live and terminal status without consuming comp
 			renderCard();
 			assert.equal(redraws, 1);
 			assert.deepEqual(runtime.lifecycleEvents.filter(event => event.data.runId === runId), [
-				{ channel: "task:subagent:lifecycle", data: { runId, agent: "worker", status: "started" } },
+				{ channel: "task:subagent:lifecycle", data: { runId, agent: "worker", description: task, status: "started" } },
 				{ channel: "task:subagent:lifecycle", data: { runId, agent: "worker", status: terminalStatus === "interrupted" ? "aborted" : terminalStatus } },
 			]);
 			assert.ok(terminal.endedAt >= terminal.startedAt);
@@ -855,7 +856,7 @@ test("background control exposes live and terminal status without consuming comp
 		await waitFor(async () => (await readStatus(pending.details.runId)).currentTool === "read");
 		await runtime.handlers.get("session_shutdown")?.({}, runtime.ctx);
 		assert.deepEqual(runtime.lifecycleEvents.filter(event => event.data.runId === pending.details.runId), [
-			{ channel: "task:subagent:lifecycle", data: { runId: pending.details.runId, agent: "worker", status: "started" } },
+			{ channel: "task:subagent:lifecycle", data: { runId: pending.details.runId, agent: "worker", description: "shutdown", status: "started" } },
 			{ channel: "task:subagent:lifecycle", data: { runId: pending.details.runId, agent: "worker", status: "aborted" } },
 		]);
 		assert.equal(runtime.lifecycleEvents.length, 8, "each run emits exactly one start and terminal event");
